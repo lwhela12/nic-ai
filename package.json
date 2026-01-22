@@ -1,0 +1,43 @@
+{
+  "name": "claude-pi",
+  "version": "0.1.0",
+  "description": "Personal Injury Case Management powered by Claude",
+  "type": "module",
+  "bin": {
+    "claude-pi": "./bin/claude-pi.js"
+  },
+  "scripts": {
+    "dev": "concurrently \"cd server && bun run --watch index.ts\" \"cd app && npm run dev\"",
+    "build": "npm run build:frontend && npm run build:server",
+    "build:frontend": "cd app && npm run build",
+    "build:server": "cd server && bun build index.ts --outdir ../dist --target bun",
+    "start": "bun run dist/index.js",
+    "postinstall": "cd app && npm install && cd ../server && bun install"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "app/dist/",
+    "agent/",
+    "server/routes/",
+    "server/middleware/",
+    "server/sessions.ts",
+    "server/index.ts",
+    "server/package.json"
+  ],
+  "keywords": [
+    "personal-injury",
+    "legal",
+    "case-management",
+    "claude",
+    "ai"
+  ],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

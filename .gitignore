@@ -1,0 +1,63 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-ssr/
+build/
+out/
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# OS files
+.DS_Store
+.DS_Store?
+Thumbs.db
+
+# IDE/Editor
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.swp
+*.swo
+*~
+
+# Runtime generated files (case indexing)
+.pi_tool/
+
+# Test case data (large PDFs)
+test-cases/
+
+# Claude local settings (keep commands, ignore local settings)
+.claude/settings.local.json
+
+# Lock files (optional - uncomment if you prefer npm/bun to regenerate)
+# bun.lock
+# package-lock.json
+
+# Subscription server data
+subscription-server/data/
+*.db
+*.sqlite
+
+# User config directory (local machine)
+~/.claude-pi/

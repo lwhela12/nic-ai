@@ -1,0 +1,15 @@
+{
+  "name": "claude-pi-subscription-server",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --watch index.ts",
+    "start": "bun run index.ts",
+    "db:migrate": "bun run db/migrate.ts",
+    "db:seed": "bun run db/seed.ts"
+  },
+  "dependencies": {
+    "hono": "^4.4.0",
+    "stripe": "^14.0.0"
+  }
+}

@@ -1,0 +1,72 @@
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { serveStatic } from "hono/bun";
+import { existsSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+import claude from "./routes/claude";
+import files from "./routes/files";
+import docs from "./routes/docs";
+import firm from "./routes/firm";
+import auth from "./routes/auth";
+import { authMiddleware } from "./middleware/auth";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const app = new Hono();
+
+// Determine if we're in production (built frontend exists)
+const frontendDistPath = join(__dirname, "..", "app", "dist");
+const isProduction = existsSync(frontendDistPath);
+
+// Enable CORS for frontend (needed in dev mode)
+app.use("/*", cors());
+
+// Health check
+app.get("/api/health", (c) => c.json({ status: "ok", service: "claude-pi" }));
+
+// Auth routes (no middleware)
+app.route("/api/auth", auth);
+
+// Apply auth middleware to protected routes
+app.use("/api/claude/*", authMiddleware);
+app.use("/api/files/*", authMiddleware);
+app.use("/api/docs/*", authMiddleware);
+app.use("/api/firm/*", authMiddleware);
+
+// Mount protected routes
+app.route("/api/claude", claude);
+app.route("/api/files", files);
+app.route("/api/docs", docs);
+app.route("/api/firm", firm);
+
+// In production, serve static frontend
+if (isProduction) {
+  // Serve static assets
+  app.use("/*", serveStatic({ root: frontendDistPath }));
+
+  // SPA fallback - serve index.html for all non-API routes
+  app.get("*", async (c) => {
+    const indexPath = join(frontendDistPath, "index.html");
+    if (existsSync(indexPath)) {
+      const file = Bun.file(indexPath);
+      return new Response(file, {
+        headers: { "Content-Type": "text/html" },
+      });
+    }
+    return c.notFound();
+  });
+}
+
+const port = process.env.PORT || 3001;
+console.log(`Server running on http://localhost:${port}`);
+if (isProduction) {
+  console.log("Serving frontend from:", frontendDistPath);
+}
+
+export default {
+  port,
+  fetch: app.fetch,
+  idleTimeout: 255, // Max timeout for long-running Claude requests
+};
