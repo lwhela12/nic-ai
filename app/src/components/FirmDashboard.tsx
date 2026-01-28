@@ -327,41 +327,92 @@ export default function FirmDashboard({
     if (!limits) return '—'
     if (typeof limits === 'string') return limits
 
-    const formatNum = (n: number) => '$' + n.toLocaleString()
+    const fmtNum = (n: number) => '$' + n.toLocaleString()
+    const truncate = (s: string) => s.length > 30 ? s.slice(0, 27) + '…' : s
 
-    const extractPrimary = (val: unknown): string | null => {
-      if (typeof val === 'string') return val.length > 30 ? val.slice(0, 27) + '…' : val
-      if (typeof val === 'number') return formatNum(val)
-      if (typeof val === 'object' && val !== null) {
-        const obj = val as Record<string, unknown>
-        for (const k of ['bodily_injury', 'bodily_injury_per_person', 'bi', 'bi_limit', 'bodily_injury_settlement']) {
-          const v = obj[k]
+    // Skip keys that are carrier names, recovery totals, or metadata
+    const isSkipKey = (k: string) =>
+      /carrier|recovery|breakdown|status|claim|policy_number|policy_holder/i.test(k)
+
+    // Extract primary limit value from an object (e.g. {bodily_injury: 25000, carrier: "..."})
+    const extractFromObj = (obj: Record<string, unknown>): string | null => {
+      for (const k of ['bodily_injury', 'bodily_injury_per_person', 'bi', 'bi_limit', 'bodily_injury_settlement']) {
+        const v = obj[k]
+        if (typeof v === 'string') return v
+        if (typeof v === 'number') return fmtNum(v)
+      }
+      // fallback: first uninsured/uim key
+      for (const [k, v] of Object.entries(obj)) {
+        if (/uim|uninsured/i.test(k)) {
           if (typeof v === 'string') return v
-          if (typeof v === 'number') return formatNum(v)
+          if (typeof v === 'number') return fmtNum(v)
         }
-        for (const v of Object.values(obj)) {
-          if (typeof v === 'string' && v.includes('$')) return v
-        }
+      }
+      // fallback: first $-containing string
+      for (const v of Object.values(obj)) {
+        if (typeof v === 'string' && v.includes('$')) return v
       }
       return null
     }
 
-    const is3P = (key: string) => {
-      const k = key.toLowerCase()
-      return k.startsWith('3p') || k.includes('third_party') || k.includes('third')
-    }
-    const is1P = (key: string) => {
-      const k = key.toLowerCase()
-      return k.startsWith('1p') || k.includes('first_party') || k.includes('first')
-    }
+    const is3P = (k: string) => /3p|third.party|third/i.test(k)
+    const is1P = (k: string) => /1p|first.party|first/i.test(k)
 
+    // For flat structures (Hempstead-style), collect all 3P/1P keys and pick best value
+    const collect3P: Record<string, unknown> = {}
+    const collect1P: Record<string, unknown> = {}
     let thirdParty: string | null = null
     let firstParty: string | null = null
 
     if (typeof limits === 'object') {
       for (const [key, val] of Object.entries(limits)) {
-        if (!thirdParty && is3P(key)) thirdParty = extractPrimary(val)
-        if (!firstParty && is1P(key)) firstParty = extractPrimary(val)
+        if (isSkipKey(key)) continue
+        // If value is an object, extract directly (Crow/Briscoe-style nested objects)
+        if (is3P(key) && !thirdParty) {
+          if (typeof val === 'object' && val !== null) {
+            thirdParty = extractFromObj(val as Record<string, unknown>)
+          } else if (typeof val === 'string') {
+            thirdParty = truncate(val)
+          } else if (typeof val === 'number') {
+            collect3P[key] = val
+          }
+        }
+        if (is1P(key) && !firstParty) {
+          if (typeof val === 'object' && val !== null) {
+            firstParty = extractFromObj(val as Record<string, unknown>)
+          } else if (typeof val === 'string') {
+            firstParty = truncate(val)
+          } else if (typeof val === 'number') {
+            collect1P[key] = val
+          }
+        }
+      }
+
+      // For flat numeric keys, pick best value from collected entries
+      if (!thirdParty && Object.keys(collect3P).length > 0) {
+        // Prefer BI keys, then any numeric
+        for (const [k, v] of Object.entries(collect3P)) {
+          if (/bi|bodily/i.test(k) && typeof v === 'number') { thirdParty = fmtNum(v) + ' BI'; break }
+        }
+        if (!thirdParty) {
+          const first = Object.values(collect3P)[0]
+          if (typeof first === 'number') thirdParty = fmtNum(first)
+        }
+      }
+      if (!firstParty && Object.keys(collect1P).length > 0) {
+        // Prefer UIM keys, then medpay, then any
+        for (const [k, v] of Object.entries(collect1P)) {
+          if (/uim|uninsured/i.test(k) && typeof v === 'number') { firstParty = fmtNum(v) + ' UIM'; break }
+        }
+        if (!firstParty) {
+          for (const [k, v] of Object.entries(collect1P)) {
+            if (/med/i.test(k) && typeof v === 'number') { firstParty = fmtNum(v) + ' MedPay'; break }
+          }
+        }
+        if (!firstParty) {
+          const first = Object.values(collect1P)[0]
+          if (typeof first === 'number') firstParty = fmtNum(first)
+        }
       }
     }
 

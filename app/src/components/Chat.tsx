@@ -254,7 +254,6 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
     setSessionId(null)
     setConversationSummary(null)
     setContextUsage(null)
-    setIsStreaming(false)
     setIsLoading(false)
     setCurrentTools([])
     setHistoryLoaded(false)

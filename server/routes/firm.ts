@@ -457,7 +457,7 @@ async function extractFile(
     for await (const msg of query({
       prompt: `Extract information from this file: ${fullPath}
 
-Use pdftotext to read it: pdftotext "${fullPath}" - 2>/dev/null | head -300
+Use the Read tool to read the file. If it's a PDF and Read doesn't return useful content, fall back to: pdftotext "${fullPath}" - 2>/dev/null | head -300
 
 Then return the JSON extraction.`,
       options: {
@@ -746,7 +746,22 @@ async function indexCase(
       async function worker() {
         while (currentIndex < items.length) {
           const index = currentIndex++;
-          results[index] = await processor(items[index], index);
+          try {
+            results[index] = await processor(items[index], index);
+          } catch (err) {
+            // Ensure a single file failure never kills the whole batch
+            const item = items[index];
+            const filename = typeof item === 'string' ? (item as string).split('/').pop() || String(item) : String(item);
+            const folder = typeof item === 'string' ? (item as string).split('/')[0] || 'root' : 'root';
+            console.error(`[${index + 1}/${items.length}] Unhandled error for ${filename}:`, err);
+            results[index] = {
+              filename,
+              folder,
+              type: 'other',
+              key_info: 'Failed to extract',
+              error: err instanceof Error ? err.message : String(err),
+            };
+          }
           completedCount++;
           console.log(`--- Progress: ${completedCount}/${items.length} files complete ---`);
         }
@@ -830,12 +845,22 @@ async function indexCase(
       case_summary: '',
     };
 
+    // Track failed files so users can retry them later
+    const failedExtractions = extractions.filter(e => !!e.error);
+    const failedFiles = failedExtractions.map(e => ({
+      filename: e.filename,
+      folder: e.folder,
+      error: e.error,
+      failed_at: new Date().toISOString(),
+    }));
+
     const initialIndex = {
       indexed_at: new Date().toISOString(),
       case_name: caseName,
       case_phase: isIncremental && existingIndex?.case_phase ? existingIndex.case_phase : 'Unknown',
       summary: baseSummary,
       folders,
+      failed_files: failedFiles,
       issues_found: [],
       reconciled_values: existingIndex?.reconciled_values ?? {},
       needs_review: [],
@@ -1039,7 +1064,10 @@ async function checkNeedsReindex(casePath: string, indexedAt: number): Promise<b
           if (await checkDir(fullPath)) return true;
         } else {
           const stats = await stat(fullPath);
-          if (stats.mtimeMs > indexedAt) return true;
+          if (stats.mtimeMs > indexedAt) {
+            console.log(`[Reindex] Triggered by: ${fullPath} (file: ${stats.mtimeMs}, index: ${indexedAt}, delta: ${stats.mtimeMs - indexedAt}ms)`);
+            return true;
+          }
         }
       }
     } catch {
