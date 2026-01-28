@@ -8,6 +8,7 @@ import claude from "./routes/claude";
 import files from "./routes/files";
 import docs from "./routes/docs";
 import firm from "./routes/firm";
+import knowledge from "./routes/knowledge";
 import auth from "./routes/auth";
 import { authMiddleware } from "./middleware/auth";
 
@@ -34,12 +35,14 @@ app.use("/api/claude/*", authMiddleware);
 app.use("/api/files/*", authMiddleware);
 app.use("/api/docs/*", authMiddleware);
 app.use("/api/firm/*", authMiddleware);
+app.use("/api/knowledge/*", authMiddleware);
 
 // Mount protected routes
 app.route("/api/claude", claude);
 app.route("/api/files", files);
 app.route("/api/docs", docs);
 app.route("/api/firm", firm);
+app.route("/api/knowledge", knowledge);
 
 // In production, serve static frontend
 if (isProduction) {

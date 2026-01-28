@@ -5,33 +5,25 @@ import { readdir, readFile, stat, writeFile, mkdir } from "fs/promises";
 import { join, relative, dirname } from "path";
 import { getFirmSession, saveFirmSession } from "../sessions";
 import { PHASE_RULES } from "../shared/phase-rules";
+import { loadPracticeGuide, loadSectionsByIds, clearKnowledgeCache } from "./knowledge";
 
 const app = new Hono();
 
-// Practice guide loader with caching
-let practiceGuideCache: string | null = null;
+// Practice guide loading now handled by knowledge.ts
 
-async function loadPracticeGuide(): Promise<string> {
-  if (practiceGuideCache) return practiceGuideCache;
-  const guidePath = join(import.meta.dir, "../../agent/practice-guide.md");
-  practiceGuideCache = await readFile(guidePath, "utf-8");
-  return practiceGuideCache;
-}
-
-function extractSections(markdown: string, sectionHeaders: string[]): string {
-  const sections: string[] = [];
-  for (const header of sectionHeaders) {
-    // Match ## <roman numeral>. <header text> through to next ## or end
-    const pattern = new RegExp(
-      `(## ${header}[\\s\\S]*?)(?=\\n## [IVX]+\\.|$)`,
-    );
-    const match = markdown.match(pattern);
-    if (match) {
-      sections.push(match[1].trim());
-    }
-  }
-  return sections.join("\n\n---\n\n");
-}
+// Sections relevant for case synthesis (by manifest section ID)
+const SYNTHESIS_SECTION_IDS = [
+  "liability-evaluation",
+  "injury-severity",
+  "valuation-framework",
+  "subrogation-liens",
+  "document-quality",
+  // Workers' comp equivalents
+  "claim-evaluation",
+  "injury-classification",
+  "benefits-calculation",
+  "third-party-claims",
+];
 
 interface CaseSummary {
   path: string;
@@ -255,14 +247,13 @@ OUTPUT FORMAT - Return ONLY valid JSON:
 IMPORTANT:
 - Return ONLY the JSON object, no markdown, no explanation
 - If the file cannot be read or is empty, still return the JSON with key_info explaining the issue
-- Use pdftotext for PDFs: pdftotext "filename" - 2>/dev/null | head -200`;
+- For PDFs: use pdftotext "filename" - 2>/dev/null | head -200
+- For all other files: use the Read tool directly
+- If a file cannot be read or parsed, return the JSON with key_info explaining the issue`;
 
 // Build synthesis system prompt with practice guide sections injected
-async function buildSynthesisSystemPrompt(): Promise<string> {
-  const guide = await loadPracticeGuide();
-  const practiceKnowledge = extractSections(guide, [
-    "I\\.", "II\\.", "IV\\.", "VIII\\.", "XI\\."
-  ]);
+async function buildSynthesisSystemPrompt(firmRoot?: string): Promise<string> {
+  const practiceKnowledge = await loadSectionsByIds(firmRoot, SYNTHESIS_SECTION_IDS);
 
   return `You are a case analyst and summarizer for a Personal Injury law firm in Nevada.
 
@@ -541,7 +532,8 @@ Then return the JSON extraction.`,
 // Sonnet synthesizes case summary from extracted data (NO PDF reading)
 async function synthesizeCaseSummary(
   caseFolder: string,
-  conflictCount: number
+  conflictCount: number,
+  firmRoot?: string
 ): Promise<UsageStats> {
   console.log(`\n========== SONNET SYNTHESIS ==========`);
   console.log(`[Sonnet] Case folder: ${caseFolder}`);
@@ -557,7 +549,7 @@ async function synthesizeCaseSummary(
     model: 'sonnet'
   };
 
-  const synthesisSystemPrompt = await buildSynthesisSystemPrompt();
+  const synthesisSystemPrompt = await buildSynthesisSystemPrompt(firmRoot);
 
   for await (const msg of query({
     prompt: `Analyze and synthesize a case summary from the extracted data.
@@ -636,13 +628,7 @@ async function listCaseFiles(caseFolder: string): Promise<string[]> {
 
       if (entry.isDirectory()) {
         await walkDir(fullPath, relativePath);
-      } else if (
-        entry.name.endsWith('.pdf') ||
-        entry.name.endsWith('.PDF') ||
-        entry.name.endsWith('.jpg') ||
-        entry.name.endsWith('.jpeg') ||
-        entry.name.endsWith('.png')
-      ) {
+      } else {
         files.push(relativePath);
       }
     }
@@ -656,7 +642,7 @@ async function listCaseFiles(caseFolder: string): Promise<string[]> {
 async function indexCase(
   caseFolder: string,
   onProgress: (event: { type: string; [key: string]: any }) => void,
-  options?: { incrementalFiles?: string[] }
+  options?: { incrementalFiles?: string[]; firmRoot?: string }
 ): Promise<{ success: boolean; error?: string }> {
   const caseName = caseFolder.split('/').pop() || caseFolder;
   const isIncremental = options?.incrementalFiles && options.incrementalFiles.length > 0;
@@ -903,7 +889,7 @@ async function indexCase(
 
     // Step 6: Sonnet reconciles and writes case summary
     onProgress({ type: "status", caseName, message: "Reconciling conflicts and generating case summary..." });
-    const summaryUsage = await synthesizeCaseSummary(caseFolder, hypergraphResult.conflicts.length);
+    const summaryUsage = await synthesizeCaseSummary(caseFolder, hypergraphResult.conflicts.length, options?.firmRoot);
 
     // Add summary usage with cache breakdown
     totalUsage.sonnet.inputTokens += summaryUsage.inputTokens;
@@ -1019,7 +1005,7 @@ app.post("/batch-index", async (c) => {
             await stream.writeSSE({
               data: JSON.stringify(event)
             });
-          })
+          }, { firmRoot: root })
         )
       );
 

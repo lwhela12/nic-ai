@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFile, appendFile, writeFile, mkdir } from "fs/promises";
-import { join } from "path";
+import { join, dirname } from "path";
 import { getSession, saveSession } from "../sessions";
 import { indexCase } from "./firm";
 import { buildPhasePrompt } from "../shared/phase-rules";
@@ -359,7 +359,11 @@ app.post("/init", async (c) => {
     try {
       // Use the shared indexCase function from firm.ts
       // Pass incrementalFiles if provided for incremental indexing
-      const options = files?.length ? { incrementalFiles: files } : undefined;
+      // Derive firmRoot as parent directory of caseFolder
+      const firmRoot = dirname(caseFolder);
+      const options = files?.length
+        ? { incrementalFiles: files, firmRoot }
+        : { firmRoot };
       const result = await indexCase(caseFolder, async (event) => {
         await log(`[${((Date.now() - startTime) / 1000).toFixed(1)}s] ${event.type}: ${JSON.stringify(event)}`);
         await stream.writeSSE({

@@ -203,6 +203,11 @@ function App() {
   const [firmChatPrompt, setFirmChatPrompt] = useState<string>('')
   const [forceShowFirmChat, setForceShowFirmChat] = useState(false)
 
+  // Knowledge init state — shown when selecting a firm root without knowledge
+  const [showKnowledgeInit, setShowKnowledgeInit] = useState(false)
+  const [knowledgeTemplates, setKnowledgeTemplates] = useState<Array<{ id: string; practiceArea: string; jurisdiction: string }>>([])
+  const [knowledgeInitLoading, setKnowledgeInitLoading] = useState(false)
+
   const loadTodos = useCallback(async () => {
     if (!firmRoot) return
     try {
@@ -283,6 +288,25 @@ function App() {
     setForceShowFirmChat(false)
   }
 
+  const handleKnowledgeInit = async (templateId: string) => {
+    if (!firmRoot) return
+    setKnowledgeInitLoading(true)
+    try {
+      const res = await fetch(`${API_URL}/api/knowledge/init`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: firmRoot, templateId }),
+      })
+      if (res.ok) {
+        setShowKnowledgeInit(false)
+      }
+    } catch {
+      // Ignore
+    } finally {
+      setKnowledgeInitLoading(false)
+    }
+  }
+
   // Check auth status on mount
   useEffect(() => {
     const checkAuth = async () => {
@@ -309,10 +333,26 @@ function App() {
     checkAuth()
   }, [])
 
-  // Save firm root to localStorage
+  // Save firm root to localStorage and check for knowledge base
   useEffect(() => {
     if (firmRoot) {
       localStorage.setItem(FIRM_ROOT_KEY, firmRoot)
+
+      // Check if knowledge base exists for this firm root
+      fetch(`${API_URL}/api/knowledge/manifest?root=${encodeURIComponent(firmRoot)}`)
+        .then(res => {
+          if (!res.ok) {
+            // No knowledge — fetch templates and show init modal
+            return fetch(`${API_URL}/api/knowledge/templates`)
+              .then(r => r.json())
+              .then(data => {
+                setKnowledgeTemplates(data)
+                setShowKnowledgeInit(true)
+              })
+          }
+          // Knowledge exists — nothing to do
+        })
+        .catch(() => {})
     }
   }, [firmRoot])
 
@@ -456,6 +496,8 @@ function App() {
             onCancel={() => setShowPicker(false)}
           />
         )}
+
+        {showKnowledgeInit && <KnowledgeInitModal />}
       </div>
     )
   }
@@ -498,6 +540,8 @@ function App() {
           isGenerating={isGeneratingTasks}
           hasAttemptedGenerate={hasAttemptedGenerate}
         />
+
+        {showKnowledgeInit && <KnowledgeInitModal />}
       </>
     )
   }
@@ -724,8 +768,46 @@ function App() {
         isGenerating={isGeneratingTasks}
         hasAttemptedGenerate={hasAttemptedGenerate}
       />
+
+      {/* Knowledge init modal — shown when firm root has no knowledge base */}
+      {showKnowledgeInit && <KnowledgeInitModal />}
     </div>
   )
+
+  function KnowledgeInitModal() {
+    return (
+      <div className="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50">
+        <div className="bg-white rounded-2xl shadow-elevated w-full max-w-md p-6">
+          <h2 className="text-lg font-semibold text-brand-900 mb-2">Set Up Practice Knowledge</h2>
+          <p className="text-sm text-brand-500 mb-5">
+            Choose a practice area to initialize the knowledge base for this folder. You can customize sections after setup.
+          </p>
+          <div className="space-y-3">
+            {knowledgeTemplates.map(t => (
+              <button
+                key={t.id}
+                onClick={() => handleKnowledgeInit(t.id)}
+                disabled={knowledgeInitLoading}
+                className="w-full text-left p-4 border border-surface-200 rounded-xl hover:border-accent-300
+                           hover:bg-accent-50 transition-colors disabled:opacity-50"
+              >
+                <div className="font-medium text-brand-900">{t.practiceArea}</div>
+                <div className="text-xs text-brand-400 mt-0.5">{t.jurisdiction}</div>
+              </button>
+            ))}
+          </div>
+          <div className="flex justify-end mt-5">
+            <button
+              onClick={() => setShowKnowledgeInit(false)}
+              className="px-4 py-2 text-sm text-brand-500 hover:text-brand-700 transition-colors"
+            >
+              Skip for now
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 }
 
 export default App
