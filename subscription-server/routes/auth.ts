@@ -13,6 +13,7 @@ import {
   logValidation,
   isSubscriptionActive,
   getSubscriptionExpiry,
+  ensureDatabase,
 } from "../db";
 
 const auth = new Hono();
@@ -54,6 +55,7 @@ function decryptApiKey(encrypted: string): string {
  * Sign up - Create new account with 14-day trial
  */
 auth.post("/signup", async (c) => {
+  await ensureDatabase();
   const body = await c.req.json();
   const { email, password } = body;
 
@@ -73,21 +75,21 @@ auth.post("/signup", async (c) => {
   }
 
   // Check if user already exists
-  const existingUser = getUserByEmail(email);
+  const existingUser = await getUserByEmail(email);
   if (existingUser) {
     return c.json({ error: "An account with this email already exists" }, 409);
   }
 
   // Create user
   const passwordHash = hashPassword(password);
-  const user = createUser(email, passwordHash);
+  const user = await createUser(email, passwordHash);
 
   if (!user) {
     return c.json({ error: "Failed to create account" }, 500);
   }
 
   // Create subscription with 14-day trial
-  const subscription = createSubscription(user.id, 14);
+  const subscription = await createSubscription(user.id, 14);
 
   if (!subscription) {
     return c.json({ error: "Failed to create subscription" }, 500);
@@ -96,10 +98,10 @@ auth.post("/signup", async (c) => {
   // Generate auth token
   const token = generateToken();
   const tokenHash = hashToken(token);
-  createAuthToken(user.id, tokenHash, 30);
+  await createAuthToken(user.id, tokenHash, 30);
 
   // Get API key for user
-  const apiKey = getApiKeyForUser(user.id);
+  const apiKey = await getApiKeyForUser(user.id);
   const decryptedKey = apiKey ? decryptApiKey(apiKey.key_encrypted) : null;
 
   return c.json({
@@ -115,6 +117,7 @@ auth.post("/signup", async (c) => {
  * Login - Authenticate and return token
  */
 auth.post("/login", async (c) => {
+  await ensureDatabase();
   const body = await c.req.json();
   const { email, password } = body;
 
@@ -124,7 +127,7 @@ auth.post("/login", async (c) => {
   }
 
   // Find user
-  const user = getUserByEmail(email);
+  const user = await getUserByEmail(email);
   if (!user) {
     return c.json({ error: "Invalid email or password" }, 401);
   }
@@ -136,7 +139,7 @@ auth.post("/login", async (c) => {
   }
 
   // Get subscription
-  const subscription = getSubscriptionByUserId(user.id);
+  const subscription = await getSubscriptionByUserId(user.id);
   if (!subscription) {
     return c.json({ error: "No subscription found" }, 403);
   }
@@ -150,17 +153,17 @@ auth.post("/login", async (c) => {
   }
 
   // Delete old tokens and generate new one
-  deleteUserTokens(user.id);
+  await deleteUserTokens(user.id);
   const token = generateToken();
   const tokenHash = hashToken(token);
-  createAuthToken(user.id, tokenHash, 30);
+  await createAuthToken(user.id, tokenHash, 30);
 
   // Get API key for user
-  const apiKey = getApiKeyForUser(user.id);
+  const apiKey = await getApiKeyForUser(user.id);
   const decryptedKey = apiKey ? decryptApiKey(apiKey.key_encrypted) : null;
 
   // Log validation
-  logValidation(
+  await logValidation(
     user.id,
     c.req.header("x-forwarded-for") || c.req.header("x-real-ip"),
     c.req.header("user-agent"),
@@ -180,6 +183,7 @@ auth.post("/login", async (c) => {
  * Validate - Daily validation check, returns fresh API key
  */
 auth.post("/validate", async (c) => {
+  await ensureDatabase();
   // Get token from Authorization header
   const authHeader = c.req.header("Authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -190,16 +194,16 @@ auth.post("/validate", async (c) => {
   const tokenHash = hashToken(token);
 
   // Find valid token
-  const authToken = getAuthTokenByHash(tokenHash);
+  const authToken = await getAuthTokenByHash(tokenHash);
   if (!authToken) {
     return c.json({ error: "Invalid or expired token" }, 401);
   }
 
   // Update token last used
-  updateTokenLastUsed(authToken.id);
+  await updateTokenLastUsed(authToken.id);
 
   // Get subscription
-  const subscription = getSubscriptionByUserId(authToken.user_id);
+  const subscription = await getSubscriptionByUserId(authToken.user_id);
   if (!subscription) {
     return c.json({ error: "No subscription found" }, 403);
   }
@@ -213,11 +217,11 @@ auth.post("/validate", async (c) => {
   }
 
   // Get API key for user
-  const apiKey = getApiKeyForUser(authToken.user_id);
+  const apiKey = await getApiKeyForUser(authToken.user_id);
   const decryptedKey = apiKey ? decryptApiKey(apiKey.key_encrypted) : null;
 
   // Log validation
-  logValidation(
+  await logValidation(
     authToken.user_id,
     c.req.header("x-forwarded-for") || c.req.header("x-real-ip"),
     c.req.header("user-agent"),
@@ -235,6 +239,7 @@ auth.post("/validate", async (c) => {
  * Logout - Invalidate all tokens for user
  */
 auth.post("/logout", async (c) => {
+  await ensureDatabase();
   // Get token from Authorization header
   const authHeader = c.req.header("Authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -245,13 +250,13 @@ auth.post("/logout", async (c) => {
   const tokenHash = hashToken(token);
 
   // Find valid token
-  const authToken = getAuthTokenByHash(tokenHash);
+  const authToken = await getAuthTokenByHash(tokenHash);
   if (!authToken) {
     return c.json({ error: "Invalid or expired token" }, 401);
   }
 
   // Delete all tokens for user
-  deleteUserTokens(authToken.user_id);
+  await deleteUserTokens(authToken.user_id);
 
   return c.json({ success: true });
 });

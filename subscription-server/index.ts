@@ -1,23 +1,9 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
-import { mkdirSync, existsSync } from "fs";
 import auth from "./routes/auth";
 import subscriptions from "./routes/subscriptions";
 import admin from "./routes/admin";
-import { initDatabase } from "./db/schema";
-
-// Ensure data directory exists
-const dataDir = "./data";
-if (!existsSync(dataDir)) {
-  mkdirSync(dataDir, { recursive: true });
-  console.log("Created data directory");
-}
-
-// Initialize database
-const dbPath = process.env.DATABASE_PATH || "./data/claude-pi.db";
-console.log(`Initializing database at: ${dbPath}`);
-initDatabase(dbPath);
 
 const app = new Hono();
 
@@ -57,14 +43,4 @@ app.onError((err, c) => {
   return c.json({ error: "Internal server error" }, 500);
 });
 
-const port = parseInt(process.env.PORT || "3002");
-console.log(`\nSubscription server running on http://localhost:${port}`);
-console.log("\nEnvironment:");
-console.log(`  - Database: ${dbPath}`);
-console.log(`  - Stripe: ${process.env.STRIPE_SECRET_KEY ? "configured" : "not configured"}`);
-console.log(`  - Admin key: ${process.env.ADMIN_API_KEY ? "custom" : "default (insecure)"}`);
-
-export default {
-  port,
-  fetch: app.fetch,
-};
+export default app;

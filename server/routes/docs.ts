@@ -1,7 +1,11 @@
 import { Hono } from "hono";
 import { readdir, readFile, writeFile, mkdir } from "fs/promises";
 import { join, dirname, basename } from "path";
+import { exec } from "child_process";
+import { promisify } from "util";
 import { markdownToHtml, htmlToDocx, htmlToPdf } from "../lib/export";
+
+const execAsync = promisify(exec);
 
 const app = new Hono();
 
@@ -104,6 +108,78 @@ app.post("/save", async (c) => {
     return c.json({ success: true, path: targetPath });
   } catch (error) {
     return c.json({ error: "Could not save document" }, 500);
+  }
+});
+
+// Export endpoint - converts markdown to DOCX/PDF and saves to case folder
+// Used by agent to generate proper binary files
+app.post("/export", async (c) => {
+  const { caseFolder, sourcePath, format, targetPath, openAfter } = await c.req.json();
+
+  if (!caseFolder || !sourcePath || !format) {
+    return c.json({ error: "caseFolder, sourcePath, and format required" }, 400);
+  }
+
+  if (!["docx", "pdf"].includes(format)) {
+    return c.json({ error: "format must be 'docx' or 'pdf'" }, 400);
+  }
+
+  const fullSourcePath = join(caseFolder, sourcePath);
+
+  try {
+    const content = await readFile(fullSourcePath, "utf-8");
+    const rawFilename = sourcePath.split("/").pop() || "document.md";
+    const nameWithoutExt = rawFilename.replace(/\.[^/.]+$/, "");
+
+    // Determine target path - use provided or default to same location with new extension
+    const outputPath = targetPath || sourcePath.replace(/\.md$/, `.${format}`);
+    const fullOutputPath = join(caseFolder, outputPath);
+
+    // Ensure output directory exists
+    await mkdir(dirname(fullOutputPath), { recursive: true });
+
+    const html = markdownToHtml(content);
+
+    if (format === "docx") {
+      const docxBuffer = await htmlToDocx(html, nameWithoutExt);
+      await writeFile(fullOutputPath, docxBuffer);
+    } else {
+      const pdfBuffer = await htmlToPdf(html, nameWithoutExt);
+      await writeFile(fullOutputPath, pdfBuffer);
+    }
+
+    // Auto-open in default application if requested
+    if (openAfter) {
+      try {
+        // Cross-platform open command
+        const platform = process.platform;
+        let openCmd: string;
+
+        if (platform === 'darwin') {
+          openCmd = `open "${fullOutputPath}"`;
+        } else if (platform === 'win32') {
+          openCmd = `start "" "${fullOutputPath}"`;
+        } else {
+          // Linux and others
+          openCmd = `xdg-open "${fullOutputPath}"`;
+        }
+
+        await execAsync(openCmd);
+      } catch (openErr) {
+        console.error("Failed to open file:", openErr);
+        // Don't fail the export just because open failed
+      }
+    }
+
+    return c.json({
+      success: true,
+      outputPath,
+      fullPath: fullOutputPath,
+      message: `Exported ${sourcePath} to ${outputPath}${openAfter ? ' and opened in default application' : ''}`
+    });
+  } catch (err) {
+    console.error("Export error:", err);
+    return c.json({ error: `Export failed: ${err}` }, 500);
   }
 });
 

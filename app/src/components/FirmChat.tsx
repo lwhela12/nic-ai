@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, memo } from 'react'
+import { useState, useRef, useEffect, useCallback, memo } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -23,6 +23,12 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   hasTodos?: boolean
+}
+
+interface ParsedTodo {
+  text: string
+  caseRef?: string
+  priority?: 'high' | 'medium' | 'low'
 }
 
 // Icons
@@ -144,6 +150,7 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [isCompacting, setIsCompacting] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const initialPromptUsedRef = useRef(false)
@@ -152,16 +159,7 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Handle initial prompt (e.g., from "Generate Tasks" button)
-  useEffect(() => {
-    if (initialPrompt && !initialPromptUsedRef.current && !isLoading) {
-      initialPromptUsedRef.current = true
-      sendMessage(initialPrompt)
-      onInitialPromptUsed?.()
-    }
-  }, [initialPrompt])
-
-  const sendMessage = async (overrideMessage?: string) => {
+  const sendMessage = useCallback(async (overrideMessage?: string) => {
     const userMessage = (overrideMessage || input).trim()
     if (!userMessage || isLoading) return
 
@@ -212,15 +210,33 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
                 })
               }
 
+              if (data.type === 'compaction') {
+                // Show compaction indicator (SDK is auto-compacting context)
+                setIsCompacting(true)
+              }
+
               if (data.type === 'done') {
                 if (data.sessionId) setSessionId(data.sessionId)
               }
 
               if (data.type === 'error') {
-                setMessages((prev) => [
-                  ...prev,
-                  { role: 'assistant', content: `Error: ${data.error}` },
-                ])
+                const errorMsg = data.error || 'Unknown error'
+                const errorLower = errorMsg.toLowerCase()
+
+                // Check if this is a compaction-related error (SDK will auto-recover)
+                const isCompactionError =
+                  errorLower.includes('prompt is too long') ||
+                  errorLower.includes('process exited with code 1')
+
+                if (isCompactionError) {
+                  // Show compaction indicator instead of error - SDK will auto-compact
+                  setIsCompacting(true)
+                } else {
+                  setMessages((prev) => [
+                    ...prev,
+                    { role: 'assistant', content: `Error: ${errorMsg}` },
+                  ])
+                }
               }
             } catch {
               // Ignore parse errors
@@ -228,15 +244,25 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
           }
         }
       }
-    } catch (error) {
+    } catch {
       setMessages((prev) => [
         ...prev,
         { role: 'assistant', content: 'Error communicating with the agent. Please try again.' },
       ])
     } finally {
       setIsLoading(false)
+      setIsCompacting(false)
     }
-  }
+  }, [apiUrl, firmRoot, input, isLoading, sessionId])
+
+  // Handle initial prompt (e.g., from "Generate Tasks" button)
+  useEffect(() => {
+    if (initialPrompt && !initialPromptUsedRef.current && !isLoading) {
+      initialPromptUsedRef.current = true
+      sendMessage(initialPrompt)
+      onInitialPromptUsed?.()
+    }
+  }, [initialPrompt, isLoading, onInitialPromptUsed, sendMessage])
 
   const clearSession = async () => {
     try {
@@ -262,7 +288,7 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
       }
 
       const jsonStr = jsonMatch[1] || jsonMatch[0]
-      const parsed = JSON.parse(jsonStr)
+      const parsed = JSON.parse(jsonStr) as { todos?: ParsedTodo[] }
 
       if (!parsed.todos || !Array.isArray(parsed.todos)) {
         console.error('Invalid todos format')
@@ -270,7 +296,7 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
       }
 
       // Transform to FirmTodo format with IDs
-      const todos: FirmTodo[] = parsed.todos.map((t: any, i: number) => ({
+      const todos: FirmTodo[] = parsed.todos.map((t, i) => ({
         id: `todo-${Date.now()}-${i}`,
         text: t.text,
         caseRef: t.caseRef,
@@ -383,6 +409,18 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
                   <span className="text-xs text-brand-400">Analyzing portfolio...</span>
                 </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {isCompacting && (
+          <div className="flex justify-center py-2">
+            <div className="flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg text-sm">
+              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+              </svg>
+              Compacting context...
             </div>
           </div>
         )}

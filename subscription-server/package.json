@@ -3,13 +3,16 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "bun run --watch index.ts",
-    "start": "bun run index.ts",
-    "db:migrate": "bun run db/migrate.ts",
-    "db:seed": "bun run db/seed.ts"
+    "dev": "npx tsx --watch index.ts",
+    "db:migrate": "npx tsx db/migrate.ts",
+    "db:seed": "npx tsx db/seed.ts"
   },
   "dependencies": {
+    "@vercel/postgres": "^0.10.0",
     "hono": "^4.4.0",
     "stripe": "^14.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
   }
 }

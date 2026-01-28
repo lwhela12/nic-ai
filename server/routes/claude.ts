@@ -5,6 +5,7 @@ import { readFile, appendFile, writeFile, mkdir } from "fs/promises";
 import { join } from "path";
 import { getSession, saveSession } from "../sessions";
 import { indexCase } from "./firm";
+import { buildPhasePrompt } from "../shared/phase-rules";
 
 // Types for chat history
 interface ChatMessage {
@@ -39,44 +40,17 @@ async function log(msg: string) {
 
 const app = new Hono();
 
-// Cache the system prompts
+// Cache the system prompt
 let routerPromptCache: string | null = null;
-let fullSystemPromptCache: string | null = null;
 
-// Phase determination prompt - used after indexing to classify case phase
-const phasePrompt = `Read .pi_tool/document_index.json and determine the case phase based on these markers:
-
-**Phase Detection Logic:**
-- **Intake**: Has intake docs but no LOR files sent
-- **Investigation**: LORs sent, gathering insurance/police info
-- **Treatment**: Medical records accumulating, no demand yet
-- **Demand**: Demand letter exists in 3P folder
-- **Negotiation**: Settlement correspondence exists, no settlement memo
-- **Settlement**: Settlement memo exists
-- **Complete**: Release signed, case complete
-
-**Check the folders object for these indicator files:**
-1. Look for LOR files (LOR 1P, LOR 3P) → at least Investigation phase
-2. Look for medical records in "Records & Bills" → at least Treatment phase
-3. Look for "Demand" in filename in 3P folder → at least Demand phase
-4. Look for settlement correspondence → Negotiation phase
-5. Look for settlement memo in Settlement folder → Settlement phase
-6. Look for signed release in Settlement folder → Complete phase
-
-Read the index, determine the phase, update the "case_phase" field, and write the updated index back to .pi_tool/document_index.json.`;
+// Phase determination prompt - generated from shared phase rules
+const phasePrompt = buildPhasePrompt();
 
 async function loadRouterPrompt(): Promise<string> {
   if (routerPromptCache) return routerPromptCache;
   const routerPromptPath = join(import.meta.dir, "../../agent/router-prompt.md");
   routerPromptCache = await readFile(routerPromptPath, "utf-8");
   return routerPromptCache;
-}
-
-async function loadFullSystemPrompt(): Promise<string> {
-  if (fullSystemPromptCache) return fullSystemPromptCache;
-  const systemPromptPath = join(import.meta.dir, "../../agent/system-prompt.md");
-  fullSystemPromptCache = await readFile(systemPromptPath, "utf-8");
-  return fullSystemPromptCache;
 }
 
 
@@ -91,17 +65,62 @@ app.post("/chat", async (c) => {
   const routerPrompt = await loadRouterPrompt();
   const sessionId = providedSessionId || (await getSession(caseFolder));
 
-  // Load full case index for context
+  // Load full case index for context, capping size to prevent context overflow
   let caseContext = "";
+  const INDEX_MAX_CHARS = 80000; // ~20K tokens, leaves room for session history + response
   try {
     const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
     const indexContent = await readFile(indexPath, "utf-8");
     const indexData = JSON.parse(indexContent);
 
-    // Include full index for Haiku to reference
+    let indexJson = JSON.stringify(indexData, null, 2);
+
+    // If index is too large, progressively trim it
+    if (indexJson.length > INDEX_MAX_CHARS) {
+      // First pass: strip verbose fields (extracted_text, full content), keep key_info truncated
+      const trimmed = JSON.parse(JSON.stringify(indexData));
+      if (trimmed.folders) {
+        for (const folderData of Object.values(trimmed.folders) as any[]) {
+          const files = Array.isArray(folderData) ? folderData : folderData?.files;
+          if (Array.isArray(files)) {
+            for (const file of files) {
+              delete file.extracted_text;
+              delete file.full_text;
+              delete file.raw_content;
+              delete file.content;
+              if (file.key_info && typeof file.key_info === 'string' && file.key_info.length > 500) {
+                file.key_info = file.key_info.slice(0, 500) + '...';
+              }
+            }
+          }
+        }
+      }
+      indexJson = JSON.stringify(trimmed, null, 2);
+
+      // Second pass: if still too large, summary-only mode
+      if (indexJson.length > INDEX_MAX_CHARS) {
+        const summaryIndex: any = {
+          case_summary: indexData.case_summary || indexData.summary || null,
+          phase: indexData.phase || null,
+          reconciled_values: indexData.reconciled_values || null,
+          folders: {} as Record<string, string[]>,
+        };
+        if (indexData.folders) {
+          for (const [folder, folderData] of Object.entries(indexData.folders) as [string, any][]) {
+            const files = Array.isArray(folderData) ? folderData : folderData?.files;
+            if (Array.isArray(files)) {
+              summaryIndex.folders[folder] = files.map((f: any) => f.filename || f.path || 'unknown');
+            }
+          }
+        }
+        indexJson = JSON.stringify(summaryIndex, null, 2);
+        indexJson += '\n\n[NOTE: Index was too large to include in full. Use the Read tool on .pi_tool/document_index.json for complete details.]';
+      }
+    }
+
     caseContext = `
 CASE INDEX (use this to answer questions):
-${JSON.stringify(indexData, null, 2)}
+${indexJson}
 
 WORKING DIRECTORY: ${caseFolder}
 
@@ -123,13 +142,23 @@ USER REQUEST: `;
 
       const promptWithContext = caseContext + message;
 
+      // Context size guard: if prompt is very large and we're resuming a session,
+      // drop the resume to avoid hitting context limits with stale session history
+      const PROMPT_DANGER_CHARS = 120000; // ~30K tokens
+      let effectiveSessionId = sessionId || undefined;
+      if (promptWithContext.length > PROMPT_DANGER_CHARS && effectiveSessionId) {
+        console.warn(`[context-guard] Prompt is ${promptWithContext.length} chars with session resume - dropping session to prevent overflow`);
+        effectiveSessionId = undefined;
+        await saveSession(caseFolder, "");
+      }
+
       for await (const msg of query({
         prompt: promptWithContext,
         options: {
           cwd: caseFolder,
           systemPrompt: routerPrompt,
           model: "haiku",
-          resume: sessionId || undefined,
+          resume: effectiveSessionId,
           // Haiku has Task tool to spawn Sonnet specialists
           allowedTools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "Task"],
           permissionMode: "acceptEdits",
@@ -163,9 +192,25 @@ USER REQUEST: `;
 
           for (const block of msg.message.content) {
             if (block.type === "text") {
-              await stream.writeSSE({
-                data: JSON.stringify({ type: "text", content: block.text }),
-              });
+              // Filter out compaction-related messages from the SDK
+              const text = block.text.toLowerCase();
+              const isCompactionMessage =
+                text.includes("prompt is too long") ||
+                text.includes("process exited with code 1") ||
+                text.includes("compacting conversation") ||
+                text.includes("conversation has been compacted") ||
+                text.includes("summarizing the conversation");
+
+              if (isCompactionMessage) {
+                // Send compaction event instead of text (for UI indicator)
+                await stream.writeSSE({
+                  data: JSON.stringify({ type: "compaction" }),
+                });
+              } else {
+                await stream.writeSSE({
+                  data: JSON.stringify({ type: "text", content: block.text }),
+                });
+              }
             } else if (block.type === "tool_use") {
               await stream.writeSSE({
                 data: JSON.stringify({ type: "tool", name: block.name }),
@@ -218,13 +263,76 @@ USER REQUEST: `;
         await saveSession(caseFolder, currentSessionId);
       }
     } catch (error) {
-      console.error("Agent error:", error);
-      await stream.writeSSE({
-        data: JSON.stringify({
-          type: "error",
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      });
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorLower = errorMsg.toLowerCase();
+      console.error("Agent error:", errorMsg);
+
+      // Detect autocompact crash: "process exited with code 1" or "prompt is too long"
+      const isContextOverflow =
+        errorLower.includes('process exited with code 1') ||
+        errorLower.includes('prompt is too long') ||
+        errorLower.includes('context_length_exceeded') ||
+        errorLower.includes('max_tokens');
+
+      if (isContextOverflow) {
+        // Clear the broken session immediately so the next attempt starts fresh
+        await saveSession(caseFolder, "");
+        console.warn(`[recovery] Context overflow detected, cleared session for ${caseFolder}`);
+
+        // Try to generate a brief summary of recent chat history for continuity
+        let recoverySummary = "The conversation context grew too large and was reset. Your previous discussion has been preserved in chat history.";
+        try {
+          const historyPath = join(caseFolder, ".pi_tool", "chat_history.json");
+          const historyContent = await readFile(historyPath, "utf-8");
+          const history = JSON.parse(historyContent);
+          if (history.messages && history.messages.length > 0) {
+            // Take last few messages for a quick summary
+            const recentMessages = history.messages.slice(-6);
+            const conversationText = recentMessages
+              .map((m: any) => `${m.role.toUpperCase()}: ${(m.content || '').slice(0, 200)}`)
+              .join('\n');
+
+            // Generate a quick summary via Haiku (non-streaming, fire-and-forget if it fails)
+            let summaryText = '';
+            for await (const msg of query({
+              prompt: `Briefly summarize this recent conversation (2-3 sentences) so it can be resumed:\n\n${conversationText}\n\nSUMMARY:`,
+              options: {
+                model: "haiku",
+                allowedTools: [],
+                permissionMode: "acceptEdits",
+                maxTurns: 1,
+              },
+            })) {
+              if (msg.type === "assistant") {
+                for (const block of msg.message.content) {
+                  if (block.type === "text") summaryText += block.text;
+                }
+              }
+            }
+            if (summaryText.trim()) {
+              recoverySummary = summaryText.trim();
+            }
+          }
+        } catch (summaryError) {
+          console.error("[recovery] Failed to generate summary:", summaryError);
+          // Continue with default recovery message
+        }
+
+        await stream.writeSSE({
+          data: JSON.stringify({
+            type: "context_overflow_recovery",
+            message: "Context grew too large. Session has been reset.",
+            summary: recoverySummary,
+          }),
+        });
+      } else {
+        await stream.writeSSE({
+          data: JSON.stringify({
+            type: "error",
+            error: errorMsg,
+          }),
+        });
+      }
     }
   });
 });
@@ -358,9 +466,10 @@ app.post("/document", async (c) => {
     let folderName = null;
 
     if (index.folders) {
-      for (const [folder, docs] of Object.entries(index.folders)) {
-        if (Array.isArray(docs)) {
-          const doc = docs.find((d: any) =>
+      for (const [folder, folderData] of Object.entries(index.folders)) {
+        const files = Array.isArray(folderData) ? folderData : (folderData as any)?.files;
+        if (Array.isArray(files)) {
+          const doc = files.find((d: any) =>
             d.path === documentPath ||
             d.filename === documentPath ||
             d.path?.endsWith(documentPath)

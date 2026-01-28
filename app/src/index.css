@@ -93,3 +93,12 @@ select:focus-visible {
   --tw-prose-headings: var(--color-brand-900);
   --tw-prose-links: var(--color-accent-700);
 }
+
+/* Panel transitions for resizable layout */
+.panel-transition {
+  transition: width 300ms ease-out;
+}
+
+.panel-dragging {
+  transition: none;
+}

@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import './index.css'
 import FileViewer from './components/FileViewer'
 import Chat from './components/Chat'
 import Visualizer from './components/Visualizer'
+import ResizablePanelLayout from './components/ResizablePanelLayout'
 import CaseLoader from './components/CaseLoader'
 import FolderPicker from './components/FolderPicker'
 import FirmDashboard from './components/FirmDashboard'
@@ -50,7 +51,7 @@ export interface CaseNote {
   id: string
   content: string
   field_updated?: string
-  previous_value?: any
+  previous_value?: unknown
   source: 'chat' | 'manual'
   createdAt: string
 }
@@ -63,17 +64,44 @@ export interface ChatArchive {
   file: string
 }
 
+export type DocumentFile =
+  | {
+      filename?: string
+      file?: string
+      title?: string
+      date?: string
+      issues?: string
+      type?: string
+      key_info?: string
+      extracted_data?: Record<string, unknown>
+      [key: string]: unknown
+    }
+  | string
+
+export type DocumentFolder =
+  | { files: DocumentFile[] }
+  | { documents: DocumentFile[] }
+  | DocumentFile[]
+
+export interface GeneratedDoc {
+  name: string
+  path: string
+  fullPath?: string
+  type?: string
+  size?: number
+}
+
 export interface DocumentIndex {
   case_name: string
   indexed_at: string
-  folders: Record<string, any[]>
+  folders: Record<string, DocumentFolder>
   summary: {
     client: string
     dol: string
     dob?: string
     providers: string[]
-    total_charges: string
-    policy_limits: any
+    total_charges: string | number
+    policy_limits: Record<string, unknown> | string | null
     contact?: {
       phone?: string
       email?: string
@@ -93,10 +121,26 @@ export interface DocumentIndex {
   }
   issues_found?: string[]
   needs_review?: NeedsReviewItem[]
-  reconciled_values?: Record<string, any>
+  reconciled_values?: Record<string, unknown>
   errata?: ErrataItem[]
   case_notes?: CaseNote[]
   chat_archives?: ChatArchive[]
+}
+
+const getFolderFiles = (data: DocumentFolder): DocumentFile[] => {
+  if (Array.isArray(data)) return data
+  if (data && typeof data === 'object' && 'files' in data && Array.isArray(data.files)) {
+    return data.files
+  }
+  if (data && typeof data === 'object' && 'documents' in data && Array.isArray(data.documents)) {
+    return data.documents
+  }
+  return []
+}
+
+const getDocumentFileName = (file: DocumentFile): string | undefined => {
+  if (typeof file === 'string') return file
+  return file.filename || file.file
 }
 
 // Icon components
@@ -140,7 +184,7 @@ function App() {
   const [documentIndex, setDocumentIndex] = useState<DocumentIndex | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [viewContent, setViewContent] = useState<string>('')
-  const [generatedDocs, setGeneratedDocs] = useState<any[]>([])
+  const [generatedDocs, setGeneratedDocs] = useState<GeneratedDoc[]>([])
   const [showPicker, setShowPicker] = useState(false)
   const [fileViewUrl, setFileViewUrl] = useState<string | null>(null)
   const [fileViewName, setFileViewName] = useState<string>('')
@@ -159,14 +203,7 @@ function App() {
   const [firmChatPrompt, setFirmChatPrompt] = useState<string>('')
   const [forceShowFirmChat, setForceShowFirmChat] = useState(false)
 
-  // Load todos when firmRoot changes
-  useEffect(() => {
-    if (firmRoot) {
-      loadTodos()
-    }
-  }, [firmRoot])
-
-  const loadTodos = async () => {
+  const loadTodos = useCallback(async () => {
     if (!firmRoot) return
     try {
       const res = await fetch(`${API_URL}/api/firm/todos?root=${encodeURIComponent(firmRoot)}`)
@@ -177,7 +214,13 @@ function App() {
     } catch {
       // Ignore errors loading todos
     }
-  }
+  }, [firmRoot])
+
+  // Load todos when firmRoot changes
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadTodos()
+  }, [loadTodos])
 
   const handleToggleTodo = async (id: string) => {
     const updatedTodos = todos.map(t =>
@@ -338,8 +381,8 @@ function App() {
     try {
       const res = await fetch(`${API_URL}/api/docs/list?case=${encodeURIComponent(folder)}`)
       if (res.ok) {
-        const { docs } = await res.json()
-        setGeneratedDocs(docs)
+        const data = await res.json() as { docs?: GeneratedDoc[] }
+        setGeneratedDocs(data.docs || [])
       }
     } catch {
       // Ignore
@@ -362,11 +405,6 @@ function App() {
   const handleViewUpdate = (content: string, docPath?: string) => {
     setViewContent(content)
     setViewDocPath(docPath || null)
-  }
-
-  const handleGenerateDoc = async (_command: string) => {
-    if (!caseFolder) return
-    // TODO: Implement document generation via Chat
   }
 
   // Initial screen - select firm root folder
@@ -434,11 +472,7 @@ function App() {
           userEmail={authState?.email}
           onLogout={handleLogout}
           todos={todos}
-          isDrawerOpen={isDrawerOpen}
           onDrawerOpen={() => setIsDrawerOpen(true)}
-          onDrawerClose={() => setIsDrawerOpen(false)}
-          onToggleTodo={handleToggleTodo}
-          onClearCompleted={handleClearCompleted}
           onTodosUpdated={handleTodosUpdated}
           firmChatPrompt={firmChatPrompt}
           forceShowFirmChat={forceShowFirmChat}
@@ -604,9 +638,10 @@ function App() {
       </header>
 
       {/* Main content */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left: File Viewer */}
-        <div className="w-72 border-r border-surface-200 bg-white flex flex-col">
+      <ResizablePanelLayout
+        leftLabel="Files"
+        rightLabel="Preview"
+        leftPanel={
           <FileViewer
             documentIndex={documentIndex}
             generatedDocs={generatedDocs}
@@ -622,10 +657,8 @@ function App() {
               setFileViewName(filename)
             }}
           />
-        </div>
-
-        {/* Center: Chat */}
-        <div className="flex-1 flex flex-col bg-surface-50">
+        }
+        centerPanel={
           <Chat
             caseFolder={caseFolder}
             apiUrl={API_URL}
@@ -641,16 +674,19 @@ function App() {
               if (documentIndex?.folders) {
                 // Search through all folders to find matching file
                 for (const [folder, data] of Object.entries(documentIndex.folders)) {
-                  const files = (data as any)?.files || data
-                  if (Array.isArray(files)) {
-                    const match = files.find((f: any) =>
-                      f.filename?.toLowerCase() === filename ||
-                      f.filename?.toLowerCase().includes(filename.replace('.pdf', ''))
-                    )
-                    if (match) {
-                      resolvedPath = `${folder}/${match.filename}`
-                      break
+                  const files = getFolderFiles(data)
+                  const match = files.find((file) => {
+                    const matchName = getDocumentFileName(file)?.toLowerCase()
+                    if (!matchName) return false
+                    const trimmed = filename.replace('.pdf', '')
+                    return matchName === filename || matchName.includes(trimmed)
+                  })
+                  if (match) {
+                    const matchName = getDocumentFileName(match)
+                    if (matchName) {
+                      resolvedPath = folder === '.' || folder === '' ? matchName : `${folder}/${matchName}`
                     }
+                    break
                   }
                 }
               }
@@ -661,10 +697,8 @@ function App() {
               setViewContent('')
             }}
           />
-        </div>
-
-        {/* Right: Visualizer */}
-        <div className="w-[420px] border-l border-surface-200 bg-white flex flex-col">
+        }
+        rightPanel={
           <Visualizer
             content={viewContent}
             docPath={viewDocPath}
@@ -676,8 +710,8 @@ function App() {
             onCloseFile={() => setFileViewUrl(null)}
             onIndexUpdated={reloadDocumentIndex}
           />
-        </div>
-      </div>
+        }
+      />
 
       {/* Global Todo drawer */}
       <TodoDrawer

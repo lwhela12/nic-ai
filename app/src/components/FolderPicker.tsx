@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 
 interface Props {
   apiUrl: string
@@ -37,11 +37,7 @@ export default function FolderPicker({ apiUrl, onSelect, onCancel }: Props) {
   const [loading, setLoading] = useState(true)
   const [manualPath, setManualPath] = useState('')
 
-  useEffect(() => {
-    browse()
-  }, [])
-
-  const browse = async (dir?: string) => {
+  const browse = useCallback(async (dir?: string) => {
     setLoading(true)
     try {
       const url = dir
@@ -58,7 +54,11 @@ export default function FolderPicker({ apiUrl, onSelect, onCancel }: Props) {
     } finally {
       setLoading(false)
     }
-  }
+  }, [apiUrl])
+
+  useEffect(() => {
+    browse()
+  }, [browse])
 
   const handleSelect = () => {
     onSelect(currentPath)

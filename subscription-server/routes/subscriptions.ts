@@ -7,6 +7,7 @@ import {
   getSubscriptionByStripeCustomerId,
   updateSubscription,
   getUserById,
+  ensureDatabase,
 } from "../db";
 
 const subscriptions = new Hono();
@@ -35,7 +36,7 @@ async function getUserFromAuth(authHeader: string | undefined) {
 
   const token = authHeader.slice(7);
   const tokenHash = hashToken(token);
-  const authToken = getAuthTokenByHash(tokenHash);
+  const authToken = await getAuthTokenByHash(tokenHash);
 
   if (!authToken) return null;
 
@@ -46,6 +47,7 @@ async function getUserFromAuth(authHeader: string | undefined) {
  * Create Stripe checkout session for new subscription
  */
 subscriptions.post("/create-checkout", async (c) => {
+  await ensureDatabase();
   if (!stripe) {
     return c.json({ error: "Stripe not configured" }, 503);
   }
@@ -57,7 +59,7 @@ subscriptions.post("/create-checkout", async (c) => {
   }
 
   // Get existing subscription
-  const subscription = getSubscriptionByUserId(user.id);
+  const subscription = await getSubscriptionByUserId(user.id);
   let customerId = subscription?.stripe_customer_id;
 
   // Create Stripe customer if doesn't exist
@@ -72,7 +74,7 @@ subscriptions.post("/create-checkout", async (c) => {
 
     // Update subscription with customer ID
     if (subscription) {
-      updateSubscription(user.id, { stripe_customer_id: customerId });
+      await updateSubscription(user.id, { stripe_customer_id: customerId });
     }
   }
 
@@ -107,6 +109,7 @@ subscriptions.post("/create-checkout", async (c) => {
  * Create Stripe customer portal session for managing subscription
  */
 subscriptions.post("/portal", async (c) => {
+  await ensureDatabase();
   if (!stripe) {
     return c.json({ error: "Stripe not configured" }, 503);
   }
@@ -118,7 +121,7 @@ subscriptions.post("/portal", async (c) => {
   }
 
   // Get subscription
-  const subscription = getSubscriptionByUserId(user.id);
+  const subscription = await getSubscriptionByUserId(user.id);
   if (!subscription?.stripe_customer_id) {
     return c.json({ error: "No subscription found" }, 404);
   }
@@ -139,6 +142,7 @@ subscriptions.post("/portal", async (c) => {
  * Stripe webhook handler
  */
 subscriptions.post("/webhook", async (c) => {
+  await ensureDatabase();
   if (!stripe) {
     return c.json({ error: "Stripe not configured" }, 503);
   }
@@ -167,9 +171,9 @@ subscriptions.post("/webhook", async (c) => {
       const customerId = session.customer as string;
 
       // Find subscription by customer ID
-      const sub = getSubscriptionByStripeCustomerId(customerId);
+      const sub = await getSubscriptionByStripeCustomerId(customerId);
       if (sub) {
-        updateSubscription(sub.user_id, {
+        await updateSubscription(sub.user_id, {
           stripe_subscription_id: session.subscription as string,
           status: "active",
         });
@@ -182,10 +186,10 @@ subscriptions.post("/webhook", async (c) => {
       const subscription = event.data.object as Stripe.Subscription;
       const customerId = subscription.customer as string;
 
-      const sub = getSubscriptionByStripeCustomerId(customerId);
+      const sub = await getSubscriptionByStripeCustomerId(customerId);
       if (sub) {
         const status = subscription.status as any;
-        updateSubscription(sub.user_id, {
+        await updateSubscription(sub.user_id, {
           status: status === "active" ? "active" : status,
           current_period_start: new Date(subscription.current_period_start * 1000).toISOString(),
           current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
@@ -199,9 +203,9 @@ subscriptions.post("/webhook", async (c) => {
       const subscription = event.data.object as Stripe.Subscription;
       const customerId = subscription.customer as string;
 
-      const sub = getSubscriptionByStripeCustomerId(customerId);
+      const sub = await getSubscriptionByStripeCustomerId(customerId);
       if (sub) {
-        updateSubscription(sub.user_id, {
+        await updateSubscription(sub.user_id, {
           status: "canceled",
           canceled_at: new Date().toISOString(),
         });
@@ -214,9 +218,9 @@ subscriptions.post("/webhook", async (c) => {
       const invoice = event.data.object as Stripe.Invoice;
       const customerId = invoice.customer as string;
 
-      const sub = getSubscriptionByStripeCustomerId(customerId);
+      const sub = await getSubscriptionByStripeCustomerId(customerId);
       if (sub) {
-        updateSubscription(sub.user_id, {
+        await updateSubscription(sub.user_id, {
           status: "past_due",
         });
         console.log(`Payment failed for user ${sub.user_id}`);
@@ -235,13 +239,14 @@ subscriptions.post("/webhook", async (c) => {
  * Get current subscription status
  */
 subscriptions.get("/status", async (c) => {
+  await ensureDatabase();
   // Get user from auth
   const user = await getUserFromAuth(c.req.header("Authorization"));
   if (!user) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const subscription = getSubscriptionByUserId(user.id);
+  const subscription = await getSubscriptionByUserId(user.id);
   if (!subscription) {
     return c.json({ error: "No subscription found" }, 404);
   }

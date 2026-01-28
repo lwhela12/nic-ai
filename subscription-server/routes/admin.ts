@@ -1,12 +1,12 @@
 import { Hono } from "hono";
-import { createHash } from "crypto";
+import { sql } from "@vercel/postgres";
 import {
-  getDatabase,
   addApiKey,
   resetDailyUsage,
   deleteExpiredTokens,
+  ensureDatabase,
 } from "../db";
-import type { ApiKey, User, Subscription } from "../db";
+import type { ApiKey } from "../db";
 
 const admin = new Hono();
 
@@ -51,6 +51,7 @@ admin.use("/*", adminAuth);
  * Add API key to pool
  */
 admin.post("/api-keys", async (c) => {
+  await ensureDatabase();
   const body = await c.req.json();
   const { key, name } = body;
 
@@ -59,7 +60,7 @@ admin.post("/api-keys", async (c) => {
   }
 
   const encryptedKey = encryptApiKey(key);
-  const apiKey = addApiKey(encryptedKey, name);
+  const apiKey = await addApiKey(encryptedKey, name);
 
   if (!apiKey) {
     return c.json({ error: "Failed to add API key" }, 500);
@@ -68,7 +69,7 @@ admin.post("/api-keys", async (c) => {
   return c.json({
     id: apiKey.id,
     name: apiKey.key_name,
-    isActive: apiKey.is_active === 1,
+    isActive: apiKey.is_active,
     createdAt: apiKey.created_at,
   });
 });
@@ -77,19 +78,19 @@ admin.post("/api-keys", async (c) => {
  * List all API keys (without exposing actual keys)
  */
 admin.get("/api-keys", async (c) => {
-  const db = getDatabase();
-  const keys = db.query(`
+  await ensureDatabase();
+  const { rows } = await sql`
     SELECT id, key_name, is_active, assigned_to_user_id, daily_usage_tokens,
            last_usage_reset, created_at
     FROM api_key_pool
     ORDER BY created_at DESC
-  `).all() as ApiKey[];
+  `;
 
   return c.json({
-    keys: keys.map(k => ({
+    keys: rows.map((k: any) => ({
       id: k.id,
       name: k.key_name,
-      isActive: k.is_active === 1,
+      isActive: k.is_active,
       assignedToUserId: k.assigned_to_user_id,
       dailyUsageTokens: k.daily_usage_tokens,
       lastUsageReset: k.last_usage_reset,
@@ -102,21 +103,21 @@ admin.get("/api-keys", async (c) => {
  * Toggle API key active status
  */
 admin.patch("/api-keys/:id", async (c) => {
+  await ensureDatabase();
   const id = parseInt(c.req.param("id"));
   const body = await c.req.json();
 
-  const db = getDatabase();
   const updates: string[] = [];
   const values: any[] = [];
 
   if (body.isActive !== undefined) {
-    updates.push("is_active = ?");
-    values.push(body.isActive ? 1 : 0);
+    values.push(body.isActive);
+    updates.push(`is_active = $${values.length}`);
   }
 
   if (body.name !== undefined) {
-    updates.push("key_name = ?");
     values.push(body.name);
+    updates.push(`key_name = $${values.length}`);
   }
 
   if (updates.length === 0) {
@@ -124,7 +125,8 @@ admin.patch("/api-keys/:id", async (c) => {
   }
 
   values.push(id);
-  db.run(`UPDATE api_key_pool SET ${updates.join(", ")} WHERE id = ?`, values);
+  const query = `UPDATE api_key_pool SET ${updates.join(", ")} WHERE id = $${values.length}`;
+  await sql.query(query, values);
 
   return c.json({ success: true });
 });
@@ -133,9 +135,9 @@ admin.patch("/api-keys/:id", async (c) => {
  * Delete API key
  */
 admin.delete("/api-keys/:id", async (c) => {
+  await ensureDatabase();
   const id = parseInt(c.req.param("id"));
-  const db = getDatabase();
-  db.run("DELETE FROM api_key_pool WHERE id = ?", [id]);
+  await sql`DELETE FROM api_key_pool WHERE id = ${id}`;
 
   return c.json({ success: true });
 });
@@ -144,18 +146,18 @@ admin.delete("/api-keys/:id", async (c) => {
  * List all users with subscription info
  */
 admin.get("/users", async (c) => {
-  const db = getDatabase();
-  const users = db.query(`
+  await ensureDatabase();
+  const { rows } = await sql`
     SELECT u.id, u.email, u.created_at,
            s.status as subscription_status, s.trial_ends_at, s.current_period_end,
            s.stripe_customer_id, s.stripe_subscription_id
     FROM users u
     LEFT JOIN subscriptions s ON u.id = s.user_id
     ORDER BY u.created_at DESC
-  `).all() as (User & Partial<Subscription>)[];
+  `;
 
   return c.json({
-    users: users.map(u => ({
+    users: rows.map((u: any) => ({
       id: u.id,
       email: u.email,
       createdAt: u.created_at,
@@ -171,24 +173,24 @@ admin.get("/users", async (c) => {
  * Get usage statistics
  */
 admin.get("/stats", async (c) => {
-  const db = getDatabase();
+  await ensureDatabase();
 
-  const userCount = db.query("SELECT COUNT(*) as count FROM users").get() as { count: number };
-  const activeSubCount = db.query(
-    "SELECT COUNT(*) as count FROM subscriptions WHERE status IN ('active', 'trialing')"
-  ).get() as { count: number };
-  const apiKeyCount = db.query(
-    "SELECT COUNT(*) as count FROM api_key_pool WHERE is_active = 1"
-  ).get() as { count: number };
-  const validationsToday = db.query(
-    "SELECT COUNT(*) as count FROM daily_validations WHERE validated_at > datetime('now', '-1 day')"
-  ).get() as { count: number };
+  const { rows: [userCount] } = await sql`SELECT COUNT(*) as count FROM users`;
+  const { rows: [activeSubCount] } = await sql`
+    SELECT COUNT(*) as count FROM subscriptions WHERE status IN ('active', 'trialing')
+  `;
+  const { rows: [apiKeyCount] } = await sql`
+    SELECT COUNT(*) as count FROM api_key_pool WHERE is_active = TRUE
+  `;
+  const { rows: [validationsToday] } = await sql`
+    SELECT COUNT(*) as count FROM daily_validations WHERE validated_at > NOW() - INTERVAL '1 day'
+  `;
 
   return c.json({
-    totalUsers: userCount.count,
-    activeSubscriptions: activeSubCount.count,
-    activeApiKeys: apiKeyCount.count,
-    validationsLast24h: validationsToday.count,
+    totalUsers: Number(userCount.count),
+    activeSubscriptions: Number(activeSubCount.count),
+    activeApiKeys: Number(apiKeyCount.count),
+    validationsLast24h: Number(validationsToday.count),
   });
 });
 
@@ -196,16 +198,17 @@ admin.get("/stats", async (c) => {
  * Run maintenance tasks (cleanup tokens, reset usage)
  */
 admin.post("/maintenance", async (c) => {
+  await ensureDatabase();
   const body = await c.req.json().catch(() => ({}));
   const results: Record<string, any> = {};
 
   if (body.cleanupTokens !== false) {
-    const deleted = deleteExpiredTokens();
+    const deleted = await deleteExpiredTokens();
     results.expiredTokensDeleted = deleted;
   }
 
   if (body.resetDailyUsage) {
-    const reset = resetDailyUsage();
+    const reset = await resetDailyUsage();
     results.apiKeysReset = reset;
   }
 

@@ -15,27 +15,41 @@ Use sub-agents for each folder to manage context efficiently.
 {
   "case_name": "string",
   "indexed_at": "ISO date",
+  "case_phase": "Intake|Investigation|Treatment|Demand|Negotiation|Settlement|Complete",
   "folders": {
-    "Intake": [
-      {
-        "file": "filename.pdf",
-        "title": "what this document is",
-        "date": "document date if found",
-        "key_info": "what's important - amounts, parties, dates, etc.",
-        "issues": "any problems noticed (optional)"
-      }
-    ],
-    "1P": [],
-    "3P": [],
-    "Records & Bills": [],
-    "Balance REQT & RECD": []
+    "Intake": {
+      "files": [
+        {
+          "filename": "filename.pdf",
+          "type": "intake_form|lor|declaration|medical_record|medical_bill|correspondence|authorization|identification|police_report|demand|settlement|lien|balance_request|balance_confirmation|property_damage|other",
+          "key_info": "2-3 sentence summary of most important information",
+          "extracted_data": {
+            "client_name": "...",
+            "dob": "MM/DD/YYYY",
+            "dol": "MM/DD/YYYY",
+            "charges": 1234.56,
+            "provider": "..."
+          }
+        }
+      ]
+    },
+    "1P": { "files": [] },
+    "3P": { "files": [] },
+    "Records & Bills": { "files": [] },
+    "Balance REQT & RECD": { "files": [] }
   },
   "summary": {
     "client": "name",
     "dol": "date of loss",
     "providers": ["list"],
-    "total_charges": "dollar amount",
-    "policy_limits": "1P and 3P limits"
-  }
+    "total_charges": 0,
+    "policy_limits": {
+      "1P": { "carrier": "...", "bodily_injury": "...", "medical_payments": "..." },
+      "3P": { "carrier": "...", "bodily_injury": "..." }
+    }
+  },
+  "issues_found": [],
+  "needs_review": [],
+  "errata": []
 }
 ```

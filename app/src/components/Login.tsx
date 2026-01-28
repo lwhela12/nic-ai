@@ -64,7 +64,7 @@ export default function Login({ apiUrl, onLoginSuccess }: LoginProps) {
       }
 
       onLoginSuccess(data.email, data.subscriptionStatus)
-    } catch (err) {
+    } catch {
       setError('Could not connect to server. Please try again.')
     } finally {
       setIsLoading(false)

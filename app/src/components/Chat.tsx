@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, memo } from 'react'
+import { useState, useRef, useEffect, useMemo, memo, useCallback } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -143,6 +143,19 @@ function parseShowFileCommands(content: string): { displayContent: string; fileP
 
 // Memoized message component to prevent re-rendering Markdown on input changes
 const MessageItem = memo(function MessageItem({ msg, onShowFile }: { msg: Message; onShowFile?: (path: string) => void }) {
+  // Parse SHOW_FILE commands from assistant messages
+  const { displayContent, filePaths } = useMemo(
+    () => parseShowFileCommands(msg.content),
+    [msg.content]
+  )
+
+  // Trigger file display for the first file found (on mount or when content changes)
+  useEffect(() => {
+    if (filePaths.length > 0 && onShowFile) {
+      onShowFile(filePaths[0])
+    }
+  }, [filePaths, onShowFile])
+
   if (msg.role === 'user') {
     return (
       <div className="flex justify-end">
@@ -152,16 +165,6 @@ const MessageItem = memo(function MessageItem({ msg, onShowFile }: { msg: Messag
       </div>
     )
   }
-
-  // Parse SHOW_FILE commands from assistant messages
-  const { displayContent, filePaths } = parseShowFileCommands(msg.content)
-
-  // Trigger file display for the first file found (on mount or when content changes)
-  useEffect(() => {
-    if (filePaths.length > 0 && onShowFile) {
-      onShowFile(filePaths[0])
-    }
-  }, [msg.content]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="flex justify-start">
@@ -226,22 +229,23 @@ const KEEP_RECENT = 2
 
 // Context usage thresholds
 const CONTEXT_WARNING_PERCENT = 50  // Yellow warning
-const CONTEXT_DANGER_PERCENT = 70   // Red warning, trigger auto-summarize
+const CONTEXT_DANGER_PERCENT = 55   // Red warning, trigger auto-summarize (lowered for earlier prevention)
 
 export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onShowFile }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const [isStreaming, setIsStreaming] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [currentTools, setCurrentTools] = useState<string[]>([])
   const [isSummarizing, setIsSummarizing] = useState(false)
+  const [isCompacting, setIsCompacting] = useState(false)
   const [conversationSummary, setConversationSummary] = useState<string | null>(null)
   const [contextUsage, setContextUsage] = useState<{ inputTokens: number; outputTokens: number; percent: number } | null>(null)
   const [archives, setArchives] = useState<ChatArchive[]>([])
   const [showArchives, setShowArchives] = useState(false)
   const [isArchiving, setIsArchiving] = useState(false)
   const [historyLoaded, setHistoryLoaded] = useState(false)
+  const lastUserMessageRef = useRef<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   // Reset chat state when switching cases
@@ -359,6 +363,16 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
   const [isIndexing, setIsIndexing] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
+  const checkIndexStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${apiUrl}/api/files/index-status?case=${encodeURIComponent(caseFolder)}`)
+      const data = await res.json()
+      setIndexStatus(data)
+    } catch {
+      // Ignore
+    }
+  }, [apiUrl, caseFolder])
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
@@ -368,17 +382,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
     checkIndexStatus()
     const interval = setInterval(checkIndexStatus, 30000)
     return () => clearInterval(interval)
-  }, [caseFolder])
-
-  const checkIndexStatus = async () => {
-    try {
-      const res = await fetch(`${apiUrl}/api/files/index-status?case=${encodeURIComponent(caseFolder)}`)
-      const data = await res.json()
-      setIndexStatus(data)
-    } catch {
-      // Ignore
-    }
-  }
+  }, [caseFolder, checkIndexStatus])
 
   const runReindex = async (forceFullReindex = false) => {
     if (isIndexing) return
@@ -490,14 +494,18 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
     }
   }
 
-  const sendMessage = async (overrideMessage?: string) => {
+  const sendMessage = async (overrideMessage?: string, isRetry = false) => {
     const userMessage = (overrideMessage || input).trim()
     if (!userMessage || isLoading) return
 
     setInput('')
-    setMessages((prev) => [...prev, { role: 'user', content: userMessage }])
+    if (!isRetry) {
+      setMessages((prev) => [...prev, { role: 'user', content: userMessage }])
+    }
+    lastUserMessageRef.current = userMessage
     setIsLoading(true)
     setCurrentTools([])
+    let compactionDetected = false
 
     try {
       // Include conversation summary in message if we have one and no active session
@@ -561,6 +569,37 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                 })
               }
 
+              if (data.type === 'compaction') {
+                // Show compaction indicator (SDK is auto-compacting context)
+                compactionDetected = true
+                setIsCompacting(true)
+              }
+
+              if (data.type === 'context_overflow_recovery') {
+                // Server detected context overflow, cleared session, and provided a summary
+                compactionDetected = false
+                setSessionId(null)
+                setIsCompacting(false)
+                const summary = data.summary || 'Previous conversation context was reset.'
+                setConversationSummary(summary)
+                setContextUsage(null)
+
+                // Show recovery message to user
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    role: 'assistant',
+                    content: `**Context Reset** - The conversation grew too large and has been reset. Here's a summary of what was discussed:\n\n${summary}\n\n*Retrying your last message...*`,
+                  },
+                ])
+
+                // Auto-retry the last user message with fresh session
+                const retryMsg = lastUserMessageRef.current
+                if (retryMsg) {
+                  setTimeout(() => sendMessage(retryMsg, true), 500)
+                }
+              }
+
               if (data.type === 'done') {
                 if (data.sessionId) setSessionId(data.sessionId)
                 // Update final usage if provided
@@ -587,24 +626,10 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
 
               if (data.type === 'error') {
                 const errorMsg = data.error || 'Unknown error'
-                const isContextTooLong = errorMsg.toLowerCase().includes('too long') ||
-                  errorMsg.toLowerCase().includes('context') ||
-                  errorMsg.toLowerCase().includes('token')
-
-                if (isContextTooLong) {
-                  setMessages((prev) => [
-                    ...prev,
-                    {
-                      role: 'assistant',
-                      content: `**Context too long** - The conversation history has grown too large. Click "Clear session" above to start fresh, then try your request again.`
-                    },
-                  ])
-                } else {
-                  setMessages((prev) => [
-                    ...prev,
-                    { role: 'assistant', content: `Error: ${errorMsg}` },
-                  ])
-                }
+                setMessages((prev) => [
+                  ...prev,
+                  { role: 'assistant', content: `Error: ${errorMsg}` },
+                ])
               }
             } catch {
               // Ignore parse errors
@@ -637,7 +662,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
         }
         return currentMessages
       })
-    } catch (error) {
+    } catch {
       setMessages((prev) => [
         ...prev,
         { role: 'assistant', content: 'Error communicating with the agent. Please try again.' },
@@ -645,6 +670,25 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
     } finally {
       setIsLoading(false)
       setCurrentTools([])
+      // If compaction indicator was shown but no recovery event arrived,
+      // the session is likely broken - clear it client-side
+      if (compactionDetected) {
+        setSessionId(null)
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: '**Session Reset** - Context compaction encountered an issue. Session has been cleared. Please try your message again.',
+          },
+        ])
+        // Clear server-side session too
+        fetch(`${apiUrl}/api/claude/clear-session`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ caseFolder }),
+        }).catch(() => {})
+      }
+      setIsCompacting(false)
     }
   }
 
@@ -894,6 +938,18 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
               </svg>
               Summarizing conversation to reduce context...
+            </div>
+          </div>
+        )}
+
+        {isCompacting && (
+          <div className="flex justify-center py-2">
+            <div className="flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg text-sm">
+              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+              </svg>
+              Compacting context...
             </div>
           </div>
         )}

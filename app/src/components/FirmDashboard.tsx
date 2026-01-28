@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import FirmChat from './FirmChat'
 
 interface FirmTodo {
@@ -45,11 +45,7 @@ interface Props {
   onLogout?: () => void
   // Todo props - managed by App.tsx
   todos: FirmTodo[]
-  isDrawerOpen: boolean
   onDrawerOpen: () => void
-  onDrawerClose: () => void
-  onToggleTodo: (id: string) => void
-  onClearCompleted: () => void
   onTodosUpdated: (todos: FirmTodo[]) => void
   // Task generation props
   firmChatPrompt?: string
@@ -67,6 +63,8 @@ interface BatchProgress {
   filesComplete: number
   currentFile: string
 }
+
+type SortField = 'name' | 'phase' | 'sol' | 'specials'
 
 // Icons
 const ScaleIcon = () => (
@@ -132,29 +130,18 @@ const ClipboardDocumentListIcon = () => (
 
 export default function FirmDashboard({
   apiUrl, firmRoot, onSelectCase, onChangeFirmRoot, userEmail, onLogout,
-  todos, isDrawerOpen, onDrawerOpen, onDrawerClose, onToggleTodo, onClearCompleted, onTodosUpdated,
+  todos, onDrawerOpen, onTodosUpdated,
   firmChatPrompt, forceShowFirmChat, onFirmChatPromptUsed
 }: Props) {
   const [firmData, setFirmData] = useState<FirmData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [sortField, setSortField] = useState<'name' | 'phase' | 'sol' | 'specials'>('sol')
+  const [sortField, setSortField] = useState<SortField>('sol')
   const [filterPhase, setFilterPhase] = useState<string>('all')
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null)
   const [view, setView] = useState<'dashboard' | 'firmChat'>('dashboard')
 
-  useEffect(() => {
-    loadCases()
-  }, [firmRoot])
-
-  // Switch to Firm Chat when forceShowFirmChat is true
-  useEffect(() => {
-    if (forceShowFirmChat) {
-      setView('firmChat')
-    }
-  }, [forceShowFirmChat])
-
-  const loadCases = async () => {
+  const loadCases = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
@@ -167,7 +154,18 @@ export default function FirmDashboard({
     } finally {
       setLoading(false)
     }
-  }
+  }, [apiUrl, firmRoot])
+
+  useEffect(() => {
+    loadCases()
+  }, [loadCases])
+
+  // Switch to Firm Chat when forceShowFirmChat is true
+  useEffect(() => {
+    if (forceShowFirmChat) {
+      setView('firmChat')
+    }
+  }, [forceShowFirmChat])
 
   const startBatchIndex = async (casePaths?: string[]) => {
     setBatchProgress({
@@ -325,17 +323,22 @@ export default function FirmDashboard({
     }
   }
 
-  const formatPolicyLimits = (limits?: string | Record<string, unknown>) => {
+  const formatPolicyLimits = (limits?: string | Record<string, unknown>): React.ReactNode => {
     if (!limits) return '—'
     if (typeof limits === 'string') return limits
 
-    const extractString = (val: unknown): string | null => {
-      if (typeof val === 'string') return val
+    const formatNum = (n: number) => '$' + n.toLocaleString()
+
+    const extractPrimary = (val: unknown): string | null => {
+      if (typeof val === 'string') return val.length > 30 ? val.slice(0, 27) + '…' : val
+      if (typeof val === 'number') return formatNum(val)
       if (typeof val === 'object' && val !== null) {
         const obj = val as Record<string, unknown>
-        const biValue = obj['bodily_injury'] || obj['bodily_injury_settlement'] ||
-                        obj['bi_limit'] || obj['bi'] || obj['limit']
-        if (typeof biValue === 'string') return biValue
+        for (const k of ['bodily_injury', 'bodily_injury_per_person', 'bi', 'bi_limit', 'bodily_injury_settlement']) {
+          const v = obj[k]
+          if (typeof v === 'string') return v
+          if (typeof v === 'number') return formatNum(v)
+        }
         for (const v of Object.values(obj)) {
           if (typeof v === 'string' && v.includes('$')) return v
         }
@@ -343,24 +346,33 @@ export default function FirmDashboard({
       return null
     }
 
+    const is3P = (key: string) => {
+      const k = key.toLowerCase()
+      return k.startsWith('3p') || k.includes('third_party') || k.includes('third')
+    }
+    const is1P = (key: string) => {
+      const k = key.toLowerCase()
+      return k.startsWith('1p') || k.includes('first_party') || k.includes('first')
+    }
+
+    let thirdParty: string | null = null
+    let firstParty: string | null = null
+
     if (typeof limits === 'object') {
-      const directBi = limits['3P_bi'] || limits['3p_bi'] || limits['bi'] || limits['3P_liability']
-      const directBiStr = extractString(directBi)
-      if (directBiStr) return directBiStr
-
       for (const [key, val] of Object.entries(limits)) {
-        if (key.toLowerCase().includes('3p') && typeof val === 'object') {
-          const str = extractString(val)
-          if (str) return str
-        }
-      }
-
-      for (const val of Object.values(limits)) {
-        const str = extractString(val)
-        if (str) return str
+        if (!thirdParty && is3P(key)) thirdParty = extractPrimary(val)
+        if (!firstParty && is1P(key)) firstParty = extractPrimary(val)
       }
     }
-    return '—'
+
+    if (!thirdParty && !firstParty) return '—'
+
+    return (
+      <div className="leading-snug">
+        {thirdParty && <div>3P: {thirdParty}</div>}
+        {firstParty && <div>1P: {firstParty}</div>}
+      </div>
+    )
   }
 
   const getSolBadge = (days?: number) => {
@@ -592,7 +604,7 @@ export default function FirmDashboard({
               <label className="text-sm font-medium text-brand-600">Sort by</label>
               <select
                 value={sortField}
-                onChange={(e) => setSortField(e.target.value as any)}
+                onChange={(e) => setSortField(e.target.value as SortField)}
                 className="text-sm border border-surface-200 rounded-lg px-3 py-2 bg-white
                            focus:outline-none focus:ring-2 focus:ring-accent-500 focus:border-transparent"
               >
@@ -631,7 +643,7 @@ export default function FirmDashboard({
                 <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Phase</th>
                 <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Date of Loss</th>
                 <th className="text-right px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Specials</th>
-                <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Policy Limit</th>
+                <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Policy Limits</th>
                 <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">SOL</th>
                 <th className="text-center px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Status</th>
               </tr>

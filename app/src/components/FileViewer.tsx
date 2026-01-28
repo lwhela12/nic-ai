@@ -1,9 +1,9 @@
-import { useState, useMemo, useEffect } from 'react'
-import type { DocumentIndex, NeedsReviewItem } from '../App'
+import { useState, useMemo } from 'react'
+import type { DocumentIndex, NeedsReviewItem, DocumentFile, DocumentFolder, GeneratedDoc } from '../App'
 
 interface Props {
   documentIndex: DocumentIndex | null
-  generatedDocs: any[]
+  generatedDocs: GeneratedDoc[]
   caseFolder: string
   apiUrl: string
   onDocSelect: (content: string, docPath?: string) => void
@@ -17,12 +17,6 @@ type FilterOption = 'all' | 'medical' | '1p' | '3p' | 'intake'
 const ChevronDownIcon = () => (
   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-  </svg>
-)
-
-const ChevronRightIcon = () => (
-  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
   </svg>
 )
 
@@ -60,14 +54,15 @@ const WarningIcon = () => (
 export default function FileViewer({ documentIndex, generatedDocs, caseFolder, apiUrl, onDocSelect, onFileView }: Props) {
   const [sort, setSort] = useState<SortOption>('folder')
   const [filter, setFilter] = useState<FilterOption>('all')
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
-
-  // Expand all folders when index loads or changes
-  useEffect(() => {
-    if (documentIndex?.folders) {
-      setExpandedFolders(new Set(Object.keys(documentIndex.folders)))
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
+  const folderKeys = useMemo(() => Object.keys(documentIndex?.folders || {}), [documentIndex])
+  const expandedFolders = useMemo(() => {
+    const expanded = new Set<string>()
+    for (const key of folderKeys) {
+      if (!collapsedFolders.has(key)) expanded.add(key)
     }
-  }, [documentIndex])
+    return expanded
+  }, [folderKeys, collapsedFolders])
 
   // Build a map of filenames that need review, with their review info
   const filesNeedingReview = useMemo(() => {
@@ -85,29 +80,30 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
   }, [documentIndex])
 
   const toggleFolder = (folder: string) => {
-    const next = new Set(expandedFolders)
-    if (next.has(folder)) {
-      next.delete(folder)
-    } else {
-      next.add(folder)
-    }
-    setExpandedFolders(next)
+    setCollapsedFolders((prev) => {
+      const next = new Set(prev)
+      if (next.has(folder)) {
+        next.delete(folder)
+      } else {
+        next.add(folder)
+      }
+      return next
+    })
   }
 
   // Normalize all folders (regardless of filter) - used for file lookup
   const allFolders = useMemo(() => {
     if (!documentIndex?.folders) return {}
 
-    const normalizedFolders: Record<string, any[]> = {}
+    const normalizedFolders: Record<string, DocumentFile[]> = {}
     for (const [key, val] of Object.entries(documentIndex.folders)) {
-      if (Array.isArray(val)) {
-        normalizedFolders[key] = val
-      } else if (val && typeof val === 'object' && 'files' in val && Array.isArray((val as any).files)) {
-        normalizedFolders[key] = (val as any).files
-      } else if (val && typeof val === 'object' && 'documents' in val && Array.isArray((val as any).documents)) {
-        normalizedFolders[key] = (val as any).documents
-      } else {
-        continue
+      const folderData = val as DocumentFolder
+      if (Array.isArray(folderData)) {
+        normalizedFolders[key] = folderData
+      } else if (folderData && typeof folderData === 'object' && 'files' in folderData && Array.isArray(folderData.files)) {
+        normalizedFolders[key] = folderData.files
+      } else if (folderData && typeof folderData === 'object' && 'documents' in folderData && Array.isArray(folderData.documents)) {
+        normalizedFolders[key] = folderData.documents
       }
     }
     return normalizedFolders
@@ -139,20 +135,6 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
     const url = `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(path)}`
     // Add PDF viewer hint for inline display
     return filename.toLowerCase().endsWith('.pdf') ? `${url}#view=FitH` : url
-  }
-
-  // Find which folder a file is in by filename (case-insensitive) - searches ALL folders
-  const findFileFolder = (filename: string): string | null => {
-    const lowerFilename = filename.toLowerCase()
-    for (const [folder, files] of Object.entries(allFolders)) {
-      for (const file of files) {
-        const fn = typeof file === 'string' ? file : (file.file || file.filename || '')
-        if (fn.toLowerCase() === lowerFilename) {
-          return folder
-        }
-      }
-    }
-    return null
   }
 
   const totalFiles = Object.values(filteredFolders).reduce((acc, files) => acc + files.length, 0)
@@ -224,11 +206,11 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
 
             {expandedFolders.has(folder) && (
               <div className="ml-4 pl-4 border-l border-surface-200 mt-1 space-y-0.5">
-                {files.map((file: any, i: number) => {
+                {files.map((file, i) => {
                   // Handle both object format and string format (legacy indexes)
                   const isStringFile = typeof file === 'string'
                   const fileName = isStringFile ? file : (file.file || file.filename || 'Unknown')
-                  const fileData = isStringFile ? { filename: file } : file
+                  const fileData = isStringFile ? undefined : file
                   const reviewInfo = filesNeedingReview.get(fileName.toLowerCase())
                   const needsReview = !!reviewInfo
                   return (
@@ -243,14 +225,14 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
                             : ''
                           const content = `
 <div class="p-6">
-  <h2 class="text-lg font-semibold text-gray-900 mb-1">${fileData.title || fileName}</h2>
+  <h2 class="text-lg font-semibold text-gray-900 mb-1">${fileData?.title || fileName}</h2>
   <p class="text-sm text-gray-500 mb-4">${fileName}</p>
-  ${fileData.date ? `<div class="text-sm mb-3"><span class="font-medium text-gray-700">Date:</span> <span class="text-gray-600">${fileData.date}</span></div>` : ''}
+  ${fileData?.date ? `<div class="text-sm mb-3"><span class="font-medium text-gray-700">Date:</span> <span class="text-gray-600">${fileData.date}</span></div>` : ''}
   <div class="bg-gray-50 rounded-xl p-4">
     <p class="text-sm font-medium text-gray-900 mb-2">Key Information</p>
-    <p class="text-sm text-gray-600 leading-relaxed">${fileData.key_info || 'No details extracted'}</p>
+    <p class="text-sm text-gray-600 leading-relaxed">${fileData?.key_info || 'No details extracted'}</p>
   </div>
-  ${fileData.issues ? `<div class="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800"><span class="font-medium">Issue:</span> ${fileData.issues}</div>` : ''}
+  ${fileData?.issues ? `<div class="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800"><span class="font-medium">Issue:</span> ${fileData.issues}</div>` : ''}
   ${reviewWarning}
 </div>`
                           onDocSelect(content)
@@ -258,7 +240,7 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
                         className={`flex-1 flex items-center gap-2 text-left px-2 py-1.5 text-sm
                                    ${needsReview ? 'text-amber-700 hover:bg-amber-100' : 'text-brand-600 hover:bg-surface-100 hover:text-brand-900'}
                                    rounded-lg truncate transition-colors`}
-                        title={`${fileData.title || fileName}${needsReview ? '\n\n⚠️ NEEDS REVIEW: ' + reviewInfo?.reason : ''}\n\nClick for info, eye icon to view file`}
+                        title={`${fileData?.title || fileName}${needsReview ? '\n\n⚠️ NEEDS REVIEW: ' + reviewInfo?.reason : ''}\n\nClick for info, eye icon to view file`}
                       >
                         {needsReview ? (
                           <span className="text-amber-500">

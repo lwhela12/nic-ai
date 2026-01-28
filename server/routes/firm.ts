@@ -4,29 +4,34 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readdir, readFile, stat, writeFile, mkdir } from "fs/promises";
 import { join, relative, dirname } from "path";
 import { getFirmSession, saveFirmSession } from "../sessions";
+import { PHASE_RULES } from "../shared/phase-rules";
 
 const app = new Hono();
 
-// Phase determination prompt - used after indexing to classify case phase
-const phasePrompt = `Read .pi_tool/document_index.json and determine the case phase based on these markers:
+// Practice guide loader with caching
+let practiceGuideCache: string | null = null;
 
-- **Intake**: Has intake docs but no LOR files sent
-- **Investigation**: LORs sent, gathering insurance/police info
-- **Treatment**: Medical records accumulating, no demand yet
-- **Demand**: Demand letter exists in 3P folder
-- **Negotiation**: Settlement correspondence exists, no settlement memo
-- **Settlement**: Settlement memo exists
-- **Complete**: Release signed, case complete
+async function loadPracticeGuide(): Promise<string> {
+  if (practiceGuideCache) return practiceGuideCache;
+  const guidePath = join(import.meta.dir, "../../agent/practice-guide.md");
+  practiceGuideCache = await readFile(guidePath, "utf-8");
+  return practiceGuideCache;
+}
 
-Check the folders object for indicator files:
-1. LOR files (LOR 1P, LOR 3P) → at least Investigation
-2. Medical records in "Records & Bills" → at least Treatment
-3. "Demand" in filename in 3P folder → at least Demand
-4. Settlement correspondence → Negotiation
-5. Settlement memo in Settlement folder → Settlement
-6. Signed release in Settlement folder → Complete
-
-Update the "case_phase" field and write the index back.`;
+function extractSections(markdown: string, sectionHeaders: string[]): string {
+  const sections: string[] = [];
+  for (const header of sectionHeaders) {
+    // Match ## <roman numeral>. <header text> through to next ## or end
+    const pattern = new RegExp(
+      `(## ${header}[\\s\\S]*?)(?=\\n## [IVX]+\\.|$)`,
+    );
+    const match = markdown.match(pattern);
+    if (match) {
+      sections.push(match[1].trim());
+    }
+  }
+  return sections.join("\n\n---\n\n");
+}
 
 interface CaseSummary {
   path: string;
@@ -37,7 +42,7 @@ interface CaseSummary {
   casePhase?: string;
   dateOfLoss?: string;
   totalSpecials?: number;
-  policyLimits?: string;
+  policyLimits?: string | Record<string, unknown>;
   statuteOfLimitations?: string;
   solDaysRemaining?: number;
   needsReindex?: boolean;
@@ -252,29 +257,46 @@ IMPORTANT:
 - If the file cannot be read or is empty, still return the JSON with key_info explaining the issue
 - Use pdftotext for PDFs: pdftotext "filename" - 2>/dev/null | head -200`;
 
-// System prompt for case summary agent (Sonnet) - SYNTHESIS ONLY
-const synthesisSystemPrompt = `You are a case summarizer for a Personal Injury law firm in Nevada.
+// Build synthesis system prompt with practice guide sections injected
+async function buildSynthesisSystemPrompt(): Promise<string> {
+  const guide = await loadPracticeGuide();
+  const practiceKnowledge = extractSections(guide, [
+    "I\\.", "II\\.", "IV\\.", "VIII\\.", "XI\\."
+  ]);
+
+  return `You are a case analyst and summarizer for a Personal Injury law firm in Nevada.
 
 You have two JSON files in .pi_tool/:
 1. document_index.json - Data extracted by Haiku from all case documents
 2. hypergraph_analysis.json - Cross-document analysis showing consensus values and conflicts
 
-YOUR JOB: Synthesize a case summary from the extracted data. Do NOT read any source PDFs.
+YOUR JOB: Analyze the case substantively and synthesize a case summary. Do NOT read any source PDFs.
 
-WORKFLOW:
+## PRACTICE KNOWLEDGE
+
+${practiceKnowledge}
+
+## WORKFLOW:
 1. Read both JSON files
-2. Use the hypergraph consensus values where available
-3. Generate a case summary from the extracted data
-4. Consolidate contact information into summary.contact object:
+2. **Case Analysis** — Using the practice knowledge above, assess:
+   - **Liability strength**: clear / moderate / contested (with reasoning)
+   - **Injury tier**: Tier 1 (soft tissue) / Tier 2 (structural) / Tier 3 (surgical) based on treatment and findings
+   - **Estimated value range**: Apply the multiplier for the injury tier against total specials
+   - **Policy limits demand appropriate?**: Yes/No based on Section IV triggers
+   - **Document quality gaps**: What critical documents are missing per the completeness checklist?
+   Write your analysis into the case_notes field.
+3. Use the hypergraph consensus values where available
+4. Generate a case summary from the extracted data
+5. Consolidate contact information into summary.contact object:
    - phone: Client's phone number
    - email: Client's email address
    - address: { street, city, state, zip }
-5. Consolidate health insurance into summary.health_insurance object:
+6. Consolidate health insurance into summary.health_insurance object:
    - carrier, group_no, member_no
-6. Consolidate claim numbers into summary.claim_numbers object
-7. Document ALL judgment calls in "errata"
-8. Put CRITICAL unresolved conflicts in "needs_review" (user must decide)
-9. Edit document_index.json with your synthesis
+7. Consolidate claim numbers into summary.claim_numbers object
+8. Document ALL judgment calls in "errata"
+9. Put CRITICAL unresolved conflicts in "needs_review" (user must decide)
+10. Edit document_index.json with your synthesis
 
 ## CRITICAL: HANDLING HYPERGRAPH CONFLICTS
 
@@ -318,17 +340,20 @@ Every field you fill in should have an errata entry explaining where it came fro
   "confidence": "high|medium|low"
 }
 
+## CASE ANALYSIS FIELDS
+
+Write these fields in document_index.json:
+- **case_notes**: Your substantive analysis — liability assessment, injury tier determination, value estimate, treatment pattern observations, priority next steps. This should be analytical, not just a data summary.
+- **liability_assessment**: "clear" | "moderate" | "contested"
+- **injury_tier**: "tier_1_soft_tissue" | "tier_2_structural" | "tier_3_surgical"
+- **estimated_value_range**: e.g. "$37,500 - $62,500" (specials x low multiplier to specials x high multiplier)
+- **policy_limits_demand_appropriate**: true | false
+
 ## PHASE RULES:
-- Intake: Has intake docs but no LOR files
-- Investigation: LORs sent, gathering info
-- Treatment: Medical records accumulating, no demand
-- Demand: Demand letter exists
-- Negotiation: Settlement correspondence
-- Settlement: Settlement memo exists
-- Complete: Release signed
+${Object.entries(PHASE_RULES).map(([phase, desc]) => `- ${phase}: ${desc}`).join('\n')}
 
 ## CRITICAL EDITING RULES:
-- The document_index.json already has placeholder fields (needs_review, errata, etc.)
+- The document_index.json already has placeholder fields (needs_review, errata, case_notes, etc.)
 - Use Edit tool to REPLACE existing values, NOT add new keys
 - Find the existing "needs_review": [] and replace it with your array
 - Find the existing "errata": [] and replace it with your array
@@ -343,10 +368,12 @@ Do not spend many turns reading files or running Bash commands. Read the hypergr
 Edit order:
 1. needs_review (with all UNCERTAIN fields)
 2. errata (with all your decisions)
-3. summary fields
-4. case_name, case_phase
+3. case_notes, liability_assessment, injury_tier, estimated_value_range, policy_limits_demand_appropriate
+4. summary fields
+5. case_name, case_phase
 
 **IMPORTANT**: You MUST write needs_review and errata arrays. Empty arrays are only acceptable if there are truly zero conflicts (which is rare).`;
+}
 
 // Usage tracking with cache breakdown
 interface UsageStats {
@@ -370,6 +397,35 @@ interface FileExtraction {
   usage?: UsageStats;
 }
 
+function normalizeFolders(input: any): Record<string, { files: any[] }> {
+  const normalized: Record<string, { files: any[] }> = {};
+  if (!input || typeof input !== "object") return normalized;
+
+  for (const [folderName, folderData] of Object.entries(input)) {
+    if (Array.isArray(folderData)) {
+      normalized[folderName] = { files: [...folderData] };
+      continue;
+    }
+
+    if (folderData && typeof folderData === "object") {
+      const files = (folderData as any).files;
+      if (Array.isArray(files)) {
+        normalized[folderName] = { files: [...files] };
+        continue;
+      }
+      const documents = (folderData as any).documents;
+      if (Array.isArray(documents)) {
+        normalized[folderName] = { files: [...documents] };
+        continue;
+      }
+    }
+
+    normalized[folderName] = { files: [] };
+  }
+
+  return normalized;
+}
+
 async function extractFile(
   caseFolder: string,
   filePath: string, // relative path like "Intake/Intake.pdf"
@@ -378,7 +434,8 @@ async function extractFile(
   onProgress?: (event: { type: string; [key: string]: any }) => void
 ): Promise<FileExtraction> {
   const filename = filePath.split('/').pop() || filePath;
-  const folder = filePath.split('/')[0] || 'root';
+  const rawFolder = dirname(filePath).replace(/\\/g, '/');
+  const folder = rawFolder === '.' ? '.' : rawFolder;
   const fullPath = join(caseFolder, filePath);
   const startTime = Date.now();
 
@@ -500,16 +557,20 @@ async function synthesizeCaseSummary(
     model: 'sonnet'
   };
 
+  const synthesisSystemPrompt = await buildSynthesisSystemPrompt();
+
   for await (const msg of query({
-    prompt: `Synthesize a case summary from the extracted data.
+    prompt: `Analyze and synthesize a case summary from the extracted data.
 
 ## PRIORITY ORDER - Edit these fields in THIS order:
 
 1. **FIRST** - Read .pi_tool/hypergraph_analysis.json
 2. **SECOND** - Edit needs_review array with ALL UNCERTAIN or conflicting fields (charges, balances with different values)
 3. **THIRD** - Edit errata array documenting your decisions
-4. **THEN** - Edit summary fields (client, dol, dob, providers, total_charges, policy_limits)
-5. **LAST** - Edit case_name, case_phase
+4. **FOURTH** - Edit case_notes with your substantive case analysis (liability, injury tier, value range, gaps)
+5. **FIFTH** - Edit liability_assessment, injury_tier, estimated_value_range, policy_limits_demand_appropriate
+6. **THEN** - Edit summary fields (client, dol, dob, providers, total_charges, policy_limits)
+7. **LAST** - Edit case_name, case_phase
 
 ## CRITICAL RULES:
 - Any hypergraph field with "consensus": "UNCERTAIN" MUST go in needs_review
@@ -599,6 +660,21 @@ async function indexCase(
 ): Promise<{ success: boolean; error?: string }> {
   const caseName = caseFolder.split('/').pop() || caseFolder;
   const isIncremental = options?.incrementalFiles && options.incrementalFiles.length > 0;
+  const indexDir = join(caseFolder, '.pi_tool');
+  const indexPath = join(indexDir, 'document_index.json');
+
+  let previousIndexContent: string | null = null;
+  let previousIndex: any = null;
+  try {
+    previousIndexContent = await readFile(indexPath, 'utf-8');
+    try {
+      previousIndex = JSON.parse(previousIndexContent);
+    } catch {
+      previousIndex = null;
+    }
+  } catch {
+    // No previous index
+  }
 
   // Aggregate usage tracking with cache breakdown
   const totalUsage = {
@@ -623,17 +699,12 @@ async function indexCase(
   try {
     onProgress({ type: "case_start", caseName, caseFolder, incremental: isIncremental });
 
-    // Load existing index if incremental
-    let existingIndex: any = null;
-    const indexDir = join(caseFolder, '.pi_tool');
-    const indexPath = join(indexDir, 'document_index.json');
-
+    // Load existing index if incremental (use preloaded index when available)
+    let existingIndex: any = previousIndex;
     if (isIncremental) {
-      try {
-        const existingContent = await readFile(indexPath, 'utf-8');
-        existingIndex = JSON.parse(existingContent);
+      if (existingIndex) {
         console.log(`[Incremental] Loaded existing index with ${Object.keys(existingIndex.folders || {}).length} folders`);
-      } catch {
+      } else {
         console.log(`[Incremental] No existing index found, falling back to full index`);
       }
     }
@@ -720,7 +791,7 @@ async function indexCase(
     // Step 3: Build preliminary index for hypergraph analysis
     // For incremental mode, start with existing folders and merge new extractions
     const folders: Record<string, { files: Array<{ filename: string; type: string; key_info: string; extracted_data?: Record<string, any> }> }> =
-      isIncremental && existingIndex?.folders ? JSON.parse(JSON.stringify(existingIndex.folders)) : {};
+      isIncremental && existingIndex?.folders ? normalizeFolders(existingIndex.folders) : {};
 
     for (const extraction of extractions) {
       if (!folders[extraction.folder]) {
@@ -765,10 +836,16 @@ async function indexCase(
       case_phase: isIncremental && existingIndex?.case_phase ? existingIndex.case_phase : 'Unknown',
       summary: baseSummary,
       folders,
-      issues_found: isIncremental && existingIndex?.issues_found ? existingIndex.issues_found : [],
-      reconciled_values: isIncremental && existingIndex?.reconciled_values ? existingIndex.reconciled_values : {},
+      issues_found: [],
+      reconciled_values: existingIndex?.reconciled_values ?? {},
       needs_review: [],
       errata: [],
+      case_notes: existingIndex?.case_notes ?? [],
+      chat_archives: existingIndex?.chat_archives ?? [],
+      liability_assessment: existingIndex?.liability_assessment ?? null,
+      injury_tier: existingIndex?.injury_tier ?? null,
+      estimated_value_range: existingIndex?.estimated_value_range ?? null,
+      policy_limits_demand_appropriate: existingIndex?.policy_limits_demand_appropriate ?? null,
     };
     await writeFile(indexPath, JSON.stringify(initialIndex, null, 2));
     console.log(`[Index] Wrote initial document_index.json`);
@@ -851,6 +928,14 @@ async function indexCase(
 
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
+    if (previousIndexContent !== null) {
+      try {
+        await writeFile(indexPath, previousIndexContent);
+        console.warn(`[Index] Restored previous document_index.json after failure`);
+      } catch (restoreError) {
+        console.error("[Index] Failed to restore previous index:", restoreError);
+      }
+    }
     onProgress({ type: "case_error", caseName, error });
     return { success: false, error };
   }
@@ -1232,7 +1317,7 @@ interface FirmContext {
     totalSpecials: number;
     solDaysRemaining?: number;
     providers: string[];
-    policyLimits?: string;
+    policyLimits?: string | Record<string, unknown>;
   }>;
   aggregates: {
     totalSpecials: number;
@@ -1449,9 +1534,25 @@ USER QUESTION: `;
         if (msg.type === "assistant") {
           for (const block of msg.message.content) {
             if (block.type === "text") {
-              await stream.writeSSE({
-                data: JSON.stringify({ type: "text", content: block.text }),
-              });
+              // Filter out compaction-related messages from the SDK
+              const text = block.text.toLowerCase();
+              const isCompactionMessage =
+                text.includes("prompt is too long") ||
+                text.includes("process exited with code 1") ||
+                text.includes("compacting conversation") ||
+                text.includes("conversation has been compacted") ||
+                text.includes("summarizing the conversation");
+
+              if (isCompactionMessage) {
+                // Send compaction event instead of text (for UI indicator)
+                await stream.writeSSE({
+                  data: JSON.stringify({ type: "compaction" }),
+                });
+              } else {
+                await stream.writeSSE({
+                  data: JSON.stringify({ type: "text", content: block.text }),
+                });
+              }
             }
           }
         }

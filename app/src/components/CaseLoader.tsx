@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import type { DocumentIndex } from '../App'
 
 interface Props {
@@ -20,13 +20,7 @@ export default function CaseLoader({ caseFolder, apiUrl, onComplete }: Props) {
   const [error, setError] = useState<string | null>(null)
   const initStarted = useRef(false)
 
-  useEffect(() => {
-    if (initStarted.current) return
-    initStarted.current = true
-    runInit()
-  }, [])
-
-  const runInit = async () => {
+  const runInit = useCallback(async () => {
     setStatus('Initializing case...')
     setProgress([])
     setError(null)
@@ -85,7 +79,13 @@ export default function CaseLoader({ caseFolder, apiUrl, onComplete }: Props) {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to initialize case')
     }
-  }
+  }, [apiUrl, caseFolder, onComplete])
+
+  useEffect(() => {
+    if (initStarted.current) return
+    initStarted.current = true
+    runInit()
+  }, [runInit])
 
   const caseName = caseFolder.split('/').pop() || caseFolder
 
