@@ -3,8 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "tsc",
-    "dev": "npx tsx --watch index.ts",
+    "dev": "npx tsx --watch api/index.ts",
     "db:migrate": "npx tsx db/migrate.ts",
     "db:seed": "npx tsx db/seed.ts"
   },
