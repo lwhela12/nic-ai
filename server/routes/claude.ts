@@ -31,7 +31,8 @@ interface ChatArchiveEntry {
 }
 
 // Log to file for debugging
-const LOG_FILE = "/tmp/claude-pi-debug.log";
+import { tmpdir } from "os";
+const LOG_FILE = join(tmpdir(), "claude-pi-debug.log");
 async function log(msg: string) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
   await appendFile(LOG_FILE, line);
