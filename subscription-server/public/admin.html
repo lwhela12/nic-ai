@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude PI Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              900: '#0f172a',
+              800: '#1e293b',
+              700: '#334155',
+              500: '#64748b',
+              400: '#94a3b8',
+              200: '#e2e8f0',
+            },
+            accent: {
+              600: '#d97706',
+              500: '#f59e0b',
+              50: '#fffbeb',
+            },
+            surface: {
+              50: '#fafaf9',
+              200: '#e7e5e4',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+  </style>
+</head>
+<body class="bg-surface-50 min-h-screen">
+  <div id="app"></div>
+
+  <script>
+    const API_BASE = window.location.origin;
+
+    let state = {
+      apiKey: localStorage.getItem('adminApiKey') || '',
+      authenticated: false,
+      tab: 'stats',
+      stats: null,
+      users: [],
+      apiKeys: [],
+      loading: false,
+      error: null,
+      showAddKey: false,
+      newKeyName: '',
+      newKeyValue: '',
+    };
+
+    function setState(updates) {
+      state = { ...state, ...updates };
+      render();
+    }
+
+    async function apiCall(endpoint, options = {}) {
+      const res = await fetch(`${API_BASE}${endpoint}`, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${state.apiKey}`,
+          ...options.headers,
+        },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      return res.json();
+    }
+
+    async function login() {
+      setState({ loading: true, error: null });
+      try {
+        const stats = await apiCall('/v1/admin/stats');
+        localStorage.setItem('adminApiKey', state.apiKey);
+        setState({ authenticated: true, stats, loading: false });
+        loadData();
+      } catch (err) {
+        setState({ error: err.message, loading: false });
+      }
+    }
+
+    async function loadData() {
+      try {
+        const [stats, usersData, keysData] = await Promise.all([
+          apiCall('/v1/admin/stats'),
+          apiCall('/v1/admin/users'),
+          apiCall('/v1/admin/api-keys'),
+        ]);
+        setState({
+          stats,
+          users: usersData.users || [],
+          apiKeys: keysData.keys || [],
+        });
+      } catch (err) {
+        setState({ error: err.message });
+      }
+    }
+
+    async function toggleKeyActive(id, isActive) {
+      try {
+        await apiCall(`/v1/admin/api-keys/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ isActive: !isActive }),
+        });
+        loadData();
+      } catch (err) {
+        setState({ error: err.message });
+      }
+    }
+
+    async function deleteKey(id) {
+      if (!confirm('Delete this API key?')) return;
+      try {
+        await apiCall(`/v1/admin/api-keys/${id}`, { method: 'DELETE' });
+        loadData();
+      } catch (err) {
+        setState({ error: err.message });
+      }
+    }
+
+    async function addKey() {
+      if (!state.newKeyValue) return;
+      setState({ loading: true });
+      try {
+        await apiCall('/v1/admin/api-keys', {
+          method: 'POST',
+          body: JSON.stringify({ key: state.newKeyValue, name: state.newKeyName || 'Unnamed' }),
+        });
+        setState({ showAddKey: false, newKeyName: '', newKeyValue: '', loading: false });
+        loadData();
+      } catch (err) {
+        setState({ error: err.message, loading: false });
+      }
+    }
+
+    async function runMaintenance() {
+      setState({ loading: true });
+      try {
+        const result = await apiCall('/v1/admin/maintenance', {
+          method: 'POST',
+          body: JSON.stringify({ cleanupTokens: true, resetDailyUsage: true }),
+        });
+        alert(`Maintenance complete: ${JSON.stringify(result.results)}`);
+        setState({ loading: false });
+        loadData();
+      } catch (err) {
+        setState({ error: err.message, loading: false });
+      }
+    }
+
+    function logout() {
+      localStorage.removeItem('adminApiKey');
+      setState({ authenticated: false, apiKey: '' });
+    }
+
+    function formatDate(dateStr) {
+      if (!dateStr) return '-';
+      return new Date(dateStr).toLocaleDateString();
+    }
+
+    function render() {
+      const app = document.getElementById('app');
+
+      if (!state.authenticated) {
+        app.innerHTML = `
+          <div class="min-h-screen flex items-center justify-center">
+            <div class="bg-white rounded-xl shadow-lg p-8 w-full max-w-md">
+              <h1 class="text-2xl font-semibold text-brand-900 mb-6">Claude PI Admin</h1>
+              ${state.error ? `<div class="bg-red-50 text-red-700 px-4 py-3 rounded-lg mb-4">${state.error}</div>` : ''}
+              <div class="space-y-4">
+                <div>
+                  <label class="block text-sm font-medium text-brand-700 mb-1">Admin API Key</label>
+                  <input
+                    type="password"
+                    id="apiKeyInput"
+                    value="${state.apiKey}"
+                    placeholder="Enter your admin API key"
+                    class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"
+                  />
+                </div>
+                <button
+                  onclick="login()"
+                  ${state.loading ? 'disabled' : ''}
+                  class="w-full bg-brand-900 text-white py-2 px-4 rounded-lg hover:bg-brand-800 transition-colors disabled:opacity-50"
+                >
+                  ${state.loading ? 'Connecting...' : 'Connect'}
+                </button>
+              </div>
+            </div>
+          </div>
+        `;
+        document.getElementById('apiKeyInput')?.addEventListener('input', (e) => {
+          state.apiKey = e.target.value;
+        });
+        document.getElementById('apiKeyInput')?.addEventListener('keypress', (e) => {
+          if (e.key === 'Enter') login();
+        });
+        return;
+      }
+
+      app.innerHTML = `
+        <div class="max-w-6xl mx-auto p-6">
+          <div class="flex justify-between items-center mb-8">
+            <h1 class="text-2xl font-semibold text-brand-900">Claude PI Admin</h1>
+            <button onclick="logout()" class="text-brand-500 hover:text-brand-700">Sign Out</button>
+          </div>
+
+          ${state.error ? `<div class="bg-red-50 text-red-700 px-4 py-3 rounded-lg mb-4">${state.error} <button onclick="setState({error:null})" class="ml-2 underline">Dismiss</button></div>` : ''}
+
+          <div class="flex gap-2 mb-6">
+            <button onclick="setState({tab:'stats'})" class="px-4 py-2 rounded-lg ${state.tab === 'stats' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100'}">Stats</button>
+            <button onclick="setState({tab:'users'})" class="px-4 py-2 rounded-lg ${state.tab === 'users' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100'}">Users</button>
+            <button onclick="setState({tab:'keys'})" class="px-4 py-2 rounded-lg ${state.tab === 'keys' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100'}">API Keys</button>
+          </div>
+
+          ${state.tab === 'stats' ? renderStats() : ''}
+          ${state.tab === 'users' ? renderUsers() : ''}
+          ${state.tab === 'keys' ? renderKeys() : ''}
+
+          <div class="mt-8 pt-6 border-t border-surface-200">
+            <button
+              onclick="runMaintenance()"
+              ${state.loading ? 'disabled' : ''}
+              class="px-4 py-2 bg-accent-600 text-white rounded-lg hover:bg-accent-500 disabled:opacity-50"
+            >
+              ${state.loading ? 'Running...' : 'Run Maintenance'}
+            </button>
+            <span class="ml-3 text-sm text-brand-500">Cleans expired tokens & resets daily usage counters</span>
+          </div>
+        </div>
+
+        ${state.showAddKey ? renderAddKeyModal() : ''}
+      `;
+    }
+
+    function renderStats() {
+      if (!state.stats) return '<div class="text-brand-500">Loading...</div>';
+      return `
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200">
+            <div class="text-3xl font-semibold text-brand-900">${state.stats.totalUsers}</div>
+            <div class="text-brand-500">Total Users</div>
+          </div>
+          <div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200">
+            <div class="text-3xl font-semibold text-brand-900">${state.stats.activeSubscriptions}</div>
+            <div class="text-brand-500">Active Subscriptions</div>
+          </div>
+          <div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200">
+            <div class="text-3xl font-semibold text-brand-900">${state.stats.activeApiKeys}</div>
+            <div class="text-brand-500">API Keys</div>
+          </div>
+          <div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200">
+            <div class="text-3xl font-semibold text-brand-900">${state.stats.validationsLast24h}</div>
+            <div class="text-brand-500">Validations (24h)</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderUsers() {
+      if (!state.users.length) return '<div class="text-brand-500">No users yet</div>';
+      return `
+        <div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden">
+          <table class="w-full">
+            <thead class="bg-surface-50 border-b border-surface-200">
+              <tr>
+                <th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Email</th>
+                <th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Status</th>
+                <th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Expires</th>
+                <th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${state.users.map(u => `
+                <tr class="border-b border-surface-200 last:border-0">
+                  <td class="px-4 py-3 text-brand-900">${u.email}</td>
+                  <td class="px-4 py-3">
+                    <span class="inline-flex px-2 py-1 text-xs font-medium rounded-md ${
+                      u.subscriptionStatus === 'active' ? 'bg-green-50 text-green-700' :
+                      u.subscriptionStatus === 'trialing' ? 'bg-accent-50 text-accent-600' :
+                      'bg-red-50 text-red-700'
+                    }">${u.subscriptionStatus}</span>
+                  </td>
+                  <td class="px-4 py-3 text-brand-500">${formatDate(u.trialEndsAt || u.currentPeriodEnd)}</td>
+                  <td class="px-4 py-3 text-brand-500">${formatDate(u.createdAt)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function renderKeys() {
+      return `
+        <div class="mb-4">
+          <button onclick="setState({showAddKey:true})" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">+ Add API Key</button>
+        </div>
+        ${state.apiKeys.length ? `
+          <div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden">
+            <table class="w-full">
+              <thead class="bg-surface-50 border-b border-surface-200">
+                <tr>
+                  <th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Name</th>
+                  <th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Active</th>
+                  <th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Daily Usage</th>
+                  <th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${state.apiKeys.map(k => `
+                  <tr class="border-b border-surface-200 last:border-0">
+                    <td class="px-4 py-3 text-brand-900">${k.name || 'Unnamed'}</td>
+                    <td class="px-4 py-3">
+                      <span class="inline-flex px-2 py-1 text-xs font-medium rounded-md ${k.isActive ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}">${k.isActive ? 'Yes' : 'No'}</span>
+                    </td>
+                    <td class="px-4 py-3 text-brand-500">${k.dailyUsageTokens?.toLocaleString() || 0}</td>
+                    <td class="px-4 py-3 space-x-2">
+                      <button onclick="toggleKeyActive(${k.id}, ${k.isActive})" class="text-sm text-accent-600 hover:text-accent-500">${k.isActive ? 'Disable' : 'Enable'}</button>
+                      <button onclick="deleteKey(${k.id})" class="text-sm text-red-600 hover:text-red-500">Delete</button>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        ` : '<div class="text-brand-500">No API keys in pool</div>'}
+      `;
+    }
+
+    function renderAddKeyModal() {
+      return `
+        <div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50">
+          <div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6">
+            <h2 class="text-lg font-semibold text-brand-900 mb-4">Add API Key</h2>
+            <div class="space-y-4">
+              <div>
+                <label class="block text-sm font-medium text-brand-700 mb-1">Name (optional)</label>
+                <input
+                  type="text"
+                  id="newKeyName"
+                  value="${state.newKeyName}"
+                  placeholder="e.g., Production Key 1"
+                  class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"
+                />
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-brand-700 mb-1">Anthropic API Key</label>
+                <input
+                  type="password"
+                  id="newKeyValue"
+                  value="${state.newKeyValue}"
+                  placeholder="sk-ant-api03-..."
+                  class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"
+                />
+              </div>
+            </div>
+            <div class="flex justify-end gap-2 mt-6">
+              <button onclick="setState({showAddKey:false,newKeyName:'',newKeyValue:''})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button>
+              <button onclick="addKey()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Add Key</button>
+            </div>
+          </div>
+        </div>
+      `;
+      setTimeout(() => {
+        document.getElementById('newKeyName')?.addEventListener('input', (e) => { state.newKeyName = e.target.value; });
+        document.getElementById('newKeyValue')?.addEventListener('input', (e) => { state.newKeyValue = e.target.value; });
+      }, 0);
+    }
+
+    // Initial render
+    render();
+
+    // Add event listener for modal inputs after render
+    const observer = new MutationObserver(() => {
+      const nameInput = document.getElementById('newKeyName');
+      const valueInput = document.getElementById('newKeyValue');
+      if (nameInput && !nameInput.dataset.bound) {
+        nameInput.dataset.bound = 'true';
+        nameInput.addEventListener('input', (e) => { state.newKeyName = e.target.value; });
+      }
+      if (valueInput && !valueInput.dataset.bound) {
+        valueInput.dataset.bound = 'true';
+        valueInput.addEventListener('input', (e) => { state.newKeyValue = e.target.value; });
+      }
+    });
+    observer.observe(document.getElementById('app'), { childList: true, subtree: true });
+  </script>
+</body>
+</html>

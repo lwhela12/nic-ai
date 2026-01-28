@@ -11,6 +11,21 @@ const app = new Hono();
 
 // Practice guide loading now handled by knowledge.ts
 
+// Load INDEX_SCHEMA.md for injection into synthesis prompt
+let indexSchemaCache: string | null = null;
+
+async function loadIndexSchema(): Promise<string> {
+  if (indexSchemaCache) return indexSchemaCache;
+  const schemaPath = join(import.meta.dir, "../../INDEX_SCHEMA.md");
+  try {
+    indexSchemaCache = await readFile(schemaPath, "utf-8");
+  } catch {
+    console.warn("[Schema] Could not load INDEX_SCHEMA.md, using fallback");
+    indexSchemaCache = "";
+  }
+  return indexSchemaCache;
+}
+
 // Sections relevant for case synthesis (by manifest section ID)
 const SYNTHESIS_SECTION_IDS = [
   "liability-evaluation",
@@ -254,6 +269,7 @@ IMPORTANT:
 // Build synthesis system prompt with practice guide sections injected
 async function buildSynthesisSystemPrompt(firmRoot?: string): Promise<string> {
   const practiceKnowledge = await loadSectionsByIds(firmRoot, SYNTHESIS_SECTION_IDS);
+  const indexSchema = await loadIndexSchema();
 
   return `You are a case analyst and summarizer for a Personal Injury law firm in Nevada.
 
@@ -267,6 +283,18 @@ YOUR JOB: Analyze the case substantively and synthesize a case summary. Do NOT r
 
 ${practiceKnowledge}
 
+## CANONICAL INDEX SCHEMA — MUST FOLLOW EXACTLY
+
+The following schema defines the EXACT structure for document_index.json. You MUST adhere to this schema precisely.
+
+**CRITICAL SCHEMA REQUIREMENTS:**
+- \`summary.providers\` MUST be an array of strings: \`["Provider A", "Provider B"]\` — NOT objects
+- \`summary.policy_limits\` MUST use keys \`1P\` and \`3P\` — NOT "first_party"/"third_party"
+- \`summary.claim_numbers\` MUST use keys like \`1P_CarrierName\` and \`3P_CarrierName\` — NOT "first_party_carrier"
+- \`case_notes\` is an array for user notes — write your analysis to \`case_analysis\` (string field) instead
+
+${indexSchema}
+
 ## WORKFLOW:
 1. Read both JSON files
 2. **Case Analysis** — Using the practice knowledge above, assess:
@@ -275,7 +303,7 @@ ${practiceKnowledge}
    - **Estimated value range**: Apply the multiplier for the injury tier against total specials
    - **Policy limits demand appropriate?**: Yes/No based on Section IV triggers
    - **Document quality gaps**: What critical documents are missing per the completeness checklist?
-   Write your analysis into the case_notes field.
+   Write your analysis into the case_analysis field (a string, NOT case_notes which is an array).
 3. Use the hypergraph consensus values where available
 4. Generate a case summary from the extracted data
 5. Consolidate contact information into summary.contact object:
@@ -334,7 +362,7 @@ Every field you fill in should have an errata entry explaining where it came fro
 ## CASE ANALYSIS FIELDS
 
 Write these fields in document_index.json:
-- **case_notes**: Your substantive analysis — liability assessment, injury tier determination, value estimate, treatment pattern observations, priority next steps. This should be analytical, not just a data summary.
+- **case_analysis**: Your substantive analysis — liability assessment, injury tier determination, value estimate, treatment pattern observations, priority next steps. This should be analytical, not just a data summary. (This is a string field, NOT the case_notes array.)
 - **liability_assessment**: "clear" | "moderate" | "contested"
 - **injury_tier**: "tier_1_soft_tissue" | "tier_2_structural" | "tier_3_surgical"
 - **estimated_value_range**: e.g. "$37,500 - $62,500" (specials x low multiplier to specials x high multiplier)
@@ -344,7 +372,7 @@ Write these fields in document_index.json:
 ${Object.entries(PHASE_RULES).map(([phase, desc]) => `- ${phase}: ${desc}`).join('\n')}
 
 ## CRITICAL EDITING RULES:
-- The document_index.json already has placeholder fields (needs_review, errata, case_notes, etc.)
+- The document_index.json already has placeholder fields (needs_review, errata, case_analysis, etc.)
 - Use Edit tool to REPLACE existing values, NOT add new keys
 - Find the existing "needs_review": [] and replace it with your array
 - Find the existing "errata": [] and replace it with your array
@@ -359,7 +387,7 @@ Do not spend many turns reading files or running Bash commands. Read the hypergr
 Edit order:
 1. needs_review (with all UNCERTAIN fields)
 2. errata (with all your decisions)
-3. case_notes, liability_assessment, injury_tier, estimated_value_range, policy_limits_demand_appropriate
+3. case_analysis, liability_assessment, injury_tier, estimated_value_range, policy_limits_demand_appropriate
 4. summary fields
 5. case_name, case_phase
 
@@ -430,8 +458,33 @@ async function extractFile(
   const fullPath = join(caseFolder, filePath);
   const startTime = Date.now();
 
+  // Track messages for debugging failures
+  const messageLog: Array<{ type: string; subtype?: string; detail?: string }> = [];
+
   try {
-    console.log(`[${fileIndex + 1}/${totalFiles}] Starting: ${filename}`);
+    // Pre-flight checks
+    let fileStats;
+    try {
+      fileStats = await stat(fullPath);
+    } catch (statErr) {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.error(`[${fileIndex + 1}/${totalFiles}] ✗ File not found: ${filename} (${elapsed}s)`);
+      return {
+        filename,
+        folder,
+        type: 'other',
+        key_info: 'File not found or inaccessible',
+        error: `File not found: ${fullPath}`,
+      };
+    }
+
+    // Warn about very large files (>10MB)
+    const fileSizeMB = fileStats.size / (1024 * 1024);
+    if (fileSizeMB > 10) {
+      console.warn(`[${fileIndex + 1}/${totalFiles}] ⚠ Large file: ${filename} (${fileSizeMB.toFixed(1)}MB)`);
+    }
+
+    console.log(`[${fileIndex + 1}/${totalFiles}] Starting: ${filename} (${fileSizeMB.toFixed(2)}MB)`);
     onProgress?.({ type: "file_start", fileIndex, totalFiles, filename, folder });
 
     let result: FileExtraction = { filename, folder, type: 'other', key_info: '' };
@@ -460,6 +513,24 @@ Then return the JSON extraction.`,
         maxTurns: 5,
       },
     })) {
+      // Log all message types for debugging
+      const msgAny = msg as any;
+      messageLog.push({
+        type: msg.type,
+        subtype: msgAny.subtype,
+        detail: msgAny.error || msgAny.message || msgAny.reason || undefined
+      });
+
+      // Log errors and system messages that might indicate issues
+      if (msg.type === "error" || (msg.type === "system" && msgAny.subtype === "error")) {
+        console.error(`[${fileIndex + 1}/${totalFiles}] SDK Error for ${filename}:`, JSON.stringify(msg, null, 2));
+      }
+
+      // Log result with error subtype
+      if (msg.type === "result" && msgAny.subtype === "error") {
+        console.error(`[${fileIndex + 1}/${totalFiles}] Result error for ${filename}:`, msgAny.error || msgAny.message || JSON.stringify(msg));
+      }
+
       if (msg.type === "assistant") {
         for (const block of msg.message.content) {
           if (block.type === "text") {
@@ -511,20 +582,48 @@ Then return the JSON extraction.`,
     return result;
   } catch (err) {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`[${fileIndex + 1}/${totalFiles}] ✗ Failed: ${filename} (${elapsed}s) - ${err}`);
+
+    // Extract detailed error info
+    const errAny = err as any;
+    const errorDetails = {
+      message: err instanceof Error ? err.message : String(err),
+      code: errAny?.code,
+      exitCode: errAny?.exitCode,
+      stderr: errAny?.stderr,
+      stdout: errAny?.stdout,
+      cause: errAny?.cause,
+      stack: err instanceof Error ? err.stack?.split('\n').slice(0, 5).join('\n') : undefined,
+    };
+
+    // Log detailed failure info
+    console.error(`[${fileIndex + 1}/${totalFiles}] ✗ FAILED: ${filename} (${elapsed}s)`);
+    console.error(`  File path: ${fullPath}`);
+    console.error(`  Error: ${errorDetails.message}`);
+    if (errorDetails.code) console.error(`  Code: ${errorDetails.code}`);
+    if (errorDetails.exitCode) console.error(`  Exit code: ${errorDetails.exitCode}`);
+    if (errorDetails.stderr) console.error(`  Stderr: ${errorDetails.stderr}`);
+    if (errorDetails.cause) console.error(`  Cause: ${JSON.stringify(errorDetails.cause)}`);
+    if (messageLog.length > 0) {
+      console.error(`  Message log (${messageLog.length} messages):`);
+      messageLog.slice(-5).forEach((m, i) => {
+        console.error(`    [${i}] ${m.type}${m.subtype ? ':' + m.subtype : ''} ${m.detail || ''}`);
+      });
+    }
+
     onProgress?.({
       type: "file_error",
       fileIndex,
       totalFiles,
       filename,
-      error: err instanceof Error ? err.message : String(err)
+      error: errorDetails.message,
+      errorDetails
     });
     return {
       filename,
       folder,
       type: 'other',
       key_info: 'Failed to extract',
-      error: err instanceof Error ? err.message : String(err),
+      error: errorDetails.message,
     };
   }
 }
@@ -559,7 +658,7 @@ async function synthesizeCaseSummary(
 1. **FIRST** - Read .pi_tool/hypergraph_analysis.json
 2. **SECOND** - Edit needs_review array with ALL UNCERTAIN or conflicting fields (charges, balances with different values)
 3. **THIRD** - Edit errata array documenting your decisions
-4. **FOURTH** - Edit case_notes with your substantive case analysis (liability, injury tier, value range, gaps)
+4. **FOURTH** - Edit case_analysis with your substantive case analysis (liability, injury tier, value range, gaps)
 5. **FIFTH** - Edit liability_assessment, injury_tier, estimated_value_range, policy_limits_demand_appropriate
 6. **THEN** - Edit summary fields (client, dol, dob, providers, total_charges, policy_limits)
 7. **LAST** - Edit case_name, case_phase
@@ -851,6 +950,7 @@ async function indexCase(
       reconciled_values: existingIndex?.reconciled_values ?? {},
       needs_review: [],
       errata: [],
+      case_analysis: existingIndex?.case_analysis ?? "",
       case_notes: existingIndex?.case_notes ?? [],
       chat_archives: existingIndex?.chat_archives ?? [],
       liability_assessment: existingIndex?.liability_assessment ?? null,

@@ -4,9 +4,13 @@ node_modules/
 # Build outputs
 dist/
 dist-ssr/
-build/
 out/
 *.tsbuildinfo
+
+# Electron build outputs
+dist-electron/
+dist-server/
+release/
 
 # Environment files
 .env

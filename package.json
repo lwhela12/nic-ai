@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Personal Injury Case Management powered by Claude",
   "type": "module",
+  "main": "dist-electron/main.js",
   "bin": {
     "claude-pi": "./bin/claude-pi.js"
   },
@@ -11,8 +12,13 @@
     "build": "npm run build:frontend && npm run build:server",
     "build:frontend": "cd app && npm run build",
     "build:server": "cd server && bun build index.ts --outdir ../dist --target bun",
+    "build:server-exe": "cd server && bun build index.ts --compile --outfile ../dist-server/claude-pi-server",
+    "build:electron": "cd electron && npx tsc",
+    "build:all": "npm run build:frontend && npm run build:server-exe && npm run build:electron",
     "start": "bun run dist/index.js",
-    "postinstall": "cd app && npm install && cd ../server && bun install"
+    "electron:dev": "npm run build:all && electron .",
+    "electron:build": "npm run build:all && electron-builder",
+    "postinstall": "cd app && npm install && cd ../server && bun install && cd ../electron && npm install"
   },
   "files": [
     "bin/",
@@ -39,5 +45,49 @@
   },
   "dependencies": {
     "concurrently": "^8.2.2"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.claudepi.app",
+    "productName": "Claude PI",
+    "files": [
+      "dist-electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "dist-server/",
+        "to": "server/"
+      },
+      {
+        "from": "app/dist/",
+        "to": "frontend/"
+      },
+      {
+        "from": "agent/",
+        "to": "agent/"
+      }
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "afterSign": "scripts/notarize.js"
   }
 }

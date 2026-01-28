@@ -17,8 +17,8 @@ const __dirname = dirname(__filename);
 
 const app = new Hono();
 
-// Determine if we're in production (built frontend exists)
-const frontendDistPath = join(__dirname, "..", "app", "dist");
+// Determine paths - support Electron bundled resources
+const frontendDistPath = process.env.ELECTRON_FRONTEND_PATH || join(__dirname, "..", "app", "dist");
 const isProduction = existsSync(frontendDistPath);
 
 // Enable CORS for frontend (needed in dev mode)

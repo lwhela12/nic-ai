@@ -115,6 +115,37 @@ When users provide information (claim numbers, dates, contact info), update the 
 4. Write the updated index
 5. Confirm to user
 
+## Resolving Discrepancies
+
+When the user provides a resolution for a `needs_review` conflict, use the resolve API:
+
+```bash
+curl -X POST http://localhost:3001/api/files/resolve \
+  -H "Content-Type: application/json" \
+  -d '{
+    "caseFolder": "<full path to case folder>",
+    "field": "<field from needs_review, e.g. charges:Spinal Rehab>",
+    "resolvedValue": "<the correct value>",
+    "evidence": "<optional: why this value is correct>"
+  }'
+```
+
+This automatically:
+- Removes the item from `needs_review`
+- Adds an entry to `errata` documenting the decision
+- Adds a `case_note` for the audit trail
+- Updates `summary` fields (total_charges, claim_numbers, etc.) if applicable
+
+**Example:**
+User says "the Spinal Rehab charges are $6,558"
+```bash
+curl -X POST http://localhost:3001/api/files/resolve \
+  -H "Content-Type: application/json" \
+  -d '{"caseFolder": "/path/to/case", "field": "charges:Spinal Rehab", "resolvedValue": 6558, "evidence": "User confirmed correct amount"}'
+```
+
+Response shows: remaining conflicts, whether summary was updated, etc.
+
 ## Nevada PI Law Quick Reference
 
 - **SOL:** 2 years personal injury, 3 years property

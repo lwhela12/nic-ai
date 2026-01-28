@@ -41,6 +41,7 @@ This is the canonical schema for `.pi_tool/document_index.json`. All indexing ag
     }
   },
   "issues_found": ["Missing police report", "Incomplete medical records"],
+  "case_analysis": "LIABILITY: Clear - rear-end collision with police report. INJURY TIER: Tier 2 (structural) - MRI shows disc bulge, received injections. VALUE RANGE: $45,000 - $75,000 based on 3-5x multiplier on $15k specials. GAPS: Missing wage loss documentation.",
   "case_notes": [
     {
       "id": "note-1705933200000",
@@ -71,7 +72,8 @@ This is the canonical schema for `.pi_tool/document_index.json`. All indexing ag
 - `summary` (object): Quick reference for case overview
 - `folders` (object): Documents organized by folder
 - `issues_found` (array): List of problems or gaps identified
-- `case_notes` (array): User-provided information and audit trail
+- `case_analysis` (string): AI-generated substantive analysis — liability assessment, injury tier, value estimate, treatment patterns, next steps
+- `case_notes` (array): User-provided information and audit trail (NOT for AI analysis — use case_analysis)
 - `chat_archives` (array): Archived conversation summaries
 
 ### Summary Fields

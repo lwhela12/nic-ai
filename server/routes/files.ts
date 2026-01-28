@@ -319,6 +319,240 @@ app.get("/view", async (c) => {
   }
 });
 
+// Resolve a discrepancy in needs_review
+app.post("/resolve", async (c) => {
+  const body = await c.req.json();
+  const { caseFolder, field, resolvedValue, evidence, recalculateCharges } = body;
+
+  if (!caseFolder || !field || resolvedValue === undefined) {
+    return c.json({ error: "caseFolder, field, and resolvedValue required" }, 400);
+  }
+
+  const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+
+  try {
+    // Read current index
+    const content = await readFile(indexPath, "utf-8");
+    const index = JSON.parse(content);
+
+    // Find the item in needs_review
+    const needsReview: any[] = index.needs_review || [];
+    const itemIndex = needsReview.findIndex((item: any) => item.field === field);
+
+    if (itemIndex === -1) {
+      return c.json({ error: `Field "${field}" not found in needs_review` }, 404);
+    }
+
+    const resolvedItem = needsReview[itemIndex];
+    const rejectedValues = resolvedItem.conflicting_values?.filter(
+      (v: any) => String(v) !== String(resolvedValue)
+    ) || [];
+
+    // Remove from needs_review
+    needsReview.splice(itemIndex, 1);
+    index.needs_review = needsReview;
+
+    // Add to errata
+    const errata: any[] = index.errata || [];
+    const errataEntry = {
+      field,
+      decision: resolvedValue,
+      rejected_values: rejectedValues,
+      evidence: evidence || "User confirmed correct value",
+      resolution_type: "user_decision",
+      resolved_at: new Date().toISOString(),
+    };
+    errata.push(errataEntry);
+    index.errata = errata;
+
+    // Add to case_notes (ensure it's an array)
+    let caseNotes: any[] = Array.isArray(index.case_notes) ? index.case_notes : [];
+    const noteEntry = {
+      id: `note-${Date.now()}`,
+      content: `Resolved ${field}: ${resolvedValue} (was conflicting: ${rejectedValues.join(", ")}). ${evidence || ""}`.trim(),
+      field_updated: field,
+      previous_value: rejectedValues,
+      source: "chat",
+      createdAt: new Date().toISOString(),
+    };
+    caseNotes.push(noteEntry);
+    index.case_notes = caseNotes;
+
+    // Handle specific field types
+    let summaryUpdated = false;
+
+    // For charges fields, update the provider entry in summary.providers if it exists
+    if (field.startsWith("charges:") && index.summary?.providers) {
+      const providerName = field.replace("charges:", "");
+      const numericValue = parseFloat(String(resolvedValue).replace(/[$,]/g, ""));
+
+      // Find matching provider in summary.providers (handles both array-of-strings and array-of-objects)
+      const providers = index.summary.providers;
+      if (Array.isArray(providers)) {
+        for (let i = 0; i < providers.length; i++) {
+          const prov = providers[i];
+          if (typeof prov === "object" && prov.name) {
+            // Object format: { name, charges, ... }
+            if (prov.name.toLowerCase().includes(providerName.toLowerCase()) ||
+                providerName.toLowerCase().includes(prov.name.toLowerCase())) {
+              const oldCharges = prov.charges;
+              prov.charges = numericValue;
+
+              // Adjust total_charges by the delta
+              if (!isNaN(numericValue) && index.summary.total_charges !== undefined) {
+                const oldTotal = index.summary.total_charges;
+                const delta = numericValue - (parseFloat(String(oldCharges).replace(/[$,]/g, "")) || 0);
+                index.summary.total_charges = oldTotal + delta;
+                noteEntry.content += ` Updated total_charges: $${oldTotal.toLocaleString()} → $${index.summary.total_charges.toLocaleString()}`;
+              }
+              summaryUpdated = true;
+              break;
+            }
+          }
+        }
+      }
+
+      // If no matching provider found, just note it
+      if (!summaryUpdated) {
+        noteEntry.content += ` Note: total_charges may need manual adjustment.`;
+      }
+    }
+
+    // If resolving claim_numbers, update summary
+    if (field.startsWith("claim_numbers:") && index.summary) {
+      const claimKey = field.replace("claim_numbers:", "");
+      if (!index.summary.claim_numbers) {
+        index.summary.claim_numbers = {};
+      }
+      index.summary.claim_numbers[claimKey] = resolvedValue;
+      summaryUpdated = true;
+    }
+
+    // If resolving policy_limits, update summary
+    if (field.startsWith("policy_limits:") && index.summary) {
+      // Handle nested paths like "policy_limits:3P:bodily_injury"
+      const parts = field.replace("policy_limits:", "").split(":");
+      if (parts.length >= 1) {
+        if (!index.summary.policy_limits) {
+          index.summary.policy_limits = {};
+        }
+        if (parts.length === 1) {
+          index.summary.policy_limits[parts[0]] = resolvedValue;
+        } else if (parts.length === 2) {
+          if (!index.summary.policy_limits[parts[0]]) {
+            index.summary.policy_limits[parts[0]] = {};
+          }
+          index.summary.policy_limits[parts[0]][parts[1]] = resolvedValue;
+        }
+        summaryUpdated = true;
+      }
+    }
+
+    // If resolving date_of_loss, update summary.dol
+    if (field === "date_of_loss" && index.summary) {
+      index.summary.dol = resolvedValue;
+      summaryUpdated = true;
+    }
+
+    // Write updated index
+    await writeFile(indexPath, JSON.stringify(index, null, 2));
+
+    return c.json({
+      success: true,
+      field,
+      resolvedValue,
+      rejectedValues,
+      remainingConflicts: needsReview.length,
+      summaryUpdated,
+      errataEntry,
+    });
+  } catch (error) {
+    console.error("Failed to resolve discrepancy:", error);
+    if ((error as any).code === "ENOENT") {
+      return c.json({ error: "Document index not found. Run /init-case first." }, 404);
+    }
+    return c.json({ error: "Could not resolve discrepancy" }, 500);
+  }
+});
+
+// Get needs_review items with resolved file paths
+app.get("/needs-review", async (c) => {
+  const caseFolder = c.req.query("case");
+
+  if (!caseFolder) {
+    return c.json({ error: "case query param required" }, 400);
+  }
+
+  const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+
+  try {
+    const content = await readFile(indexPath, "utf-8");
+    const index = JSON.parse(content);
+
+    const needsReview: any[] = index.needs_review || [];
+
+    // Build a filename -> path lookup from all folders
+    const filePathMap: Record<string, string> = {};
+
+    if (index.folders) {
+      for (const [folderName, folderData] of Object.entries(index.folders)) {
+        const files: any[] = Array.isArray(folderData)
+          ? folderData
+          : (folderData as any)?.files || [];
+
+        for (const file of files) {
+          const filename = file.file || file.filename;
+          if (filename) {
+            // Store both the exact filename and lowercase version for matching
+            const fullPath = join(folderName, filename);
+            filePathMap[filename] = fullPath;
+            filePathMap[filename.toLowerCase()] = fullPath;
+          }
+        }
+      }
+    }
+
+    // Enrich each needs_review item with resolved file paths
+    const enrichedItems = needsReview.map((item) => {
+      const sources = Array.isArray(item.sources) ? item.sources : [];
+
+      // Resolve source strings to file paths
+      // Sources look like: "MRB Spinal Rehab Center.PDF ($1,234.56)" or just "filename.pdf"
+      const resolvedSources = sources.map((source: string) => {
+        // Extract filename from source string (remove parenthetical notes)
+        const filename = source.replace(/\s*\([^)]*\)\s*$/, "").trim();
+        const note = source.match(/\(([^)]*)\)$/)?.[1] || "";
+
+        // Try to find the file path
+        const path = filePathMap[filename] || filePathMap[filename.toLowerCase()];
+
+        return {
+          original: source,
+          filename,
+          path: path || null,
+          note,
+        };
+      });
+
+      return {
+        ...item,
+        resolved_sources: resolvedSources,
+      };
+    });
+
+    return c.json({
+      count: enrichedItems.length,
+      items: enrichedItems,
+      case_name: index.case_name || index.summary?.client,
+    });
+  } catch (error) {
+    if ((error as any).code === "ENOENT") {
+      return c.json({ error: "Document index not found. Run /init-case first." }, 404);
+    }
+    return c.json({ error: "Could not load needs_review items" }, 500);
+  }
+});
+
 // Get verified review items for a case
 app.get("/verified-items", async (c) => {
   const caseFolder = c.req.query("case");

@@ -49,7 +49,9 @@ const phasePrompt = buildPhasePrompt();
 
 async function loadRouterPrompt(): Promise<string> {
   if (routerPromptCache) return routerPromptCache;
-  const routerPromptPath = join(import.meta.dir, "../../agent/router-prompt.md");
+  // Support Electron bundled resources via AGENT_PROMPT_PATH
+  const agentDir = process.env.AGENT_PROMPT_PATH || join(import.meta.dir, "../../agent");
+  const routerPromptPath = join(agentDir, "router-prompt.md");
   routerPromptCache = await readFile(routerPromptPath, "utf-8");
   return routerPromptCache;
 }

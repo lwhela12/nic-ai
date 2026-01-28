@@ -1,6 +1,7 @@
 {
   "buildCommand": "",
   "rewrites": [
+    { "source": "/admin", "destination": "/public/admin.html" },
     { "source": "/(.*)", "destination": "/api" }
   ]
 }

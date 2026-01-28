@@ -120,6 +120,7 @@ export interface DocumentIndex {
     claim_numbers?: Record<string, string>
   }
   issues_found?: string[]
+  case_analysis?: string
   needs_review?: NeedsReviewItem[]
   reconciled_values?: Record<string, unknown>
   errata?: ErrataItem[]
@@ -627,10 +628,41 @@ function App() {
                   } catch {
                     // Ignore clear errors
                   }
-                  const items = documentIndex.needs_review || []
-                  // Keep prompt short - agent will read details from the index file
-                  const prompt = `There are ${items.length} item(s) in needs_review that need resolution. Please read .pi_tool/document_index.json to see the details, then help me review each one. Show me the relevant documents using [[SHOW_FILE: path]] as we go through them.`
-                  setReviewPrompt(prompt)
+
+                  // Fetch enriched needs_review data with resolved file paths
+                  try {
+                    const resp = await fetch(`${API_URL}/api/files/needs-review?case=${encodeURIComponent(caseFolder)}`)
+                    const data = await resp.json()
+
+                    if (data.items && data.items.length > 0) {
+                      // Build a pre-formatted prompt with all the details
+                      const itemSummaries = data.items.map((item: any, i: number) => {
+                        const sources = item.resolved_sources
+                          ?.filter((s: any) => s.path)
+                          .map((s: any) => `[[SHOW_FILE: ${s.path}]]`)
+                          .join(' ') || 'No files found'
+                        return `${i + 1}. **${item.field}**
+   - Values: ${item.conflicting_values?.join(' vs ') || 'Unknown'}
+   - Reason: ${item.reason || 'No reason provided'}
+   - Documents: ${sources}`
+                      }).join('\n\n')
+
+                      const prompt = `Here are ${data.count} item(s) needing resolution:
+
+${itemSummaries}
+
+Please help me review each conflict. For each one, show the relevant documents and ask which value is correct. When I provide a resolution, use this curl command to update the index:
+\`\`\`
+curl -X POST ${API_URL}/api/files/resolve -H "Content-Type: application/json" -d '{"caseFolder": "${caseFolder}", "field": "<field>", "resolvedValue": "<value>", "evidence": "<reason>"}'
+\`\`\``
+                      setReviewPrompt(prompt)
+                    }
+                  } catch {
+                    // Fallback to old behavior
+                    const items = documentIndex.needs_review || []
+                    const prompt = `There are ${items.length} item(s) in needs_review. Please read .pi_tool/document_index.json and help me review them.`
+                    setReviewPrompt(prompt)
+                  }
                 }}
                 className="flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-lg
                            bg-amber-500 text-white hover:bg-amber-600 transition-colors
