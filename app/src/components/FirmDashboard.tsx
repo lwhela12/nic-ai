@@ -140,6 +140,32 @@ export default function FirmDashboard({
   const [filterPhase, setFilterPhase] = useState<string>('all')
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null)
   const [view, setView] = useState<'dashboard' | 'firmChat'>('dashboard')
+  const [selectedCases, setSelectedCases] = useState<Set<string>>(new Set())
+
+  const toggleCase = (path: string) => {
+    setSelectedCases(prev => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
+
+  const toggleAllVisible = () => {
+    setSelectedCases(prev => {
+      const visiblePaths = sortedCases.map(c => c.path)
+      const allSelected = visiblePaths.every(p => prev.has(p))
+      if (allSelected) {
+        const next = new Set(prev)
+        visiblePaths.forEach(p => next.delete(p))
+        return next
+      } else {
+        const next = new Set(prev)
+        visiblePaths.forEach(p => next.add(p))
+        return next
+      }
+    })
+  }
 
   const loadCases = useCallback(async () => {
     setLoading(true)
@@ -521,7 +547,20 @@ export default function FirmDashboard({
             </div>
           </div>
           <div className="flex gap-3">
-            {unindexedCases.length > 0 && (
+            {selectedCases.size > 0 ? (
+              <button
+                onClick={() => {
+                  const paths = Array.from(selectedCases)
+                  setSelectedCases(new Set())
+                  startBatchIndex(paths)
+                }}
+                disabled={batchProgress?.isRunning}
+                className="px-4 py-2 text-sm font-medium bg-accent-600 text-white rounded-lg
+                           hover:bg-accent-500 disabled:opacity-50 transition-colors"
+              >
+                {batchProgress?.isRunning ? 'Indexing...' : `Index Selected (${selectedCases.size})`}
+              </button>
+            ) : unindexedCases.length > 0 ? (
               <button
                 onClick={() => startBatchIndex(unindexedCases.map(c => c.path))}
                 disabled={batchProgress?.isRunning}
@@ -530,7 +569,7 @@ export default function FirmDashboard({
               >
                 {batchProgress?.isRunning ? 'Indexing...' : `Index All (${unindexedCases.length})`}
               </button>
-            )}
+            ) : null}
             <button
               onClick={loadCases}
               className="p-2 text-brand-300 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
@@ -690,6 +729,14 @@ export default function FirmDashboard({
           <table className="w-full">
             <thead>
               <tr className="border-b border-surface-200">
+                <th className="px-4 py-4 w-10">
+                  <input
+                    type="checkbox"
+                    checked={sortedCases.length > 0 && sortedCases.every(c => selectedCases.has(c.path))}
+                    onChange={toggleAllVisible}
+                    className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
+                  />
+                </th>
                 <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Client</th>
                 <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Phase</th>
                 <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Date of Loss</th>
@@ -708,6 +755,14 @@ export default function FirmDashboard({
                     ? 'hover:bg-surface-50 cursor-pointer border-l-2 border-l-transparent hover:border-l-accent-500'
                     : 'bg-surface-50/50 opacity-60'} transition-all`}
                 >
+                  <td className="px-4 py-4 w-10" onClick={e => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selectedCases.has(c.path)}
+                      onChange={() => toggleCase(c.path)}
+                      className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
+                    />
+                  </td>
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
                       <div>
