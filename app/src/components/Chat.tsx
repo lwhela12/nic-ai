@@ -149,9 +149,11 @@ const MessageItem = memo(function MessageItem({ msg, onShowFile }: { msg: Messag
     [msg.content]
   )
 
-  // Trigger file display for the first file found (on mount or when content changes)
+  // Trigger file display for the first file found (only on mount, not on every re-render)
+  const hasTriggeredRef = useRef(false)
   useEffect(() => {
-    if (filePaths.length > 0 && onShowFile) {
+    if (!hasTriggeredRef.current && filePaths.length > 0 && onShowFile) {
+      hasTriggeredRef.current = true
       onShowFile(filePaths[0])
     }
   }, [filePaths, onShowFile])

@@ -356,6 +356,38 @@ function App() {
     }
   }, [firmRoot])
 
+  const handleShowFile = useCallback((filePath: string) => {
+    if (!caseFolder) return
+    // Try to find the file in the document index to get the correct path
+    let resolvedPath = filePath
+    const filename = filePath.split('/').pop()?.toLowerCase() || filePath.toLowerCase()
+
+    if (documentIndex?.folders) {
+      // Search through all folders to find matching file
+      for (const [folder, data] of Object.entries(documentIndex.folders)) {
+        const files = getFolderFiles(data)
+        const match = files.find((file) => {
+          const matchName = getDocumentFileName(file)?.toLowerCase()
+          if (!matchName) return false
+          const trimmed = filename.replace('.pdf', '')
+          return matchName === filename || matchName.includes(trimmed)
+        })
+        if (match) {
+          const matchName = getDocumentFileName(match)
+          if (matchName) {
+            resolvedPath = folder === '.' || folder === '' ? matchName : `${folder}/${matchName}`
+          }
+          break
+        }
+      }
+    }
+
+    const url = `${API_URL}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(resolvedPath)}`
+    setFileViewUrl(url)
+    setFileViewName(resolvedPath.split('/').pop() || resolvedPath)
+    setViewContent('')
+  }, [caseFolder, documentIndex])
+
   // Handle logout
   const handleLogout = async () => {
     try {
@@ -710,36 +742,7 @@ function App() {
             initialPrompt={reviewPrompt}
             onInitialPromptUsed={() => setReviewPrompt('')}
             onIndexMayHaveChanged={reloadDocumentIndex}
-            onShowFile={(filePath) => {
-              // Try to find the file in the document index to get the correct path
-              let resolvedPath = filePath
-              const filename = filePath.split('/').pop()?.toLowerCase() || filePath.toLowerCase()
-
-              if (documentIndex?.folders) {
-                // Search through all folders to find matching file
-                for (const [folder, data] of Object.entries(documentIndex.folders)) {
-                  const files = getFolderFiles(data)
-                  const match = files.find((file) => {
-                    const matchName = getDocumentFileName(file)?.toLowerCase()
-                    if (!matchName) return false
-                    const trimmed = filename.replace('.pdf', '')
-                    return matchName === filename || matchName.includes(trimmed)
-                  })
-                  if (match) {
-                    const matchName = getDocumentFileName(match)
-                    if (matchName) {
-                      resolvedPath = folder === '.' || folder === '' ? matchName : `${folder}/${matchName}`
-                    }
-                    break
-                  }
-                }
-              }
-
-              const url = `${API_URL}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(resolvedPath)}`
-              setFileViewUrl(url)
-              setFileViewName(resolvedPath.split('/').pop() || resolvedPath)
-              setViewContent('')
-            }}
+            onShowFile={handleShowFile}
           />
         }
         rightPanel={
