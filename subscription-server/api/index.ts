@@ -1,7 +1,952 @@
 import { handle } from "hono/vercel";
-import app from "../index";
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { logger } from "hono/logger";
+import { sql } from "@vercel/postgres";
+import { createHash, randomBytes } from "crypto";
+import Stripe from "stripe";
 
 export const runtime = "nodejs";
+
+// ============================================================================
+// Types
+// ============================================================================
+
+interface User {
+  id: number;
+  email: string;
+  password_hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface Subscription {
+  id: number;
+  user_id: number;
+  stripe_customer_id: string | null;
+  stripe_subscription_id: string | null;
+  status: "trialing" | "active" | "canceled" | "past_due" | "unpaid" | "expired";
+  trial_ends_at: string | null;
+  current_period_start: string | null;
+  current_period_end: string | null;
+  canceled_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface AuthToken {
+  id: number;
+  user_id: number;
+  token_hash: string;
+  expires_at: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+interface ApiKey {
+  id: number;
+  key_encrypted: string;
+  key_name: string | null;
+  is_active: boolean;
+  assigned_to_user_id: number | null;
+  daily_usage_tokens: number;
+  last_usage_reset: string;
+  created_at: string;
+}
+
+// ============================================================================
+// Database Schema & Init
+// ============================================================================
+
+const SCHEMA_VERSION = 1;
+
+async function initDatabase(): Promise<void> {
+  await sql`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+      stripe_customer_id TEXT,
+      stripe_subscription_id TEXT,
+      status TEXT NOT NULL DEFAULT 'trialing',
+      trial_ends_at TIMESTAMPTZ,
+      current_period_start TIMESTAMPTZ,
+      current_period_end TIMESTAMPTZ,
+      canceled_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS auth_tokens (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT UNIQUE NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      last_used_at TIMESTAMPTZ
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS api_key_pool (
+      id SERIAL PRIMARY KEY,
+      key_encrypted TEXT NOT NULL,
+      key_name TEXT,
+      is_active BOOLEAN DEFAULT TRUE,
+      assigned_to_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      daily_usage_tokens INTEGER DEFAULT 0,
+      last_usage_reset TIMESTAMPTZ DEFAULT NOW(),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS daily_validations (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      validated_at TIMESTAMPTZ DEFAULT NOW(),
+      ip_address TEXT,
+      user_agent TEXT,
+      success BOOLEAN DEFAULT TRUE
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS usage_logs (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      api_key_id INTEGER REFERENCES api_key_pool(id) ON DELETE SET NULL,
+      tokens_used INTEGER NOT NULL,
+      request_type TEXT,
+      logged_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS schema_version (
+      version INTEGER PRIMARY KEY
+    )
+  `;
+
+  const { rows } = await sql`SELECT version FROM schema_version LIMIT 1`;
+  if (rows.length === 0) {
+    await sql`INSERT INTO schema_version (version) VALUES (${SCHEMA_VERSION})`;
+  }
+
+  await sql`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_auth_tokens_hash ON auth_tokens(token_hash)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe_customer ON subscriptions(stripe_customer_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_api_key_pool_active ON api_key_pool(is_active)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_daily_validations_user ON daily_validations(user_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_usage_logs_user ON usage_logs(user_id)`;
+}
+
+let initialized = false;
+async function ensureDatabase(): Promise<void> {
+  if (!initialized) {
+    await initDatabase();
+    initialized = true;
+  }
+}
+
+// ============================================================================
+// Database Operations
+// ============================================================================
+
+async function createUser(email: string, passwordHash: string): Promise<User | null> {
+  try {
+    const { rows } = await sql`
+      INSERT INTO users (email, password_hash)
+      VALUES (${email.toLowerCase()}, ${passwordHash})
+      RETURNING *
+    `;
+    return rows[0] as User || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getUserById(id: number): Promise<User | null> {
+  const { rows } = await sql`SELECT * FROM users WHERE id = ${id}`;
+  return rows[0] as User || null;
+}
+
+async function getUserByEmail(email: string): Promise<User | null> {
+  const { rows } = await sql`SELECT * FROM users WHERE email = ${email.toLowerCase()}`;
+  return rows[0] as User || null;
+}
+
+async function createSubscription(userId: number, trialDays: number = 14): Promise<Subscription | null> {
+  const trialEndsAt = new Date(Date.now() + trialDays * 24 * 60 * 60 * 1000).toISOString();
+  try {
+    await sql`
+      INSERT INTO subscriptions (user_id, status, trial_ends_at, current_period_end)
+      VALUES (${userId}, 'trialing', ${trialEndsAt}, ${trialEndsAt})
+    `;
+    return getSubscriptionByUserId(userId);
+  } catch {
+    return null;
+  }
+}
+
+async function getSubscriptionByUserId(userId: number): Promise<Subscription | null> {
+  const { rows } = await sql`SELECT * FROM subscriptions WHERE user_id = ${userId}`;
+  return rows[0] as Subscription || null;
+}
+
+async function getSubscriptionByStripeCustomerId(customerId: string): Promise<Subscription | null> {
+  const { rows } = await sql`SELECT * FROM subscriptions WHERE stripe_customer_id = ${customerId}`;
+  return rows[0] as Subscription || null;
+}
+
+async function updateSubscription(
+  userId: number,
+  updates: Partial<Omit<Subscription, "id" | "user_id" | "created_at">>
+): Promise<boolean> {
+  const fields: string[] = [];
+  const values: any[] = [];
+
+  for (const [key, value] of Object.entries(updates)) {
+    values.push(value);
+    fields.push(`${key} = $${values.length}`);
+  }
+
+  if (fields.length === 0) return false;
+
+  values.push(userId);
+  fields.push("updated_at = NOW()");
+
+  const query = `UPDATE subscriptions SET ${fields.join(", ")} WHERE user_id = $${values.length}`;
+  const result = await sql.query(query, values);
+  return (result.rowCount ?? 0) > 0;
+}
+
+async function createAuthToken(userId: number, tokenHash: string, expiresInDays: number = 30): Promise<AuthToken | null> {
+  const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
+  try {
+    const { rows } = await sql`
+      INSERT INTO auth_tokens (user_id, token_hash, expires_at)
+      VALUES (${userId}, ${tokenHash}, ${expiresAt})
+      RETURNING *
+    `;
+    return rows[0] as AuthToken || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getAuthTokenByHash(tokenHash: string): Promise<AuthToken | null> {
+  const { rows } = await sql`
+    SELECT * FROM auth_tokens WHERE token_hash = ${tokenHash} AND expires_at > NOW()
+  `;
+  return rows[0] as AuthToken || null;
+}
+
+async function updateTokenLastUsed(tokenId: number): Promise<void> {
+  await sql`UPDATE auth_tokens SET last_used_at = NOW() WHERE id = ${tokenId}`;
+}
+
+async function deleteExpiredTokens(): Promise<number> {
+  const result = await sql`DELETE FROM auth_tokens WHERE expires_at <= NOW()`;
+  return result.rowCount ?? 0;
+}
+
+async function deleteUserTokens(userId: number): Promise<number> {
+  const result = await sql`DELETE FROM auth_tokens WHERE user_id = ${userId}`;
+  return result.rowCount ?? 0;
+}
+
+async function addApiKey(encryptedKey: string, keyName?: string): Promise<ApiKey | null> {
+  try {
+    const { rows } = await sql`
+      INSERT INTO api_key_pool (key_encrypted, key_name)
+      VALUES (${encryptedKey}, ${keyName || null})
+      RETURNING *
+    `;
+    return rows[0] as ApiKey || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getAvailableApiKey(): Promise<ApiKey | null> {
+  const { rows } = await sql`
+    SELECT * FROM api_key_pool
+    WHERE is_active = TRUE
+    ORDER BY assigned_to_user_id IS NULL DESC, daily_usage_tokens ASC
+    LIMIT 1
+  `;
+  return rows[0] as ApiKey || null;
+}
+
+async function getApiKeyForUser(userId: number): Promise<ApiKey | null> {
+  const { rows } = await sql`
+    SELECT * FROM api_key_pool WHERE assigned_to_user_id = ${userId} AND is_active = TRUE
+  `;
+  if (rows[0]) return rows[0] as ApiKey;
+  return getAvailableApiKey();
+}
+
+async function resetDailyUsage(): Promise<number> {
+  const result = await sql`
+    UPDATE api_key_pool SET daily_usage_tokens = 0, last_usage_reset = NOW()
+  `;
+  return result.rowCount ?? 0;
+}
+
+async function logValidation(
+  userId: number,
+  ipAddress?: string,
+  userAgent?: string,
+  success: boolean = true
+): Promise<void> {
+  await sql`
+    INSERT INTO daily_validations (user_id, ip_address, user_agent, success)
+    VALUES (${userId}, ${ipAddress || null}, ${userAgent || null}, ${success})
+  `;
+}
+
+function isSubscriptionActive(subscription: Subscription): boolean {
+  if (subscription.status === "active") return true;
+  if (subscription.status === "trialing") {
+    const trialEnd = subscription.trial_ends_at ? new Date(subscription.trial_ends_at) : null;
+    return trialEnd ? trialEnd > new Date() : false;
+  }
+  return false;
+}
+
+function getSubscriptionExpiry(subscription: Subscription): string | null {
+  if (subscription.status === "trialing") {
+    return subscription.trial_ends_at;
+  }
+  return subscription.current_period_end;
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "dev-encryption-key-32bytes!!!!";
+const ADMIN_API_KEY = process.env.ADMIN_API_KEY || "admin-secret-key";
+
+function hashPassword(password: string): string {
+  const hash = createHash("sha256");
+  hash.update(password + "claude-pi-salt");
+  return hash.digest("hex");
+}
+
+function generateToken(): string {
+  return `claudepi_v1_${randomBytes(32).toString("hex")}`;
+}
+
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function decryptApiKey(encrypted: string): string {
+  const encryptedBuffer = Buffer.from(encrypted, "base64");
+  const keyBuffer = Buffer.from(ENCRYPTION_KEY);
+  const decrypted = Buffer.alloc(encryptedBuffer.length);
+  for (let i = 0; i < encryptedBuffer.length; i++) {
+    decrypted[i] = encryptedBuffer[i] ^ keyBuffer[i % keyBuffer.length];
+  }
+  return decrypted.toString();
+}
+
+function encryptApiKey(key: string): string {
+  const keyBuffer = Buffer.from(key);
+  const encKeyBuffer = Buffer.from(ENCRYPTION_KEY);
+  const encrypted = Buffer.alloc(keyBuffer.length);
+  for (let i = 0; i < keyBuffer.length; i++) {
+    encrypted[i] = keyBuffer[i] ^ encKeyBuffer[i % encKeyBuffer.length];
+  }
+  return encrypted.toString("base64");
+}
+
+async function getUserFromAuth(authHeader: string | undefined) {
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return null;
+  }
+  const token = authHeader.slice(7);
+  const tokenHash = hashToken(token);
+  const authToken = await getAuthTokenByHash(tokenHash);
+  if (!authToken) return null;
+  return getUserById(authToken.user_id);
+}
+
+// ============================================================================
+// Stripe Setup
+// ============================================================================
+
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" as any })
+  : null;
+
+const PRICE_ID = process.env.STRIPE_PRICE_ID || "price_xxx";
+const WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
+
+// ============================================================================
+// App Setup
+// ============================================================================
+
+const app = new Hono();
+
+app.use("/*", cors());
+app.use("/*", logger());
+
+// Health check
+app.get("/", (c) =>
+  c.json({
+    status: "ok",
+    service: "claude-pi-subscription-server",
+    version: "0.1.0",
+  })
+);
+
+app.get("/health", (c) =>
+  c.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+  })
+);
+
+// ============================================================================
+// Auth Routes
+// ============================================================================
+
+app.post("/v1/auth/signup", async (c) => {
+  await ensureDatabase();
+  const body = await c.req.json();
+  const { email, password } = body;
+
+  if (!email || !password) {
+    return c.json({ error: "Email and password are required" }, 400);
+  }
+
+  if (password.length < 8) {
+    return c.json({ error: "Password must be at least 8 characters" }, 400);
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return c.json({ error: "Invalid email format" }, 400);
+  }
+
+  const existingUser = await getUserByEmail(email);
+  if (existingUser) {
+    return c.json({ error: "An account with this email already exists" }, 409);
+  }
+
+  const passwordHash = hashPassword(password);
+  const user = await createUser(email, passwordHash);
+
+  if (!user) {
+    return c.json({ error: "Failed to create account" }, 500);
+  }
+
+  const subscription = await createSubscription(user.id, 14);
+
+  if (!subscription) {
+    return c.json({ error: "Failed to create subscription" }, 500);
+  }
+
+  const token = generateToken();
+  const tokenHash = hashToken(token);
+  await createAuthToken(user.id, tokenHash, 30);
+
+  const apiKey = await getApiKeyForUser(user.id);
+  const decryptedKey = apiKey ? decryptApiKey(apiKey.key_encrypted) : null;
+
+  return c.json({
+    authToken: token,
+    email: user.email,
+    anthropicApiKey: decryptedKey,
+    subscriptionStatus: subscription.status,
+    expiresAt: getSubscriptionExpiry(subscription),
+  });
+});
+
+app.post("/v1/auth/login", async (c) => {
+  await ensureDatabase();
+  const body = await c.req.json();
+  const { email, password } = body;
+
+  if (!email || !password) {
+    return c.json({ error: "Email and password are required" }, 400);
+  }
+
+  const user = await getUserByEmail(email);
+  if (!user) {
+    return c.json({ error: "Invalid email or password" }, 401);
+  }
+
+  const passwordHash = hashPassword(password);
+  if (user.password_hash !== passwordHash) {
+    return c.json({ error: "Invalid email or password" }, 401);
+  }
+
+  const subscription = await getSubscriptionByUserId(user.id);
+  if (!subscription) {
+    return c.json({ error: "No subscription found" }, 403);
+  }
+
+  if (!isSubscriptionActive(subscription)) {
+    return c.json({
+      error: "Subscription expired",
+      subscriptionStatus: subscription.status,
+    }, 403);
+  }
+
+  await deleteUserTokens(user.id);
+  const token = generateToken();
+  const tokenHash = hashToken(token);
+  await createAuthToken(user.id, tokenHash, 30);
+
+  const apiKey = await getApiKeyForUser(user.id);
+  const decryptedKey = apiKey ? decryptApiKey(apiKey.key_encrypted) : null;
+
+  await logValidation(
+    user.id,
+    c.req.header("x-forwarded-for") || c.req.header("x-real-ip"),
+    c.req.header("user-agent"),
+    true
+  );
+
+  return c.json({
+    authToken: token,
+    email: user.email,
+    anthropicApiKey: decryptedKey,
+    subscriptionStatus: subscription.status,
+    expiresAt: getSubscriptionExpiry(subscription),
+  });
+});
+
+app.post("/v1/auth/validate", async (c) => {
+  await ensureDatabase();
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return c.json({ error: "Missing or invalid authorization header" }, 401);
+  }
+
+  const token = authHeader.slice(7);
+  const tokenHash = hashToken(token);
+
+  const authToken = await getAuthTokenByHash(tokenHash);
+  if (!authToken) {
+    return c.json({ error: "Invalid or expired token" }, 401);
+  }
+
+  await updateTokenLastUsed(authToken.id);
+
+  const subscription = await getSubscriptionByUserId(authToken.user_id);
+  if (!subscription) {
+    return c.json({ error: "No subscription found" }, 403);
+  }
+
+  if (!isSubscriptionActive(subscription)) {
+    return c.json({
+      error: "Subscription expired",
+      subscriptionStatus: subscription.status,
+    }, 403);
+  }
+
+  const apiKey = await getApiKeyForUser(authToken.user_id);
+  const decryptedKey = apiKey ? decryptApiKey(apiKey.key_encrypted) : null;
+
+  await logValidation(
+    authToken.user_id,
+    c.req.header("x-forwarded-for") || c.req.header("x-real-ip"),
+    c.req.header("user-agent"),
+    true
+  );
+
+  return c.json({
+    anthropicApiKey: decryptedKey,
+    subscriptionStatus: subscription.status,
+    expiresAt: getSubscriptionExpiry(subscription),
+  });
+});
+
+app.post("/v1/auth/logout", async (c) => {
+  await ensureDatabase();
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return c.json({ error: "Missing or invalid authorization header" }, 401);
+  }
+
+  const token = authHeader.slice(7);
+  const tokenHash = hashToken(token);
+
+  const authToken = await getAuthTokenByHash(tokenHash);
+  if (!authToken) {
+    return c.json({ error: "Invalid or expired token" }, 401);
+  }
+
+  await deleteUserTokens(authToken.user_id);
+
+  return c.json({ success: true });
+});
+
+// ============================================================================
+// Subscription Routes
+// ============================================================================
+
+app.post("/v1/subscriptions/create-checkout", async (c) => {
+  await ensureDatabase();
+  if (!stripe) {
+    return c.json({ error: "Stripe not configured" }, 503);
+  }
+
+  const user = await getUserFromAuth(c.req.header("Authorization"));
+  if (!user) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const subscription = await getSubscriptionByUserId(user.id);
+  let customerId = subscription?.stripe_customer_id;
+
+  if (!customerId) {
+    const customer = await stripe.customers.create({
+      email: user.email,
+      metadata: { userId: user.id.toString() },
+    });
+    customerId = customer.id;
+
+    if (subscription) {
+      await updateSubscription(user.id, { stripe_customer_id: customerId });
+    }
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const successUrl = body.successUrl || "http://localhost:3001/subscription/success";
+  const cancelUrl = body.cancelUrl || "http://localhost:3001/subscription/cancel";
+
+  const session = await stripe.checkout.sessions.create({
+    customer: customerId,
+    mode: "subscription",
+    payment_method_types: ["card"],
+    line_items: [{ price: PRICE_ID, quantity: 1 }],
+    success_url: successUrl,
+    cancel_url: cancelUrl,
+    subscription_data: { metadata: { userId: user.id.toString() } },
+  });
+
+  return c.json({ url: session.url });
+});
+
+app.post("/v1/subscriptions/portal", async (c) => {
+  await ensureDatabase();
+  if (!stripe) {
+    return c.json({ error: "Stripe not configured" }, 503);
+  }
+
+  const user = await getUserFromAuth(c.req.header("Authorization"));
+  if (!user) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const subscription = await getSubscriptionByUserId(user.id);
+  if (!subscription?.stripe_customer_id) {
+    return c.json({ error: "No subscription found" }, 404);
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const returnUrl = body.returnUrl || "http://localhost:3001";
+
+  const session = await stripe.billingPortal.sessions.create({
+    customer: subscription.stripe_customer_id,
+    return_url: returnUrl,
+  });
+
+  return c.json({ url: session.url });
+});
+
+app.post("/v1/subscriptions/webhook", async (c) => {
+  await ensureDatabase();
+  if (!stripe) {
+    return c.json({ error: "Stripe not configured" }, 503);
+  }
+
+  const rawBody = await c.req.text();
+  const signature = c.req.header("stripe-signature");
+
+  if (!signature) {
+    return c.json({ error: "Missing signature" }, 400);
+  }
+
+  let event: Stripe.Event;
+
+  try {
+    event = stripe.webhooks.constructEvent(rawBody, signature, WEBHOOK_SECRET);
+  } catch (err) {
+    console.error("Webhook signature verification failed:", err);
+    return c.json({ error: "Invalid signature" }, 400);
+  }
+
+  switch (event.type) {
+    case "checkout.session.completed": {
+      const session = event.data.object as Stripe.Checkout.Session;
+      const customerId = session.customer as string;
+      const sub = await getSubscriptionByStripeCustomerId(customerId);
+      if (sub) {
+        await updateSubscription(sub.user_id, {
+          stripe_subscription_id: session.subscription as string,
+          status: "active",
+        });
+      }
+      break;
+    }
+
+    case "customer.subscription.updated": {
+      const subscription = event.data.object as Stripe.Subscription;
+      const customerId = subscription.customer as string;
+      const sub = await getSubscriptionByStripeCustomerId(customerId);
+      if (sub) {
+        const status = subscription.status as any;
+        await updateSubscription(sub.user_id, {
+          status: status === "active" ? "active" : status,
+          current_period_start: new Date(subscription.current_period_start * 1000).toISOString(),
+          current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
+        });
+      }
+      break;
+    }
+
+    case "customer.subscription.deleted": {
+      const subscription = event.data.object as Stripe.Subscription;
+      const customerId = subscription.customer as string;
+      const sub = await getSubscriptionByStripeCustomerId(customerId);
+      if (sub) {
+        await updateSubscription(sub.user_id, {
+          status: "canceled",
+          canceled_at: new Date().toISOString(),
+        });
+      }
+      break;
+    }
+
+    case "invoice.payment_failed": {
+      const invoice = event.data.object as Stripe.Invoice;
+      const customerId = invoice.customer as string;
+      const sub = await getSubscriptionByStripeCustomerId(customerId);
+      if (sub) {
+        await updateSubscription(sub.user_id, { status: "past_due" });
+      }
+      break;
+    }
+  }
+
+  return c.json({ received: true });
+});
+
+app.get("/v1/subscriptions/status", async (c) => {
+  await ensureDatabase();
+  const user = await getUserFromAuth(c.req.header("Authorization"));
+  if (!user) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const subscription = await getSubscriptionByUserId(user.id);
+  if (!subscription) {
+    return c.json({ error: "No subscription found" }, 404);
+  }
+
+  return c.json({
+    status: subscription.status,
+    trialEndsAt: subscription.trial_ends_at,
+    currentPeriodEnd: subscription.current_period_end,
+    canceledAt: subscription.canceled_at,
+  });
+});
+
+// ============================================================================
+// Admin Routes
+// ============================================================================
+
+async function adminAuth(c: any, next: any) {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return c.json({ error: "Missing authorization" }, 401);
+  }
+  const token = authHeader.slice(7);
+  if (token !== ADMIN_API_KEY) {
+    return c.json({ error: "Invalid admin key" }, 403);
+  }
+  return next();
+}
+
+app.post("/v1/admin/api-keys", adminAuth, async (c) => {
+  await ensureDatabase();
+  const body = await c.req.json();
+  const { key, name } = body;
+
+  if (!key) {
+    return c.json({ error: "API key is required" }, 400);
+  }
+
+  const encryptedKey = encryptApiKey(key);
+  const apiKey = await addApiKey(encryptedKey, name);
+
+  if (!apiKey) {
+    return c.json({ error: "Failed to add API key" }, 500);
+  }
+
+  return c.json({
+    id: apiKey.id,
+    name: apiKey.key_name,
+    isActive: apiKey.is_active,
+    createdAt: apiKey.created_at,
+  });
+});
+
+app.get("/v1/admin/api-keys", adminAuth, async (c) => {
+  await ensureDatabase();
+  const { rows } = await sql`
+    SELECT id, key_name, is_active, assigned_to_user_id, daily_usage_tokens,
+           last_usage_reset, created_at
+    FROM api_key_pool
+    ORDER BY created_at DESC
+  `;
+
+  return c.json({
+    keys: rows.map((k: any) => ({
+      id: k.id,
+      name: k.key_name,
+      isActive: k.is_active,
+      assignedToUserId: k.assigned_to_user_id,
+      dailyUsageTokens: k.daily_usage_tokens,
+      lastUsageReset: k.last_usage_reset,
+      createdAt: k.created_at,
+    })),
+  });
+});
+
+app.patch("/v1/admin/api-keys/:id", adminAuth, async (c) => {
+  await ensureDatabase();
+  const id = parseInt(c.req.param("id"));
+  const body = await c.req.json();
+
+  const updates: string[] = [];
+  const values: any[] = [];
+
+  if (body.isActive !== undefined) {
+    values.push(body.isActive);
+    updates.push(`is_active = $${values.length}`);
+  }
+
+  if (body.name !== undefined) {
+    values.push(body.name);
+    updates.push(`key_name = $${values.length}`);
+  }
+
+  if (updates.length === 0) {
+    return c.json({ error: "No updates provided" }, 400);
+  }
+
+  values.push(id);
+  const query = `UPDATE api_key_pool SET ${updates.join(", ")} WHERE id = $${values.length}`;
+  await sql.query(query, values);
+
+  return c.json({ success: true });
+});
+
+app.delete("/v1/admin/api-keys/:id", adminAuth, async (c) => {
+  await ensureDatabase();
+  const id = parseInt(c.req.param("id"));
+  await sql`DELETE FROM api_key_pool WHERE id = ${id}`;
+
+  return c.json({ success: true });
+});
+
+app.get("/v1/admin/users", adminAuth, async (c) => {
+  await ensureDatabase();
+  const { rows } = await sql`
+    SELECT u.id, u.email, u.created_at,
+           s.status as subscription_status, s.trial_ends_at, s.current_period_end,
+           s.stripe_customer_id, s.stripe_subscription_id
+    FROM users u
+    LEFT JOIN subscriptions s ON u.id = s.user_id
+    ORDER BY u.created_at DESC
+  `;
+
+  return c.json({
+    users: rows.map((u: any) => ({
+      id: u.id,
+      email: u.email,
+      createdAt: u.created_at,
+      subscriptionStatus: u.subscription_status || "none",
+      trialEndsAt: u.trial_ends_at,
+      currentPeriodEnd: u.current_period_end,
+      stripeCustomerId: u.stripe_customer_id,
+    })),
+  });
+});
+
+app.get("/v1/admin/stats", adminAuth, async (c) => {
+  await ensureDatabase();
+
+  const { rows: [userCount] } = await sql`SELECT COUNT(*) as count FROM users`;
+  const { rows: [activeSubCount] } = await sql`
+    SELECT COUNT(*) as count FROM subscriptions WHERE status IN ('active', 'trialing')
+  `;
+  const { rows: [apiKeyCount] } = await sql`
+    SELECT COUNT(*) as count FROM api_key_pool WHERE is_active = TRUE
+  `;
+  const { rows: [validationsToday] } = await sql`
+    SELECT COUNT(*) as count FROM daily_validations WHERE validated_at > NOW() - INTERVAL '1 day'
+  `;
+
+  return c.json({
+    totalUsers: Number(userCount.count),
+    activeSubscriptions: Number(activeSubCount.count),
+    activeApiKeys: Number(apiKeyCount.count),
+    validationsLast24h: Number(validationsToday.count),
+  });
+});
+
+app.post("/v1/admin/maintenance", adminAuth, async (c) => {
+  await ensureDatabase();
+  const body = await c.req.json().catch(() => ({}));
+  const results: Record<string, any> = {};
+
+  if (body.cleanupTokens !== false) {
+    const deleted = await deleteExpiredTokens();
+    results.expiredTokensDeleted = deleted;
+  }
+
+  if (body.resetDailyUsage) {
+    const reset = await resetDailyUsage();
+    results.apiKeysReset = reset;
+  }
+
+  return c.json({ success: true, results });
+});
+
+// 404 handler
+app.notFound((c) => c.json({ error: "Not found" }, 404));
+
+// Error handler
+app.onError((err, c) => {
+  console.error("Server error:", err);
+  return c.json({ error: "Internal server error" }, 500);
+});
+
+// ============================================================================
+// Vercel Exports
+// ============================================================================
 
 export const GET = handle(app);
 export const POST = handle(app);

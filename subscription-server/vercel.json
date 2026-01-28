@@ -1,9 +1,4 @@
 {
-  "functions": {
-    "api/index.ts": {
-      "includeFiles": "{index,routes/**,db/**}.ts"
-    }
-  },
   "rewrites": [
     { "source": "/(.*)", "destination": "/api" }
   ]
