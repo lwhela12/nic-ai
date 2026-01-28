@@ -81,12 +81,16 @@ export class ServerManager {
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
       PORT: String(this.port),
+      // Subscription server for auth and API key
+      CLAUDE_PI_SERVER: "https://claude-pi-five.vercel.app",
     };
 
     if (!this.options.isDev) {
       // In production, set paths to bundled resources
       env.ELECTRON_FRONTEND_PATH = join(this.options.resourcesPath, "frontend");
       env.AGENT_PROMPT_PATH = join(this.options.resourcesPath, "agent");
+      // Production mode for auth
+      env.NODE_ENV = "production";
     }
 
     return env;
