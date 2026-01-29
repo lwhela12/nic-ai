@@ -232,28 +232,49 @@ Use the multiplier guidelines from `agent/practice-guide.md` Section IV (Valuati
 
 ## Output
 
-Save two files:
+**⚠️ CRITICAL: File Format Rules**
+- **NEVER** write `.docx` or `.pdf` files directly — these are binary formats and will be corrupt
+- **ALWAYS** save as `.md` (markdown) first
+- The user will approve and export to PDF/DOCX via the Drafts tab in the UI
 
-### 1. Demand Letter
-`3P/3P Demand - DRAFT.md` - The demand letter (DRAFT - attorney must review before sending)
+### Step 6: Save Files
 
-### 2. Demand Manifest
-`.pi_tool/demand_manifest.json` - Documents referenced for bundling
+#### 6a. Create drafts folder if it doesn't exist
+
+```bash
+mkdir -p ".pi_tool/drafts"
+```
+
+#### 6b. Save Demand Letter (Markdown format)
+
+Use the Write tool to save to: `.pi_tool/drafts/demand_letter.md`
+
+**DO NOT save as `.docx` — the Write tool cannot create valid Word documents.**
+
+#### 6c. Update Drafts Manifest
+
+Use the Write tool to update `.pi_tool/drafts/manifest.json` with this entry:
 
 **Manifest Schema:**
 ```json
 {
-  "created_at": "ISO timestamp",
-  "demand_letter_path": "3P/3P Demand - DRAFT.md",
-  "exhibits": [
-    {
-      "path": "relative path to file",
-      "date": "YYYY-MM-DD (for chronological sorting)",
-      "description": "Provider name or document type"
-    }
-  ]
+  "demand_letter": {
+    "name": "Demand Letter",
+    "type": "demand",
+    "createdAt": "ISO timestamp",
+    "targetPath": "3P/3P Demand.pdf",
+    "exhibits": [
+      {
+        "path": "relative path to file",
+        "date": "YYYY-MM-DD (for chronological sorting)",
+        "description": "Provider name or document type"
+      }
+    ]
+  }
 }
 ```
+
+If the manifest already exists, read it first and merge the new entry.
 
 **Include in exhibits (in this order of precedence):**
 1. Police report (Investigation folder)
@@ -262,3 +283,15 @@ Save two files:
 4. Client injury photos
 
 Sort exhibits chronologically by date within each category.
+
+#### 6d. Verify files were created
+
+```bash
+ls -la ".pi_tool/drafts/demand_letter.md" ".pi_tool/drafts/manifest.json"
+```
+
+If either file is missing, stop and report the error.
+
+### Step 7: Notify User
+
+Tell the user: "The demand letter draft is ready for review. Open the **Drafts** tab in the right panel to preview and approve it. Once approved, it will be exported to `3P/3P Demand.pdf`."

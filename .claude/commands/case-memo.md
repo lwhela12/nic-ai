@@ -1,11 +1,9 @@
 ---
-allowed-tools: Read, Write
+allowed-tools: Read, Write, Bash
 description: Generate a case memo from the document index
 ---
 
 Read `.pi_tool/document_index.json` and generate a comprehensive case memo.
-
-Save to `.pi_tool/case_memo.md`
 
 ## Include
 
@@ -26,3 +24,34 @@ Determine from the index:
 - **Treatment**: Records accumulating, no demand
 - **Demand**: Ready for or demand sent
 - **Settlement**: Negotiating or disbursing
+
+## Output
+
+### Step 1: Create drafts folder if needed
+
+```bash
+mkdir -p ".pi_tool/drafts"
+```
+
+### Step 2: Save Case Memo
+
+Save to: `.pi_tool/drafts/case_memo.md`
+
+### Step 3: Update Drafts Manifest
+
+Read `.pi_tool/drafts/manifest.json` if it exists, then merge:
+
+```json
+{
+  "case_memo": {
+    "name": "Case Memo",
+    "type": "memo",
+    "createdAt": "ISO timestamp",
+    "targetPath": ".pi_tool/case_memo.pdf"
+  }
+}
+```
+
+### Step 4: Notify User
+
+Tell the user: "The case memo draft is ready for review. Open the **Drafts** tab in the right panel to preview and approve it."

@@ -619,8 +619,9 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                   }
                   return updated
                 })
-                // If Edit tool was used, the document index may have changed
-                if (toolsUsed.includes('Edit') && onIndexMayHaveChanged) {
+                // If Edit or Bash tool was used, the document index may have changed
+                // (Bash is used for curl commands that resolve review items)
+                if ((toolsUsed.includes('Edit') || toolsUsed.includes('Bash')) && onIndexMayHaveChanged) {
                   onIndexMayHaveChanged()
                 }
               }

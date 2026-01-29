@@ -1,7 +1,17 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { DocumentIndex, ErrataItem, NeedsReviewItem } from '../App'
+import KnowledgeTab from './KnowledgeTab'
+
+interface Draft {
+  id: string
+  name: string
+  path: string
+  type: string
+  createdAt: string
+  targetPath: string
+}
 
 interface Props {
   content: string
@@ -11,8 +21,10 @@ interface Props {
   caseFolder: string
   apiUrl: string
   documentIndex: DocumentIndex | null
+  firmRoot?: string
   onCloseFile: () => void
   onIndexUpdated: () => void
+  onDraftsUpdated?: () => void
 }
 
 // Icons
@@ -71,15 +83,144 @@ const ChevronDownIcon = () => (
   </svg>
 )
 
-export default function Visualizer({ content, docPath, fileUrl, fileName, caseFolder, apiUrl, documentIndex, onCloseFile, onIndexUpdated }: Props) {
-  const [activeTab, setActiveTab] = useState<'view' | 'review'>('view')
+const ArrowLeftIcon = () => (
+  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+  </svg>
+)
+
+const DocumentTextIcon = () => (
+  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+  </svg>
+)
+
+export default function Visualizer({ content, docPath, fileUrl, fileName, caseFolder, apiUrl, documentIndex, firmRoot, onCloseFile, onIndexUpdated, onDraftsUpdated }: Props) {
+  const [activeTab, setActiveTab] = useState<'view' | 'review' | 'drafts' | 'knowledge'>('view')
   const [verifiedItems, setVerifiedItems] = useState<Set<string>>(new Set())
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const [editingItem, setEditingItem] = useState<string | null>(null)
   const [correctionValue, setCorrectionValue] = useState('')
 
+  // Drafts state
+  const [drafts, setDrafts] = useState<Draft[]>([])
+  const [selectedDraft, setSelectedDraft] = useState<Draft | null>(null)
+  const [draftContent, setDraftContent] = useState<string>('')
+  const [isApprovingDraft, setIsApprovingDraft] = useState(false)
+  const [draftExportMenuOpen, setDraftExportMenuOpen] = useState(false)
+
   const errata: ErrataItem[] = Array.isArray(documentIndex?.errata) ? documentIndex.errata : []
   const needsReview: NeedsReviewItem[] = Array.isArray(documentIndex?.needs_review) ? documentIndex.needs_review : []
+
+  // Load drafts when caseFolder changes or tab is activated
+  const loadDrafts = useCallback(async () => {
+    if (!caseFolder) return
+    try {
+      const res = await fetch(`${apiUrl}/api/docs/drafts?case=${encodeURIComponent(caseFolder)}`)
+      if (res.ok) {
+        const data = await res.json()
+        setDrafts(data.drafts || [])
+      }
+    } catch (err) {
+      console.error('Failed to load drafts:', err)
+    }
+  }, [caseFolder, apiUrl])
+
+  useEffect(() => {
+    if (activeTab === 'drafts') {
+      loadDrafts()
+    }
+  }, [activeTab, loadDrafts])
+
+  // Load draft content when selected
+  useEffect(() => {
+    if (!selectedDraft || !caseFolder) {
+      setDraftContent('')
+      return
+    }
+
+    const loadDraftContent = async () => {
+      try {
+        const res = await fetch(`${apiUrl}/api/docs/read?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(selectedDraft.path)}`)
+        if (res.ok) {
+          const data = await res.json()
+          setDraftContent(data.content || '')
+        }
+      } catch (err) {
+        console.error('Failed to load draft content:', err)
+      }
+    }
+
+    loadDraftContent()
+  }, [selectedDraft, caseFolder, apiUrl])
+
+  const handleApproveDraft = async (draft: Draft, format: 'pdf' | 'docx' = 'pdf') => {
+    if (!caseFolder) return
+    setIsApprovingDraft(true)
+    setDraftExportMenuOpen(false)
+
+    try {
+      const res = await fetch(`${apiUrl}/api/docs/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseFolder,
+          draftPath: draft.path,
+          targetPath: draft.targetPath.replace('.pdf', `.${format}`),
+          format,
+        }),
+      })
+
+      if (res.ok) {
+        // Refresh drafts list
+        await loadDrafts()
+        setSelectedDraft(null)
+        setDraftContent('')
+        onDraftsUpdated?.()
+      } else {
+        const error = await res.json()
+        console.error('Approve failed:', error)
+      }
+    } catch (err) {
+      console.error('Failed to approve draft:', err)
+    } finally {
+      setIsApprovingDraft(false)
+    }
+  }
+
+  const handleExportDraft = (format: 'md' | 'docx' | 'pdf') => {
+    setDraftExportMenuOpen(false)
+    if (!selectedDraft || !caseFolder) return
+
+    const url = `${apiUrl}/api/docs/download?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(selectedDraft.path)}&format=${format}`
+
+    if (format === 'pdf') {
+      window.open(url, '_blank')
+    } else {
+      const link = document.createElement('a')
+      link.href = url
+      link.download = ''
+      link.click()
+    }
+  }
+
+  const formatDate = (dateStr: string) => {
+    const date = new Date(dateStr)
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  }
+
+  const getDraftTypeIcon = (type: string) => {
+    switch (type) {
+      case 'demand':
+        return '📄'
+      case 'settlement':
+        return '💰'
+      case 'memo':
+        return '📋'
+      default:
+        return '📝'
+    }
+  }
 
   // Load verified items from server when case changes
   useEffect(() => {
@@ -207,10 +348,202 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
         >
           Review {totalReviewItems > 0 && <span className={`ml-1.5 text-xs px-1.5 py-0.5 rounded-full ${needsReview.length > 0 ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>{totalReviewItems}</span>}
         </button>
+        <button
+          onClick={() => setActiveTab('drafts')}
+          className={`flex-1 px-6 py-3 text-sm font-medium transition-colors ${
+            activeTab === 'drafts'
+              ? 'text-brand-900 border-b-2 border-brand-900 bg-white'
+              : 'text-brand-500 hover:text-brand-700 hover:bg-surface-50'
+          }`}
+        >
+          Drafts {drafts.length > 0 && <span className="ml-1.5 text-xs px-1.5 py-0.5 rounded-full bg-accent-100 text-accent-700">{drafts.length}</span>}
+        </button>
+        <button
+          onClick={() => setActiveTab('knowledge')}
+          className={`flex-1 px-6 py-3 text-sm font-medium transition-colors ${
+            activeTab === 'knowledge'
+              ? 'text-brand-900 border-b-2 border-brand-900 bg-white'
+              : 'text-brand-500 hover:text-brand-700 hover:bg-surface-50'
+          }`}
+        >
+          Knowledge
+        </button>
       </div>
 
       {/* Content */}
-      {activeTab === 'view' ? (
+      {activeTab === 'knowledge' ? (
+        firmRoot ? (
+          <KnowledgeTab firmRoot={firmRoot} apiUrl={apiUrl} />
+        ) : (
+          <div className="flex-1 flex items-center justify-center p-8">
+            <p className="text-brand-400">No firm root configured</p>
+          </div>
+        )
+      ) : activeTab === 'drafts' ? (
+        <div className="flex-1 overflow-auto">
+          {selectedDraft ? (
+            // Draft preview view
+            <div className="flex flex-col h-full">
+              {/* Draft header */}
+              <div className="px-4 py-3 border-b border-surface-200 bg-surface-50">
+                <button
+                  onClick={() => { setSelectedDraft(null); setDraftContent(''); }}
+                  className="flex items-center gap-2 text-sm text-brand-500 hover:text-brand-700 mb-2"
+                >
+                  <ArrowLeftIcon />
+                  Back to drafts
+                </button>
+                <h3 className="font-medium text-brand-900">{selectedDraft.name}</h3>
+                <p className="text-xs text-brand-400 mt-0.5">
+                  Created {formatDate(selectedDraft.createdAt)} • Will export to {selectedDraft.targetPath}
+                </p>
+              </div>
+
+              {/* Draft content */}
+              <div className="flex-1 overflow-auto p-6">
+                <div className="prose prose-sm max-w-none
+                                prose-headings:my-3 prose-headings:text-brand-900
+                                prose-p:my-2 prose-ul:my-2 prose-li:my-0.5
+                                prose-table:border-collapse prose-th:border prose-th:border-surface-200
+                                prose-th:bg-surface-50 prose-th:px-3 prose-th:py-2
+                                prose-td:border prose-td:border-surface-200 prose-td:px-3 prose-td:py-2
+                                prose-a:text-accent-600">
+                  <Markdown remarkPlugins={[remarkGfm]}>{draftContent}</Markdown>
+                </div>
+              </div>
+
+              {/* Draft actions */}
+              <div className="px-4 py-3 border-t border-surface-200 bg-surface-50 flex items-center gap-3">
+                {/* Export dropdown */}
+                <div className="relative">
+                  <button
+                    onClick={() => setDraftExportMenuOpen(!draftExportMenuOpen)}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium
+                               bg-white border border-surface-200 hover:bg-surface-100
+                               rounded-lg text-brand-700 transition-colors"
+                  >
+                    <ArrowDownTrayIcon />
+                    Export
+                    <ChevronDownIcon />
+                  </button>
+                  {draftExportMenuOpen && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-10"
+                        onClick={() => setDraftExportMenuOpen(false)}
+                      />
+                      <div className="absolute left-0 bottom-full mb-1 w-40 bg-white rounded-lg shadow-lg border border-surface-200 py-1 z-20">
+                        <button
+                          onClick={() => handleExportDraft('docx')}
+                          className="w-full px-3 py-2 text-left text-sm text-brand-700 hover:bg-surface-100 flex items-center gap-2"
+                        >
+                          <span className="w-4 h-4 text-blue-600">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                              <path d="M6 2h8l6 6v12a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2zm7 1.5V9h5.5L13 3.5zM7 12h2v5H7v-5zm3 0h2v5h-2v-5zm3 0h2v5h-2v-5z"/>
+                            </svg>
+                          </span>
+                          Word (.docx)
+                        </button>
+                        <button
+                          onClick={() => handleExportDraft('pdf')}
+                          className="w-full px-3 py-2 text-left text-sm text-brand-700 hover:bg-surface-100 flex items-center gap-2"
+                        >
+                          <span className="w-4 h-4 text-red-600">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                              <path d="M6 2h8l6 6v12a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2zm7 1.5V9h5.5L13 3.5zM8.5 11a.5.5 0 00-.5.5v6a.5.5 0 001 0v-2h1a2 2 0 000-4h-1.5zm.5 3v-2h1a1 1 0 110 2H9z"/>
+                            </svg>
+                          </span>
+                          PDF
+                        </button>
+                        <hr className="my-1 border-surface-200" />
+                        <button
+                          onClick={() => handleExportDraft('md')}
+                          className="w-full px-3 py-2 text-left text-sm text-brand-500 hover:bg-surface-100 flex items-center gap-2"
+                        >
+                          <span className="w-4 h-4">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M4 6h16M4 12h16M4 18h10"/>
+                            </svg>
+                          </span>
+                          Markdown
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div className="flex-1" />
+
+                {/* Approve button */}
+                <button
+                  onClick={() => handleApproveDraft(selectedDraft)}
+                  disabled={isApprovingDraft}
+                  className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium
+                             bg-emerald-600 text-white hover:bg-emerald-700
+                             rounded-lg transition-colors disabled:opacity-50"
+                >
+                  <CheckCircleIcon />
+                  {isApprovingDraft ? 'Approving...' : 'Approve'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            // Drafts list view
+            <div className="p-6">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-10 h-10 rounded-xl bg-accent-100 flex items-center justify-center text-accent-600">
+                  <DocumentTextIcon />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-brand-900">Pending Drafts</h3>
+                  <p className="text-sm text-brand-500">Review and approve generated documents</p>
+                </div>
+              </div>
+
+              {drafts.length === 0 ? (
+                <div className="text-center py-12">
+                  <div className="w-16 h-16 rounded-full bg-surface-100 flex items-center justify-center mx-auto mb-4">
+                    <DocumentTextIcon />
+                  </div>
+                  <p className="text-lg font-medium text-brand-700">No pending drafts</p>
+                  <p className="text-sm text-brand-400 mt-1">
+                    Generated documents will appear here for review
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {drafts.map((draft) => (
+                    <button
+                      key={draft.id}
+                      onClick={() => setSelectedDraft(draft)}
+                      className="w-full text-left p-4 bg-white rounded-xl border border-surface-200
+                                 hover:border-accent-300 hover:bg-accent-50 transition-all"
+                    >
+                      <div className="flex items-start gap-3">
+                        <span className="text-2xl">{getDraftTypeIcon(draft.type)}</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium text-brand-900">{draft.name}</p>
+                          <p className="text-xs text-brand-400 mt-0.5">
+                            Created {formatDate(draft.createdAt)}
+                          </p>
+                          <p className="text-xs text-brand-500 mt-1 truncate">
+                            → {draft.targetPath}
+                          </p>
+                        </div>
+                        <span className="text-brand-300">
+                          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                          </svg>
+                        </span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      ) : activeTab === 'view' ? (
         <div className="flex-1 overflow-auto flex flex-col">
           {fileUrl ? (
             <>

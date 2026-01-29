@@ -13,10 +13,167 @@ import {
   AlignmentType,
 } from "docx";
 import puppeteer from "puppeteer";
+import { readFile } from "fs/promises";
+import { join } from "path";
+
+// Export options interface for customization
+export interface ExportOptions {
+  documentType?: "demand" | "settlement" | "memo" | "generic";
+  firmInfo?: FirmInfo;
+  caseName?: string;
+  showPageNumbers?: boolean;
+  showLetterhead?: boolean;
+}
+
+export interface FirmInfo {
+  name: string;
+  address: string;
+  cityStateZip?: string;
+  phone: string;
+  fax?: string;
+  website?: string;
+  attorney?: string;
+  logoBase64?: string;
+}
+
+// Parse firm info from the 12-firm-preferences.md file
+export async function loadFirmInfo(firmRoot: string): Promise<FirmInfo | null> {
+  try {
+    // Try to read firm preferences from knowledge folder
+    const prefsPath = join(firmRoot, ".pi_tool", "knowledge", "12-firm-preferences.md");
+    const content = await readFile(prefsPath, "utf-8");
+
+    // Parse the firm information block (between triple backticks)
+    const firmBlockMatch = content.match(/### Firm Information\s*```([\s\S]*?)```/);
+    if (!firmBlockMatch) return null;
+
+    const firmBlock = firmBlockMatch[1].trim();
+    const lines = firmBlock.split("\n").map((l) => l.trim()).filter(Boolean);
+
+    // Parse the structured format
+    const firmInfo: FirmInfo = {
+      name: "",
+      address: "",
+      phone: "",
+    };
+
+    // First line is firm name
+    if (lines[0]) firmInfo.name = lines[0];
+
+    // Second line is street address
+    if (lines[1]) firmInfo.address = lines[1];
+
+    // Third line is city, state, zip
+    if (lines[2]) firmInfo.cityStateZip = lines[2];
+
+    // Parse phone/fax/website from the contact line
+    const contactLine = lines.find((l) => l.includes("Phone:"));
+    if (contactLine) {
+      const phoneMatch = contactLine.match(/Phone:\s*([\d.-]+)/);
+      const faxMatch = contactLine.match(/Fax:\s*([\d.-]+)/);
+      if (phoneMatch) firmInfo.phone = phoneMatch[1];
+      if (faxMatch) firmInfo.fax = faxMatch[1];
+
+      // Website might be on the same line or next line
+      const websiteMatch = contactLine.match(/www\.[^\s]+/);
+      if (websiteMatch) firmInfo.website = websiteMatch[0];
+    }
+
+    // Check for website on separate line
+    const websiteLine = lines.find((l) => l.startsWith("www.") || l.includes("http"));
+    if (websiteLine && !firmInfo.website) {
+      firmInfo.website = websiteLine.replace(/^https?:\/\//, "");
+    }
+
+    // Parse attorney name
+    const attorneyLine = lines.find((l) => l.includes("Attorney:"));
+    if (attorneyLine) {
+      firmInfo.attorney = attorneyLine.replace("Attorney:", "").trim();
+    }
+
+    // Try to load logo
+    try {
+      const logoExtensions = ["png", "jpg", "jpeg"];
+      for (const ext of logoExtensions) {
+        try {
+          const logoPath = join(firmRoot, ".pi_tool", `firm-logo.${ext}`);
+          const logoBuffer = await readFile(logoPath);
+          const mimeType = ext === "png" ? "image/png" : "image/jpeg";
+          firmInfo.logoBase64 = `data:${mimeType};base64,${logoBuffer.toString("base64")}`;
+          break;
+        } catch {
+          // Try next extension
+        }
+      }
+    } catch {
+      // No logo found, that's fine
+    }
+
+    return firmInfo;
+  } catch {
+    return null;
+  }
+}
+
+// Generate letterhead HTML block
+function generateLetterheadHtml(firmInfo: FirmInfo): string {
+  const logo = firmInfo.logoBase64
+    ? `<img src="${firmInfo.logoBase64}" class="firm-logo" alt="Firm Logo">`
+    : "";
+
+  const contactParts = [`Phone: ${firmInfo.phone}`];
+  if (firmInfo.fax) contactParts.push(`Fax: ${firmInfo.fax}`);
+  if (firmInfo.website) contactParts.push(firmInfo.website);
+
+  return `
+    <div class="letterhead">
+      ${logo}
+      <div class="firm-name">${firmInfo.name.toUpperCase()}</div>
+      <div class="firm-address">${firmInfo.address}${firmInfo.cityStateZip ? ` | ${firmInfo.cityStateZip}` : ""}</div>
+      <div class="firm-contact">${contactParts.join(" | ")}</div>
+    </div>
+    <hr class="letterhead-divider">
+  `;
+}
 
 // Convert markdown to HTML with legal document styling
-export function markdownToHtml(markdown: string): string {
+export function markdownToHtml(markdown: string, options: ExportOptions = {}): string {
   const html = marked.parse(markdown, { async: false }) as string;
+
+  const showLetterhead = options.showLetterhead && options.firmInfo;
+  const letterheadHtml = showLetterhead ? generateLetterheadHtml(options.firmInfo!) : "";
+
+  // Add letterhead-specific CSS only if showing letterhead
+  const letterheadCss = showLetterhead
+    ? `
+    .letterhead {
+      text-align: center;
+      margin-bottom: 24pt;
+    }
+    .firm-logo {
+      max-height: 60pt;
+      margin-bottom: 8pt;
+    }
+    .firm-name {
+      font-size: 18pt;
+      font-weight: bold;
+      letter-spacing: 2pt;
+    }
+    .firm-address {
+      font-size: 10pt;
+      margin-top: 4pt;
+    }
+    .firm-contact {
+      font-size: 10pt;
+      color: #444;
+    }
+    .letterhead-divider {
+      border: none;
+      border-top: 2px solid #000;
+      margin: 12pt 0 24pt;
+    }
+    `
+    : "";
 
   return `<!DOCTYPE html>
 <html>
@@ -26,7 +183,7 @@ export function markdownToHtml(markdown: string): string {
     body {
       font-family: 'Times New Roman', Times, serif;
       font-size: 12pt;
-      line-height: 1.5;
+      line-height: 1.6;
       max-width: 8.5in;
       margin: 0 auto;
       padding: 1in;
@@ -44,6 +201,9 @@ export function markdownToHtml(markdown: string): string {
       font-weight: bold;
       margin-top: 18pt;
       margin-bottom: 10pt;
+      font-variant: small-caps;
+      border-bottom: 1px solid #666;
+      padding-bottom: 4pt;
     }
     h3 {
       font-size: 12pt;
@@ -54,6 +214,11 @@ export function markdownToHtml(markdown: string): string {
     p {
       margin: 10pt 0;
       text-align: justify;
+      text-indent: 0.5in;
+    }
+    /* Don't indent first paragraph after headers or in special contexts */
+    h1 + p, h2 + p, h3 + p, .letterhead + hr + p, .no-indent {
+      text-indent: 0;
     }
     table {
       border-collapse: collapse;
@@ -61,20 +226,33 @@ export function markdownToHtml(markdown: string): string {
       margin: 12pt 0;
     }
     th, td {
-      border: 1px solid #000;
+      border: 1px solid #666;
       padding: 8px 12px;
       text-align: left;
     }
     th {
-      background-color: #f0f0f0;
+      background-color: #f5f5f5;
       font-weight: bold;
+      border-bottom: 2px solid #666;
+    }
+    /* Zebra striping for table rows */
+    tbody tr:nth-child(even) {
+      background-color: #fafafa;
+    }
+    tbody tr:hover {
+      background-color: #f0f0f0;
     }
     ul, ol {
       margin: 10pt 0;
-      padding-left: 24pt;
+      padding-left: 36pt;
     }
     li {
-      margin: 4pt 0;
+      margin: 3pt 0;
+      text-indent: 0;
+    }
+    li p {
+      text-indent: 0;
+      margin: 2pt 0;
     }
     hr {
       border: none;
@@ -87,6 +265,13 @@ export function markdownToHtml(markdown: string): string {
     em {
       font-style: italic;
     }
+    blockquote {
+      margin: 12pt 24pt;
+      padding-left: 12pt;
+      border-left: 3px solid #ccc;
+      font-style: italic;
+    }
+    ${letterheadCss}
     @page {
       size: letter;
       margin: 1in;
@@ -99,6 +284,7 @@ export function markdownToHtml(markdown: string): string {
   </style>
 </head>
 <body>
+  ${letterheadHtml}
   ${html}
 </body>
 </html>`;
@@ -362,8 +548,81 @@ export async function htmlToDocx(
   return Buffer.from(buffer);
 }
 
+// PDF header/footer configuration by document type
+interface PdfHeaderFooterConfig {
+  displayHeaderFooter: boolean;
+  headerTemplate: string;
+  footerTemplate: string;
+  marginTop: string;
+  marginBottom: string;
+}
+
+function getPdfHeaderFooterConfig(options: ExportOptions = {}): PdfHeaderFooterConfig {
+  const { documentType, caseName, showPageNumbers = true } = options;
+
+  // Base config - no headers/footers
+  const noHeaderFooter: PdfHeaderFooterConfig = {
+    displayHeaderFooter: false,
+    headerTemplate: "",
+    footerTemplate: "",
+    marginTop: "1in",
+    marginBottom: "1in",
+  };
+
+  // Don't show headers/footers for memos or if disabled
+  if (documentType === "memo" || !showPageNumbers) {
+    return noHeaderFooter;
+  }
+
+  // Page number footer (common to most document types)
+  const pageNumberFooter = `
+    <div style="font-size: 9pt; width: 100%; text-align: center; color: #666;">
+      Page <span class="pageNumber"></span> of <span class="totalPages"></span>
+    </div>
+  `;
+
+  // Demand letters: case name in header, page numbers in footer
+  if (documentType === "demand") {
+    return {
+      displayHeaderFooter: true,
+      headerTemplate: caseName
+        ? `<div style="font-size: 9pt; width: 100%; text-align: right; padding-right: 0.75in; color: #666;">
+            ${caseName}
+          </div>`
+        : "",
+      footerTemplate: pageNumberFooter,
+      marginTop: caseName ? "1.25in" : "1in",
+      marginBottom: "1.25in",
+    };
+  }
+
+  // Settlement memos: page numbers only
+  if (documentType === "settlement") {
+    return {
+      displayHeaderFooter: true,
+      headerTemplate: "",
+      footerTemplate: pageNumberFooter,
+      marginTop: "1in",
+      marginBottom: "1.25in",
+    };
+  }
+
+  // Generic documents: page numbers in footer
+  return {
+    displayHeaderFooter: true,
+    headerTemplate: "",
+    footerTemplate: pageNumberFooter,
+    marginTop: "1in",
+    marginBottom: "1.25in",
+  };
+}
+
 // Convert HTML to PDF using Puppeteer
-export async function htmlToPdf(html: string, title: string): Promise<Buffer> {
+export async function htmlToPdf(
+  html: string,
+  title: string,
+  options: ExportOptions = {}
+): Promise<Buffer> {
   const browser = await puppeteer.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
@@ -373,16 +632,20 @@ export async function htmlToPdf(html: string, title: string): Promise<Buffer> {
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: "networkidle0" });
 
+    const headerFooterConfig = getPdfHeaderFooterConfig(options);
+
     const pdfBuffer = await page.pdf({
       format: "Letter",
       margin: {
-        top: "1in",
+        top: headerFooterConfig.marginTop,
         right: "1in",
-        bottom: "1in",
+        bottom: headerFooterConfig.marginBottom,
         left: "1in",
       },
       printBackground: true,
-      displayHeaderFooter: false,
+      displayHeaderFooter: headerFooterConfig.displayHeaderFooter,
+      headerTemplate: headerFooterConfig.headerTemplate,
+      footerTemplate: headerFooterConfig.footerTemplate,
     });
 
     return Buffer.from(pdfBuffer);

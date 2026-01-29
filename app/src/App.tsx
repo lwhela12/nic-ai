@@ -38,6 +38,9 @@ export interface NeedsReviewItem {
   conflicting_values: string[]
   sources: string[]
   reason: string
+  // Alternate field names that Sonnet might produce
+  item?: string
+  description?: string
 }
 
 export interface ErrataItem {
@@ -45,6 +48,8 @@ export interface ErrataItem {
   decision: string
   evidence: string
   confidence: string
+  // Alternate field name that Sonnet might produce
+  description?: string
 }
 
 export interface CaseNote {
@@ -696,7 +701,7 @@ curl -X POST ${API_URL}/api/files/resolve -H "Content-Type: application/json" -d
                 clientName={documentIndex?.summary?.client}
                 dob={documentIndex?.summary?.dob}
                 contact={documentIndex?.summary?.contact}
-                policyLimits={documentIndex?.summary?.policy_limits}
+                policyLimits={documentIndex?.summary?.policy_limits as Record<string, string> | string | undefined}
                 healthInsurance={documentIndex?.summary?.health_insurance}
                 claimNumbers={documentIndex?.summary?.claim_numbers}
               />
@@ -786,8 +791,10 @@ curl -X POST ${API_URL}/api/files/resolve -H "Content-Type: application/json" -d
             caseFolder={caseFolder}
             apiUrl={API_URL}
             documentIndex={documentIndex}
+            firmRoot={firmRoot || undefined}
             onCloseFile={() => setFileViewUrl(null)}
             onIndexUpdated={reloadDocumentIndex}
+            onDraftsUpdated={() => loadGeneratedDocs(caseFolder)}
           />
         }
       />

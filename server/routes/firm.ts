@@ -1,11 +1,15 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import Anthropic from "@anthropic-ai/sdk";
 import { readdir, readFile, stat, writeFile, mkdir } from "fs/promises";
 import { join, relative, dirname } from "path";
 import { getFirmSession, saveFirmSession } from "../sessions";
 import { PHASE_RULES } from "../shared/phase-rules";
 import { loadPracticeGuide, loadSectionsByIds, clearKnowledgeCache } from "./knowledge";
+
+// Initialize Anthropic client for direct API calls (used in single-turn synthesis)
+const anthropic = new Anthropic();
 
 const app = new Hono();
 
@@ -39,6 +43,143 @@ const SYNTHESIS_SECTION_IDS = [
   "benefits-calculation",
   "third-party-claims",
 ];
+
+// JSON Schema for structured synthesis output (used with direct API call)
+const SYNTHESIS_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    needs_review: {
+      type: "array" as const,
+      description: "Fields requiring human review due to conflicts or uncertainty",
+      items: {
+        type: "object" as const,
+        properties: {
+          field: { type: "string" as const, description: "Field name or path (e.g., 'charges:Provider Name')" },
+          conflicting_values: {
+            type: "array" as const,
+            items: { type: "string" as const },
+            description: "The different values found"
+          },
+          sources: {
+            type: "array" as const,
+            items: { type: "string" as const },
+            description: "Source documents for each value"
+          },
+          reason: { type: "string" as const, description: "Why this requires human review" }
+        },
+        required: ["field", "conflicting_values", "sources", "reason"] as const
+      }
+    },
+    errata: {
+      type: "array" as const,
+      description: "Documentation of decisions made during synthesis",
+      items: {
+        type: "object" as const,
+        properties: {
+          field: { type: "string" as const, description: "Field that was resolved" },
+          decision: { type: "string" as const, description: "Value chosen" },
+          evidence: { type: "string" as const, description: "What the extractions showed" },
+          confidence: { type: "string" as const, enum: ["high", "medium", "low"] }
+        },
+        required: ["field", "decision", "evidence", "confidence"] as const
+      }
+    },
+    case_analysis: {
+      type: "string" as const,
+      description: "Substantive case analysis: liability assessment, injury tier, value estimate, treatment patterns, next steps"
+    },
+    liability_assessment: {
+      type: "string" as const,
+      enum: ["clear", "moderate", "contested"],
+      description: "Overall liability strength"
+    },
+    injury_tier: {
+      type: "string" as const,
+      enum: ["tier_1_soft_tissue", "tier_2_structural", "tier_3_surgical"],
+      description: "Injury severity tier based on treatment and findings"
+    },
+    estimated_value_range: {
+      type: "string" as const,
+      description: "Value range in format '$X - $Y' based on specials and multiplier"
+    },
+    policy_limits_demand_appropriate: {
+      type: "boolean" as const,
+      description: "Whether a policy limits demand is appropriate"
+    },
+    summary: {
+      type: "object" as const,
+      description: "Case summary fields",
+      properties: {
+        client: { type: "string" as const, description: "Client's full name" },
+        dol: { type: "string" as const, description: "Date of loss (MM/DD/YYYY or YYYY-MM-DD)" },
+        dob: { type: "string" as const, description: "Client's date of birth" },
+        providers: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: "List of medical provider names"
+        },
+        total_charges: { type: "number" as const, description: "Total medical charges in dollars" },
+        policy_limits: {
+          type: "object" as const,
+          description: "Policy limits by party (1P, 3P)",
+          additionalProperties: true
+        },
+        contact: {
+          type: "object" as const,
+          properties: {
+            phone: { type: "string" as const },
+            email: { type: "string" as const },
+            address: {
+              type: "object" as const,
+              properties: {
+                street: { type: "string" as const },
+                city: { type: "string" as const },
+                state: { type: "string" as const },
+                zip: { type: "string" as const }
+              }
+            }
+          }
+        },
+        health_insurance: {
+          type: "object" as const,
+          properties: {
+            carrier: { type: "string" as const },
+            group_no: { type: "string" as const },
+            member_no: { type: "string" as const }
+          }
+        },
+        claim_numbers: {
+          type: "object" as const,
+          description: "Claim numbers keyed by party (e.g., '1P_AAA', '3P_Progressive')",
+          additionalProperties: { type: "string" as const }
+        },
+        case_summary: { type: "string" as const, description: "Brief narrative summary of the case" }
+      },
+      required: ["client", "dol", "providers", "total_charges"] as const
+    },
+    case_name: {
+      type: "string" as const,
+      description: "Case name (typically 'LASTNAME, Firstname')"
+    },
+    case_phase: {
+      type: "string" as const,
+      enum: ["Intake", "Investigation", "Treatment", "Demand", "Negotiation", "Settlement", "Complete"],
+      description: "Current phase of the case"
+    }
+  },
+  required: [
+    "needs_review",
+    "errata",
+    "case_analysis",
+    "liability_assessment",
+    "injury_tier",
+    "estimated_value_range",
+    "policy_limits_demand_appropriate",
+    "summary",
+    "case_name",
+    "case_phase"
+  ] as const
+};
 
 interface CaseSummary {
   path: string;
@@ -266,56 +407,51 @@ IMPORTANT:
 - For all other files: use the Read tool directly
 - If a file cannot be read or parsed, return the JSON with key_info explaining the issue`;
 
-// Build synthesis system prompt with practice guide sections injected
+// Build synthesis system prompt for JSON output (used with direct API call)
 async function buildSynthesisSystemPrompt(firmRoot?: string): Promise<string> {
   const practiceKnowledge = await loadSectionsByIds(firmRoot, SYNTHESIS_SECTION_IDS);
   const indexSchema = await loadIndexSchema();
 
   return `You are a case analyst and summarizer for a Personal Injury law firm in Nevada.
 
-You have two JSON files in .pi_tool/:
+You will receive:
 1. document_index.json - Data extracted by Haiku from all case documents
 2. hypergraph_analysis.json - Cross-document analysis showing consensus values and conflicts
 
-YOUR JOB: Analyze the case substantively and synthesize a case summary. Do NOT read any source PDFs.
+YOUR JOB: Analyze the case substantively and return a JSON synthesis. Do NOT make any tool calls.
 
 ## PRACTICE KNOWLEDGE
 
 ${practiceKnowledge}
 
-## CANONICAL INDEX SCHEMA — MUST FOLLOW EXACTLY
-
-The following schema defines the EXACT structure for document_index.json. You MUST adhere to this schema precisely.
+## CANONICAL INDEX SCHEMA
 
 **CRITICAL SCHEMA REQUIREMENTS:**
 - \`summary.providers\` MUST be an array of strings: \`["Provider A", "Provider B"]\` — NOT objects
 - \`summary.policy_limits\` MUST use keys \`1P\` and \`3P\` — NOT "first_party"/"third_party"
 - \`summary.claim_numbers\` MUST use keys like \`1P_CarrierName\` and \`3P_CarrierName\` — NOT "first_party_carrier"
-- \`case_notes\` is an array for user notes — write your analysis to \`case_analysis\` (string field) instead
 
 ${indexSchema}
 
-## WORKFLOW:
-1. Read both JSON files
-2. **Case Analysis** — Using the practice knowledge above, assess:
+## ANALYSIS WORKFLOW:
+
+1. **Case Analysis** — Using the practice knowledge above, assess:
    - **Liability strength**: clear / moderate / contested (with reasoning)
    - **Injury tier**: Tier 1 (soft tissue) / Tier 2 (structural) / Tier 3 (surgical) based on treatment and findings
    - **Estimated value range**: Apply the multiplier for the injury tier against total specials
    - **Policy limits demand appropriate?**: Yes/No based on Section IV triggers
-   - **Document quality gaps**: What critical documents are missing per the completeness checklist?
-   Write your analysis into the case_analysis field (a string, NOT case_notes which is an array).
-3. Use the hypergraph consensus values where available
-4. Generate a case summary from the extracted data
-5. Consolidate contact information into summary.contact object:
-   - phone: Client's phone number
-   - email: Client's email address
-   - address: { street, city, state, zip }
-6. Consolidate health insurance into summary.health_insurance object:
-   - carrier, group_no, member_no
-7. Consolidate claim numbers into summary.claim_numbers object
-8. Document ALL judgment calls in "errata"
-9. Put CRITICAL unresolved conflicts in "needs_review" (user must decide)
-10. Edit document_index.json with your synthesis
+   - **Document quality gaps**: What critical documents are missing?
+
+2. Use hypergraph consensus values where available
+
+3. Generate a case summary consolidating:
+   - Contact info into summary.contact
+   - Health insurance into summary.health_insurance
+   - Claim numbers into summary.claim_numbers (use 1P_CarrierName, 3P_CarrierName format)
+
+4. Document ALL judgment calls in "errata"
+
+5. Put CRITICAL unresolved conflicts in "needs_review"
 
 ## CRITICAL: HANDLING HYPERGRAPH CONFLICTS
 
@@ -330,28 +466,9 @@ ${indexSchema}
 2. NOT pick one value to use in the summary
 3. Use "NEEDS REVIEW" or leave empty in summary fields
 
-Example: If hypergraph shows:
-\`\`\`
-"charges:Spinal Rehab": {
-  "consensus": "UNCERTAIN",
-  "values": [{"value": "6558", "sources": ["MRB.pdf"]}, {"value": "10558", "sources": ["BC.pdf"]}]
-}
-\`\`\`
-
-You MUST add to needs_review:
-\`\`\`
-{
-  "field": "charges:Spinal Rehab",
-  "conflicting_values": ["$6,558", "$10,558"],
-  "sources": ["MRB Spinal Rehab Center.PDF", "BC Spinal Rehab Center.pdf"],
-  "reason": "$4,000 discrepancy in provider charges requires human verification"
-}
-\`\`\`
-
 ## ERRATA - Document ALL decisions
 
-Every field you fill in should have an errata entry explaining where it came from:
-
+Every field you fill in should have an errata entry:
 {
   "field": "<what field>",
   "decision": "<value you used>",
@@ -359,39 +476,24 @@ Every field you fill in should have an errata entry explaining where it came fro
   "confidence": "high|medium|low"
 }
 
-## CASE ANALYSIS FIELDS
-
-Write these fields in document_index.json:
-- **case_analysis**: Your substantive analysis — liability assessment, injury tier determination, value estimate, treatment pattern observations, priority next steps. This should be analytical, not just a data summary. (This is a string field, NOT the case_notes array.)
-- **liability_assessment**: "clear" | "moderate" | "contested"
-- **injury_tier**: "tier_1_soft_tissue" | "tier_2_structural" | "tier_3_surgical"
-- **estimated_value_range**: e.g. "$37,500 - $62,500" (specials x low multiplier to specials x high multiplier)
-- **policy_limits_demand_appropriate**: true | false
-
 ## PHASE RULES:
 ${Object.entries(PHASE_RULES).map(([phase, desc]) => `- ${phase}: ${desc}`).join('\n')}
 
-## CRITICAL EDITING RULES:
-- The document_index.json already has placeholder fields (needs_review, errata, case_analysis, etc.)
-- Use Edit tool to REPLACE existing values, NOT add new keys
-- Find the existing "needs_review": [] and replace it with your array
-- Find the existing "errata": [] and replace it with your array
-- NEVER add duplicate keys - this breaks JSON parsing
-- Each Edit should target a specific existing field to replace its value
+## OUTPUT FORMAT
 
-## PRIORITY: Edit needs_review and errata FIRST
+Return a JSON object with these fields:
+- needs_review: Array of conflicts requiring human review
+- errata: Array of documented decisions
+- case_analysis: String with substantive analysis (liability, injury tier, value, gaps, next steps)
+- liability_assessment: "clear" | "moderate" | "contested"
+- injury_tier: "tier_1_soft_tissue" | "tier_2_structural" | "tier_3_surgical"
+- estimated_value_range: e.g. "$37,500 - $62,500"
+- policy_limits_demand_appropriate: true | false
+- summary: Object with client, dol, dob, providers (array of strings), total_charges, policy_limits, contact, health_insurance, claim_numbers, case_summary
+- case_name: e.g. "LASTNAME, Firstname"
+- case_phase: One of Intake, Investigation, Treatment, Demand, Negotiation, Settlement, Complete
 
-**Your first Edit calls MUST be for needs_review and errata.** These are the most important fields.
-Do not spend many turns reading files or running Bash commands. Read the hypergraph once, then immediately start making Edit calls.
-
-Edit order:
-1. needs_review (with all UNCERTAIN fields)
-2. errata (with all your decisions)
-3. case_analysis, liability_assessment, injury_tier, estimated_value_range, policy_limits_demand_appropriate
-4. summary fields
-5. case_name, case_phase
-
-**IMPORTANT**: You MUST write needs_review and errata arrays. Empty arrays are only acceptable if there are truly zero conflicts (which is rare).`;
+**IMPORTANT**: You MUST include needs_review and errata arrays. Empty arrays only if truly zero conflicts.`;
 }
 
 // Usage tracking with cache breakdown
@@ -628,15 +730,20 @@ Then return the JSON extraction.`,
   }
 }
 
-// Sonnet synthesizes case summary from extracted data (NO PDF reading)
+// Sonnet synthesizes case summary from extracted data using single-turn structured output
 async function synthesizeCaseSummary(
   caseFolder: string,
   conflictCount: number,
   firmRoot?: string
 ): Promise<UsageStats> {
-  console.log(`\n========== SONNET SYNTHESIS ==========`);
+  console.log(`\n========== SONNET SYNTHESIS (Single-Turn) ==========`);
   console.log(`[Sonnet] Case folder: ${caseFolder}`);
   console.log(`[Sonnet] Conflicts detected: ${conflictCount}`);
+
+  const startTime = Date.now();
+  const indexDir = join(caseFolder, '.pi_tool');
+  const indexPath = join(indexDir, 'document_index.json');
+  const hypergraphPath = join(indexDir, 'hypergraph_analysis.json');
 
   let usage: UsageStats = {
     inputTokens: 0,
@@ -648,67 +755,95 @@ async function synthesizeCaseSummary(
     model: 'sonnet'
   };
 
-  const synthesisSystemPrompt = await buildSynthesisSystemPrompt(firmRoot);
+  try {
+    // Step 1: Pre-read both JSON files server-side
+    const [documentIndexContent, hypergraphContent] = await Promise.all([
+      readFile(indexPath, 'utf-8'),
+      readFile(hypergraphPath, 'utf-8')
+    ]);
 
-  for await (const msg of query({
-    prompt: `Analyze and synthesize a case summary from the extracted data.
+    console.log(`[Sonnet] Read index (${documentIndexContent.length} chars) and hypergraph (${hypergraphContent.length} chars)`);
 
-## PRIORITY ORDER - Edit these fields in THIS order:
+    // Step 2: Build system prompt
+    const synthesisSystemPrompt = await buildSynthesisSystemPrompt(firmRoot);
 
-1. **FIRST** - Read .pi_tool/hypergraph_analysis.json
-2. **SECOND** - Edit needs_review array with ALL UNCERTAIN or conflicting fields (charges, balances with different values)
-3. **THIRD** - Edit errata array documenting your decisions
-4. **FOURTH** - Edit case_analysis with your substantive case analysis (liability, injury tier, value range, gaps)
-5. **FIFTH** - Edit liability_assessment, injury_tier, estimated_value_range, policy_limits_demand_appropriate
-6. **THEN** - Edit summary fields (client, dol, dob, providers, total_charges, policy_limits)
-7. **LAST** - Edit case_name, case_phase
+    // Step 3: Make single API call with tool use for structured output
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-5-20250514",
+      max_tokens: 8192,
+      system: synthesisSystemPrompt,
+      messages: [{
+        role: "user",
+        content: `<hypergraph_analysis>
+${hypergraphContent}
+</hypergraph_analysis>
 
-## CRITICAL RULES:
-- Any hypergraph field with "consensus": "UNCERTAIN" MUST go in needs_review
-- Any field with has_conflict: true where values differ significantly (>$100 for money) MUST go in needs_review
-- Do NOT spend many turns reading - focus on making the Edit calls
+<document_index>
+${documentIndexContent}
+</document_index>
 
-## EFFICIENT WORKFLOW:
-1. Read hypergraph_analysis.json (one Read call)
-2. Immediately make Edit calls for needs_review and errata
-3. Read document_index.json summary section if needed
-4. Make Edit calls for summary fields
+Analyze the case and use the case_synthesis tool to return your synthesis.`
+      }],
+      tools: [{
+        name: "case_synthesis",
+        description: "Output the synthesized case analysis with all required fields",
+        input_schema: SYNTHESIS_SCHEMA
+      }],
+      tool_choice: { type: "tool", name: "case_synthesis" }
+    });
 
-Do NOT read any PDFs. Minimize Read/Bash calls. Prioritize Edit calls.`,
-    options: {
-      cwd: caseFolder,
-      systemPrompt: synthesisSystemPrompt,
-      model: "sonnet",
-      allowedTools: ["Read", "Edit"],
-      permissionMode: "acceptEdits",
-      maxTurns: 25,
-    },
-  })) {
-    console.log(`[Sonnet] Message type: ${msg.type}`);
+    // Step 4: Extract usage stats
+    usage.inputTokensNew = response.usage.input_tokens || 0;
+    usage.inputTokensCacheWrite = (response.usage as any).cache_creation_input_tokens || 0;
+    usage.inputTokensCacheRead = (response.usage as any).cache_read_input_tokens || 0;
+    usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
+    usage.outputTokens = response.usage.output_tokens || 0;
+    usage.apiCalls = 1;
 
-    if (msg.type === "assistant") {
-      for (const block of msg.message.content) {
-        if (block.type === "text" && block.text.length > 0) {
-          console.log(`[Sonnet] Text: ${block.text.slice(0, 500)}${block.text.length > 500 ? '...' : ''}`);
-        } else if (block.type === "tool_use") {
-          console.log(`[Sonnet] Tool: ${block.name}`);
-        }
+    // Step 5: Parse the tool use output
+    const toolBlock = response.content.find(block => block.type === 'tool_use');
+    if (!toolBlock || toolBlock.type !== 'tool_use') {
+      throw new Error('No tool use response from synthesis API');
+    }
+
+    const synthesis = toolBlock.input as Record<string, any>;
+    console.log(`[Sonnet] Parsed synthesis with ${synthesis.needs_review?.length || 0} review items, ${synthesis.errata?.length || 0} errata entries`);
+
+    // Step 6: Merge synthesis into existing index and write back
+    const existingIndex = JSON.parse(documentIndexContent);
+    const merged = {
+      ...existingIndex,
+      needs_review: synthesis.needs_review || [],
+      errata: synthesis.errata || [],
+      case_analysis: synthesis.case_analysis || '',
+      liability_assessment: synthesis.liability_assessment || null,
+      injury_tier: synthesis.injury_tier || null,
+      estimated_value_range: synthesis.estimated_value_range || null,
+      policy_limits_demand_appropriate: synthesis.policy_limits_demand_appropriate ?? null,
+      case_name: synthesis.case_name || existingIndex.case_name,
+      case_phase: synthesis.case_phase || existingIndex.case_phase,
+      // Deep merge summary, preserving folders structure
+      summary: {
+        ...existingIndex.summary,
+        ...synthesis.summary,
+        // Ensure providers is an array of strings (flatten if needed)
+        providers: Array.isArray(synthesis.summary?.providers)
+          ? synthesis.summary.providers.map((p: any) => typeof p === 'string' ? p : p.name || String(p))
+          : existingIndex.summary?.providers || [],
       }
-    }
+    };
 
-    // Capture final result usage
-    if (msg.type === "result" && (msg as any).usage) {
-      const finalUsage = (msg as any).usage;
-      usage.inputTokensNew = finalUsage.input_tokens || 0;
-      usage.inputTokensCacheWrite = finalUsage.cache_creation_input_tokens || 0;
-      usage.inputTokensCacheRead = finalUsage.cache_read_input_tokens || 0;
-      usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
-      usage.outputTokens = finalUsage.output_tokens || 0;
-      usage.apiCalls = 1;
-    }
+    await writeFile(indexPath, JSON.stringify(merged, null, 2));
+    console.log(`[Sonnet] Wrote merged index to ${indexPath}`);
+
+  } catch (err) {
+    console.error(`[Sonnet] Synthesis error:`, err);
+    // Re-throw so caller can handle
+    throw err;
   }
 
-  console.log(`[Sonnet] Done. Usage: ${usage.inputTokens} in / ${usage.outputTokens} out`);
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`[Sonnet] Done in ${elapsed}s. Usage: ${usage.inputTokens.toLocaleString()} in / ${usage.outputTokens.toLocaleString()} out`);
   console.log(`==========================================\n`);
 
   return usage;
@@ -987,9 +1122,37 @@ async function indexCase(
       confidence: hypergraphResult.summary.confidence_score
     });
 
-    // Step 6: Sonnet reconciles and writes case summary
-    onProgress({ type: "status", caseName, message: "Reconciling conflicts and generating case summary..." });
-    const summaryUsage = await synthesizeCaseSummary(caseFolder, hypergraphResult.conflicts.length, options?.firmRoot);
+    // Step 6: Sonnet reconciles and writes case summary (skip for simple incremental updates)
+    // Critical fields that require full re-synthesis if they have conflicts
+    const CRITICAL_CONFLICT_FIELDS = ['date_of_loss', 'total_medical', 'policy_limits', 'client_name'];
+
+    const hasCriticalConflicts = hypergraphResult.conflicts.some(c =>
+      CRITICAL_CONFLICT_FIELDS.some(field => c.field.toLowerCase().includes(field.toLowerCase()))
+    );
+
+    const isSimpleIncremental = isIncremental &&
+      files.length <= 3 &&
+      !hasCriticalConflicts;
+
+    let summaryUsage: UsageStats;
+
+    if (isSimpleIncremental) {
+      // Skip full synthesis for simple incremental updates
+      console.log(`[Sonnet] Skipping synthesis - simple incremental update (${files.length} files, no critical conflicts)`);
+      onProgress({ type: "status", caseName, message: `Quick update (${files.length} file(s), no re-synthesis needed)` });
+      summaryUsage = {
+        inputTokens: 0,
+        inputTokensNew: 0,
+        inputTokensCacheWrite: 0,
+        inputTokensCacheRead: 0,
+        outputTokens: 0,
+        apiCalls: 0,
+        model: 'sonnet'
+      };
+    } else {
+      onProgress({ type: "status", caseName, message: "Reconciling conflicts and generating case summary..." });
+      summaryUsage = await synthesizeCaseSummary(caseFolder, hypergraphResult.conflicts.length, options?.firmRoot);
+    }
 
     // Add summary usage with cache breakdown
     totalUsage.sonnet.inputTokens += summaryUsage.inputTokens;
@@ -1724,7 +1887,7 @@ interface FirmTodosData {
   todos: FirmTodo[];
 }
 
-const FIRM_DIR = ".pi_tool_firm";
+const FIRM_DIR = ".pi_tool";
 
 // Get firm todos
 app.get("/todos", async (c) => {

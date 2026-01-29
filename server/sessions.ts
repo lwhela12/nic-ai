@@ -38,8 +38,8 @@ export async function saveSession(caseFolder: string, sessionId: string): Promis
   await writeFile(path, JSON.stringify(data, null, 2));
 }
 
-// Firm-level session management (stored in .pi_tool_firm/)
-const FIRM_SESSIONS_DIR = ".pi_tool_firm";
+// Firm-level session management (stored in .pi_tool/)
+const FIRM_SESSIONS_DIR = ".pi_tool";
 
 export async function getFirmSession(firmRoot: string): Promise<string | null> {
   try {

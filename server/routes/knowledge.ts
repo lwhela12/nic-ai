@@ -2,7 +2,8 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readdir, readFile, writeFile, mkdir, copyFile, unlink, stat } from "fs/promises";
-import { join, dirname } from "path";
+import { join, dirname, basename, extname } from "path";
+import { extractTextFromPdf, extractTextFromDocx } from "../lib/extract";
 
 const app = new Hono();
 
@@ -529,6 +530,342 @@ export async function loadSectionsByIds(
   }
 
   return loadPracticeGuide(firmRoot);
+}
+
+// ============================================================================
+// DOCUMENT TEMPLATES
+// ============================================================================
+
+interface TemplateEntry {
+  id: string;
+  sourceFile: string;
+  parsedFile: string | null;
+  name: string;
+  description: string;
+  parsedAt: string | null;
+  sourceModified: string;
+}
+
+interface TemplatesIndex {
+  templates: TemplateEntry[];
+}
+
+// List document templates and detect new source files
+app.get("/doc-templates", async (c) => {
+  const root = c.req.query("root");
+  if (!root) return c.json({ error: "root query param required" }, 400);
+
+  const templatesDir = join(root, ".pi_tool", "templates");
+  const sourceDir = join(templatesDir, "source");
+  const parsedDir = join(templatesDir, "parsed");
+  const indexPath = join(templatesDir, "templates.json");
+
+  try {
+    // Ensure directories exist
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(parsedDir, { recursive: true });
+
+    // Load existing index
+    let index: TemplatesIndex = { templates: [] };
+    try {
+      const indexContent = await readFile(indexPath, "utf-8");
+      index = JSON.parse(indexContent);
+    } catch {
+      // No index yet
+    }
+
+    // Scan source directory for files
+    const sourceFiles = await readdir(sourceDir);
+    const validExtensions = [".pdf", ".docx"];
+    const templateFiles = sourceFiles.filter((f) =>
+      validExtensions.includes(extname(f).toLowerCase())
+    );
+
+    // Build result with status for each file
+    const templates: Array<TemplateEntry & { status: "parsed" | "needs_parsing" | "outdated" }> = [];
+
+    for (const filename of templateFiles) {
+      const sourceFilePath = join(sourceDir, filename);
+      const sourceStat = await stat(sourceFilePath);
+      const id = basename(filename, extname(filename));
+      const existing = index.templates.find((t) => t.id === id);
+
+      if (existing) {
+        // Check if source is newer than parsed
+        const sourceModified = sourceStat.mtime.toISOString();
+        const isOutdated = existing.parsedAt
+          ? new Date(sourceModified) > new Date(existing.parsedAt)
+          : true;
+
+        templates.push({
+          ...existing,
+          sourceModified,
+          status: existing.parsedFile
+            ? isOutdated
+              ? "outdated"
+              : "parsed"
+            : "needs_parsing",
+        });
+      } else {
+        // New file not in index
+        templates.push({
+          id,
+          sourceFile: `source/${filename}`,
+          parsedFile: null,
+          name: formatTemplateName(id),
+          description: "",
+          parsedAt: null,
+          sourceModified: sourceStat.mtime.toISOString(),
+          status: "needs_parsing",
+        });
+      }
+    }
+
+    return c.json({ templates });
+  } catch (error) {
+    console.error("List templates error:", error);
+    return c.json({ error: "Failed to list templates" }, 500);
+  }
+});
+
+// Parse a template source file into markdown
+app.post("/doc-templates/:id/parse", async (c) => {
+  const root = c.req.query("root");
+  const templateId = c.req.param("id");
+  if (!root) return c.json({ error: "root query param required" }, 400);
+
+  const templatesDir = join(root, ".pi_tool", "templates");
+  const sourceDir = join(templatesDir, "source");
+  const parsedDir = join(templatesDir, "parsed");
+  const indexPath = join(templatesDir, "templates.json");
+
+  try {
+    // Find source file
+    const sourceFiles = await readdir(sourceDir);
+    const sourceFile = sourceFiles.find(
+      (f) => basename(f, extname(f)) === templateId
+    );
+
+    if (!sourceFile) {
+      return c.json({ error: "Source file not found" }, 404);
+    }
+
+    const sourceFilePath = join(sourceDir, sourceFile);
+    const sourceStat = await stat(sourceFilePath);
+    const ext = extname(sourceFile).toLowerCase();
+
+    // Extract text based on file type
+    let extractedText: string;
+    if (ext === ".pdf") {
+      extractedText = await extractTextFromPdf(sourceFilePath);
+    } else if (ext === ".docx") {
+      extractedText = await extractTextFromDocx(sourceFilePath);
+    } else {
+      return c.json({ error: "Unsupported file format" }, 400);
+    }
+
+    // Format as markdown
+    const markdown = formatAsMarkdown(extractedText, formatTemplateName(templateId));
+
+    // Save parsed file
+    const parsedFilename = `${templateId}.md`;
+    const parsedFilePath = join(parsedDir, parsedFilename);
+    await writeFile(parsedFilePath, markdown);
+
+    // Update index
+    let index: TemplatesIndex = { templates: [] };
+    try {
+      const indexContent = await readFile(indexPath, "utf-8");
+      index = JSON.parse(indexContent);
+    } catch {
+      // No index yet
+    }
+
+    const existingIdx = index.templates.findIndex((t) => t.id === templateId);
+    const entry: TemplateEntry = {
+      id: templateId,
+      sourceFile: `source/${sourceFile}`,
+      parsedFile: `parsed/${parsedFilename}`,
+      name: existingIdx >= 0 ? index.templates[existingIdx].name : formatTemplateName(templateId),
+      description: existingIdx >= 0 ? index.templates[existingIdx].description : "",
+      parsedAt: new Date().toISOString(),
+      sourceModified: sourceStat.mtime.toISOString(),
+    };
+
+    if (existingIdx >= 0) {
+      index.templates[existingIdx] = entry;
+    } else {
+      index.templates.push(entry);
+    }
+
+    await writeFile(indexPath, JSON.stringify(index, null, 2));
+
+    return c.json({
+      success: true,
+      template: entry,
+      previewLength: markdown.length,
+    });
+  } catch (error) {
+    console.error("Parse template error:", error);
+    return c.json({
+      error: error instanceof Error ? error.message : String(error),
+    }, 500);
+  }
+});
+
+// Update template metadata (name, description)
+app.put("/doc-templates/:id", async (c) => {
+  const root = c.req.query("root");
+  const templateId = c.req.param("id");
+  const { name, description } = await c.req.json();
+
+  if (!root) return c.json({ error: "root query param required" }, 400);
+
+  const indexPath = join(root, ".pi_tool", "templates", "templates.json");
+
+  try {
+    const indexContent = await readFile(indexPath, "utf-8");
+    const index: TemplatesIndex = JSON.parse(indexContent);
+
+    const existing = index.templates.find((t) => t.id === templateId);
+    if (!existing) {
+      return c.json({ error: "Template not found" }, 404);
+    }
+
+    if (name !== undefined) existing.name = name;
+    if (description !== undefined) existing.description = description;
+
+    await writeFile(indexPath, JSON.stringify(index, null, 2));
+
+    return c.json({ success: true, template: existing });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return c.json({ error: "Template index not found" }, 404);
+    }
+    return c.json({ error: "Failed to update template" }, 500);
+  }
+});
+
+// Get parsed template content for preview
+app.get("/doc-templates/:id/preview", async (c) => {
+  const root = c.req.query("root");
+  const templateId = c.req.param("id");
+
+  if (!root) return c.json({ error: "root query param required" }, 400);
+
+  const parsedFilePath = join(root, ".pi_tool", "templates", "parsed", `${templateId}.md`);
+
+  try {
+    const content = await readFile(parsedFilePath, "utf-8");
+    return c.json({ content });
+  } catch {
+    return c.json({ error: "Parsed template not found" }, 404);
+  }
+});
+
+// Delete a template
+app.delete("/doc-templates/:id", async (c) => {
+  const root = c.req.query("root");
+  const templateId = c.req.param("id");
+
+  if (!root) return c.json({ error: "root query param required" }, 400);
+
+  const templatesDir = join(root, ".pi_tool", "templates");
+  const indexPath = join(templatesDir, "templates.json");
+
+  try {
+    // Load index
+    const indexContent = await readFile(indexPath, "utf-8");
+    const index: TemplatesIndex = JSON.parse(indexContent);
+
+    const existingIdx = index.templates.findIndex((t) => t.id === templateId);
+    if (existingIdx < 0) {
+      return c.json({ error: "Template not found" }, 404);
+    }
+
+    const template = index.templates[existingIdx];
+
+    // Delete source file
+    try {
+      await unlink(join(templatesDir, template.sourceFile));
+    } catch {
+      // File may not exist
+    }
+
+    // Delete parsed file
+    if (template.parsedFile) {
+      try {
+        await unlink(join(templatesDir, template.parsedFile));
+      } catch {
+        // File may not exist
+      }
+    }
+
+    // Remove from index
+    index.templates.splice(existingIdx, 1);
+    await writeFile(indexPath, JSON.stringify(index, null, 2));
+
+    return c.json({ success: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return c.json({ error: "Template index not found" }, 404);
+    }
+    return c.json({ error: "Failed to delete template" }, 500);
+  }
+});
+
+// Helper: Format template ID to readable name
+function formatTemplateName(id: string): string {
+  return id
+    .replace(/[-_]/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// Helper: Format extracted text as markdown
+function formatAsMarkdown(text: string, title: string): string {
+  // Clean up the extracted text
+  const cleaned = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return `# ${title}
+
+${cleaned}
+`;
+}
+
+/**
+ * Load document templates for agent context.
+ * Returns a formatted string describing available templates.
+ */
+export async function loadDocumentTemplates(firmRoot: string): Promise<string> {
+  const indexPath = join(firmRoot, ".pi_tool", "templates", "templates.json");
+
+  try {
+    const indexContent = await readFile(indexPath, "utf-8");
+    const index: TemplatesIndex = JSON.parse(indexContent);
+
+    if (index.templates.length === 0) {
+      return "";
+    }
+
+    const parsed = index.templates.filter((t) => t.parsedFile);
+    if (parsed.length === 0) {
+      return "";
+    }
+
+    const lines = parsed.map(
+      (t) => `- **${t.name}** (${t.id}): ${t.description || "No description"}`
+    );
+
+    return `DOCUMENT TEMPLATES:
+${lines.join("\n")}
+
+To use a template, read .pi_tool/templates/parsed/{id}.md for the template content.`;
+  } catch {
+    return "";
+  }
 }
 
 export default app;

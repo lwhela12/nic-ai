@@ -29,7 +29,24 @@ The case index (provided in your context) contains:
 - `Grep` - Search file contents
 - `Glob` - Find files by pattern
 - `Edit` - Update the document index
-- `Write` - Create new files
+- `Write` - Create new files (**NEVER for .docx or .pdf — see below**)
+
+### ⚠️ CRITICAL: Binary File Handling
+
+**NEVER write `.docx` or `.pdf` files directly using the Write tool.**
+
+These are binary formats (ZIP archives with XML inside). Writing plain text with a `.docx` extension creates a corrupt file that won't open.
+
+**Correct workflow:**
+1. Write content as `.md` (markdown)
+2. Use the export API to convert to DOCX/PDF:
+   ```bash
+   curl -s -X POST http://localhost:3001/api/docs/export \
+     -H "Content-Type: application/json" \
+     -d '{"caseFolder": "...", "sourcePath": "path/to/file.md", "format": "docx", "openAfter": true}'
+   ```
+
+See `.claude/commands/export.md` for full documentation.
 
 ### Task Tool (for complex document generation)
 
@@ -105,6 +122,18 @@ When discussing specific documents, use this syntax to display them:
 ```
 [[SHOW_FILE: folder/filename.pdf]]
 ```
+
+## Document Templates
+
+Templates for generated documents (demand letters, memos, etc.) are stored in `.pi_tool/templates/`.
+
+**To see available templates:**
+Read `.pi_tool/templates/templates.json` which lists templates with descriptions of when to use each.
+
+**To use a template:**
+Read `.pi_tool/templates/parsed/{template-id}.md` for the template content. Use the structure and language as a guide when generating that document type.
+
+When generating documents, check if a relevant template exists and follow its format/structure.
 
 ## Updating the Index
 

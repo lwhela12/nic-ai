@@ -107,9 +107,36 @@ _________________________    _________________________
 Date                         [Client Name]
 ```
 
-## Output Location
+## Output
 
-Save to: `Settlement/Settlement Memo - DRAFT.md`
+### Step 1: Create drafts folder if needed
+
+```bash
+mkdir -p ".pi_tool/drafts"
+```
+
+### Step 2: Save Settlement Memo
+
+Save to: `.pi_tool/drafts/settlement_memo.md`
+
+### Step 3: Update Drafts Manifest
+
+Read `.pi_tool/drafts/manifest.json` if it exists, then merge:
+
+```json
+{
+  "settlement_memo": {
+    "name": "Settlement Memo",
+    "type": "settlement",
+    "createdAt": "ISO timestamp",
+    "targetPath": "Settlement/Settlement Memo.pdf"
+  }
+}
+```
+
+### Step 4: Notify User
+
+Tell the user: "The settlement memo draft is ready for review. Open the **Drafts** tab in the right panel to preview and approve it."
 
 ## Calculation Rules
 

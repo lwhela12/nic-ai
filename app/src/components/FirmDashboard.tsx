@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import FirmChat from './FirmChat'
 import KnowledgeEditor from './KnowledgeEditor'
 import KnowledgeChat from './KnowledgeChat'
+import TemplateManager from './TemplateManager'
 
 interface FirmTodo {
   id: string
@@ -155,7 +156,7 @@ export default function FirmDashboard({
   const [filterPhase, setFilterPhase] = useState<string>('all')
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null)
   const [view, setView] = useState<'dashboard' | 'firmChat' | 'knowledge'>('dashboard')
-  const [knowledgeSubTab, setKnowledgeSubTab] = useState<'editor' | 'chat'>('editor')
+  const [knowledgeSubTab, setKnowledgeSubTab] = useState<'editor' | 'chat' | 'templates'>('editor')
   const [selectedCases, setSelectedCases] = useState<Set<string>>(new Set())
   const [knowledgeExists, setKnowledgeExists] = useState<boolean | null>(null)
   const [showFirmConfig, setShowFirmConfig] = useState(false)
@@ -762,6 +763,14 @@ export default function FirmDashboard({
               >
                 Chat
               </button>
+              <button
+                onClick={() => setKnowledgeSubTab('templates')}
+                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                  knowledgeSubTab === 'templates' ? 'bg-white text-brand-900 shadow-sm' : 'text-brand-500 hover:text-brand-700'
+                }`}
+              >
+                Templates
+              </button>
             </div>
             <button
               onClick={() => { loadFirmConfig(); setShowFirmConfig(true) }}
@@ -772,7 +781,9 @@ export default function FirmDashboard({
             </button>
           </div>
           <div className="flex-1 overflow-hidden">
-            {knowledgeExists ? (
+            {knowledgeSubTab === 'templates' ? (
+              <TemplateManager apiUrl={apiUrl} firmRoot={firmRoot} />
+            ) : knowledgeExists ? (
               knowledgeSubTab === 'editor'
                 ? <KnowledgeEditor apiUrl={apiUrl} firmRoot={firmRoot} />
                 : <KnowledgeChat apiUrl={apiUrl} firmRoot={firmRoot} />
