@@ -662,6 +662,9 @@ async function extractFile(
       console.log(`[${fileIndex + 1}/${totalFiles}] Truncated to ${MAX_CHARS} chars`);
     }
 
+    // Track extraction method for logging
+    const extractionMethod = usePreExtracted ? 'pre-extracted' : 'agent-fallback';
+
     let result: FileExtraction = { filename, folder, type: 'other', key_info: '' };
     let usage: UsageStats = {
       inputTokens: 0,
