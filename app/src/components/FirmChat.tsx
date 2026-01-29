@@ -25,6 +25,11 @@ interface Message {
   hasTodos?: boolean
 }
 
+interface ChatHistoryMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
 interface ParsedTodo {
   text: string
   caseRef?: string
@@ -148,10 +153,10 @@ const MessageItem = memo(function MessageItem({
 
 export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialPrompt, onInitialPromptUsed }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
+  const [chatHistory, setChatHistory] = useState<ChatHistoryMessage[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const [isCompacting, setIsCompacting] = useState(false)
-  const [sessionId, setSessionId] = useState<string | null>(null)
+  const [currentTool, setCurrentTool] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const initialPromptUsedRef = useRef(false)
 
@@ -166,12 +171,13 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
     setInput('')
     setMessages((prev) => [...prev, { role: 'user', content: userMessage }])
     setIsLoading(true)
+    setCurrentTool(null)
 
     try {
-      const response = await fetch(`${apiUrl}/api/firm/chat`, {
+      const response = await fetch(`${apiUrl}/api/firm/direct-chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ root: firmRoot, message: userMessage, sessionId }),
+        body: JSON.stringify({ root: firmRoot, message: userMessage, history: chatHistory }),
       })
 
       const reader = response.body?.getReader()
@@ -192,8 +198,8 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
             try {
               const data = JSON.parse(line.slice(6))
 
-              if (data.type === 'init' && data.sessionId) {
-                setSessionId(data.sessionId)
+              if (data.type === 'tool' || data.type === 'tool_executing') {
+                setCurrentTool(data.tool || data.content)
               }
 
               if (data.type === 'text') {
@@ -210,33 +216,35 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
                 })
               }
 
-              if (data.type === 'compaction') {
-                // Show compaction indicator (SDK is auto-compacting context)
-                setIsCompacting(true)
-              }
-
               if (data.type === 'done') {
-                if (data.sessionId) setSessionId(data.sessionId)
+                setCurrentTool(null)
+                // Update chat history for context continuity
+                setChatHistory((prev) => [
+                  ...prev,
+                  { role: 'user', content: userMessage },
+                  { role: 'assistant', content: assistantMessage }
+                ])
+                // If todos were saved via the tool, notify parent
+                if (data.todos && onTodosUpdated) {
+                  // Transform to FirmTodo format
+                  const todos = data.todos.map((t: any, i: number) => ({
+                    id: `todo-${Date.now()}-${i}`,
+                    text: t.text,
+                    caseRef: t.caseRef,
+                    priority: t.priority || 'medium',
+                    status: 'pending',
+                    createdAt: new Date().toISOString(),
+                  }))
+                  onTodosUpdated(todos)
+                }
               }
 
               if (data.type === 'error') {
                 const errorMsg = data.error || 'Unknown error'
-                const errorLower = errorMsg.toLowerCase()
-
-                // Check if this is a compaction-related error (SDK will auto-recover)
-                const isCompactionError =
-                  errorLower.includes('prompt is too long') ||
-                  errorLower.includes('process exited with code 1')
-
-                if (isCompactionError) {
-                  // Show compaction indicator instead of error - SDK will auto-compact
-                  setIsCompacting(true)
-                } else {
-                  setMessages((prev) => [
-                    ...prev,
-                    { role: 'assistant', content: `Error: ${errorMsg}` },
-                  ])
-                }
+                setMessages((prev) => [
+                  ...prev,
+                  { role: 'assistant', content: `Error: ${errorMsg}` },
+                ])
               }
             } catch {
               // Ignore parse errors
@@ -251,9 +259,9 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
       ])
     } finally {
       setIsLoading(false)
-      setIsCompacting(false)
+      setCurrentTool(null)
     }
-  }, [apiUrl, firmRoot, input, isLoading, sessionId])
+  }, [apiUrl, firmRoot, input, isLoading, chatHistory, onTodosUpdated])
 
   // Handle initial prompt (e.g., from "Generate Tasks" button)
   useEffect(() => {
@@ -271,8 +279,8 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ root: firmRoot }),
       })
-      setSessionId(null)
       setMessages([])
+      setChatHistory([])
     } catch {
       // Ignore
     }
@@ -331,10 +339,10 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
       <div className="px-6 py-4 border-b border-surface-200 bg-white">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2 text-sm">
-            {sessionId ? (
+            {chatHistory.length > 0 ? (
               <span className="inline-flex items-center gap-1.5 text-brand-500">
                 <span className="w-2 h-2 bg-emerald-400 rounded-full"></span>
-                Session active
+                {chatHistory.length / 2} exchanges
               </span>
             ) : (
               <span className="text-brand-400">New conversation</span>
@@ -342,12 +350,12 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
             <span className="text-brand-300 mx-2">|</span>
             <span className="text-accent-600 font-medium">Firm-level Analysis</span>
           </div>
-          {sessionId && (
+          {chatHistory.length > 0 && (
             <button
               onClick={clearSession}
               className="text-sm text-brand-400 hover:text-brand-600 transition-colors"
             >
-              Clear session
+              Clear history
             </button>
           )}
         </div>
@@ -406,21 +414,11 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
                     <span className="w-2 h-2 bg-accent-300 rounded-full animate-bounce [animation-delay:0.15s]" />
                     <span className="w-2 h-2 bg-accent-300 rounded-full animate-bounce [animation-delay:0.3s]" />
                   </div>
-                  <span className="text-xs text-brand-400">Analyzing portfolio...</span>
+                  <span className="text-xs text-brand-400">
+                    {currentTool ? `Using ${currentTool}...` : 'Analyzing portfolio...'}
+                  </span>
                 </div>
               </div>
-            </div>
-          </div>
-        )}
-
-        {isCompacting && (
-          <div className="flex justify-center py-2">
-            <div className="flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg text-sm">
-              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-              </svg>
-              Compacting context...
             </div>
           </div>
         )}

@@ -8,6 +8,9 @@ import { getFirmSession, saveFirmSession } from "../sessions";
 import { PHASE_RULES } from "../shared/phase-rules";
 import { loadPracticeGuide, loadSectionsByIds, clearKnowledgeCache } from "./knowledge";
 import { extractTextFromFile } from "../lib/extract";
+import { generateCaseSummary } from "../lib/case-summary";
+import { mergeToIndex, type HypergraphResult } from "../lib/merge-index";
+import { directFirmChat } from "../lib/firm-chat";
 
 // Initialize Anthropic client for direct API calls (used in single-turn synthesis)
 const anthropic = new Anthropic();
@@ -1199,9 +1202,17 @@ async function indexCase(
     await writeFile(indexPath, JSON.stringify(initialIndex, null, 2));
     console.log(`[Index] Wrote initial document_index.json`);
 
-    // Step 5: Generate hypergraph to detect cross-document conflicts
-    onProgress({ type: "status", caseName, message: "Analyzing cross-document consistency..." });
-    const hypergraphResult = await generateHypergraph(caseFolder, { folders });
+    // Step 5: Run hypergraph and case summary generation IN PARALLEL
+    onProgress({ type: "status", caseName, message: "Analyzing documents and generating summary..." });
+
+    // Build initial index object for case summary (needs folders structure)
+    const initialIndexForSummary = { folders };
+
+    // Run both Haiku calls in parallel
+    const [hypergraphResult, caseSummaryResult] = await Promise.all([
+      generateHypergraph(caseFolder, { folders }),
+      generateCaseSummary(initialIndexForSummary, options?.firmRoot)
+    ]);
 
     // Save hypergraph to file
     const hypergraphPath = join(indexDir, 'hypergraph_analysis.json');
@@ -1218,6 +1229,11 @@ async function indexCase(
       totalUsage.haiku.apiCalls += hypergraphResult.usage.apiCalls;
     }
 
+    // Add case summary usage to Haiku totals
+    totalUsage.haiku.inputTokens += caseSummaryResult.usage.inputTokens;
+    totalUsage.haiku.outputTokens += caseSummaryResult.usage.outputTokens;
+    totalUsage.haiku.apiCalls += 1;
+
     onProgress({
       type: "hypergraph_complete",
       caseName,
@@ -1225,45 +1241,63 @@ async function indexCase(
       confidence: hypergraphResult.summary.confidence_score
     });
 
-    // Step 6: Sonnet reconciles and writes case summary (skip for simple incremental updates)
-    // Critical fields that require full re-synthesis if they have conflicts
-    const CRITICAL_CONFLICT_FIELDS = ['date_of_loss', 'total_medical', 'policy_limits', 'client_name'];
+    // Step 6: Programmatic merge - combine hypergraph + case summary into final index
+    onProgress({ type: "status", caseName, message: "Merging results..." });
 
-    const hasCriticalConflicts = hypergraphResult.conflicts.some(c =>
-      CRITICAL_CONFLICT_FIELDS.some(field => c.field.toLowerCase().includes(field.toLowerCase()))
+    const mergedIndex = mergeToIndex(
+      hypergraphResult as HypergraphResult,
+      caseSummaryResult,
+      {
+        ...initialIndex,
+        folders, // Preserve folders from extraction
+      }
     );
 
-    const isSimpleIncremental = isIncremental &&
-      files.length <= 3 &&
-      !hasCriticalConflicts;
+    // Write final merged index
+    await writeFile(indexPath, JSON.stringify(mergedIndex, null, 2));
+    console.log(`[Index] Wrote merged document_index.json`);
 
-    let summaryUsage: UsageStats;
-
-    if (isSimpleIncremental) {
-      // Skip full synthesis for simple incremental updates
-      console.log(`[Sonnet] Skipping synthesis - simple incremental update (${files.length} files, no critical conflicts)`);
-      onProgress({ type: "status", caseName, message: `Quick update (${files.length} file(s), no re-synthesis needed)` });
-      summaryUsage = {
-        inputTokens: 0,
-        inputTokensNew: 0,
-        inputTokensCacheWrite: 0,
-        inputTokensCacheRead: 0,
-        outputTokens: 0,
-        apiCalls: 0,
-        model: 'sonnet'
-      };
-    } else {
-      onProgress({ type: "status", caseName, message: "Reconciling conflicts and generating case summary..." });
-      summaryUsage = await synthesizeCaseSummary(caseFolder, hypergraphResult.conflicts.length, options?.firmRoot);
-    }
-
-    // Add summary usage with cache breakdown
-    totalUsage.sonnet.inputTokens += summaryUsage.inputTokens;
-    totalUsage.sonnet.inputTokensNew += summaryUsage.inputTokensNew || 0;
-    totalUsage.sonnet.inputTokensCacheWrite += summaryUsage.inputTokensCacheWrite || 0;
-    totalUsage.sonnet.inputTokensCacheRead += summaryUsage.inputTokensCacheRead || 0;
-    totalUsage.sonnet.outputTokens += summaryUsage.outputTokens;
-    totalUsage.sonnet.apiCalls += summaryUsage.apiCalls;
+    // ========== SONNET SYNTHESIS (COMMENTED OUT - replaced by parallel Haiku + programmatic merge) ==========
+    // // Step 6: Sonnet reconciles and writes case summary (skip for simple incremental updates)
+    // // Critical fields that require full re-synthesis if they have conflicts
+    // const CRITICAL_CONFLICT_FIELDS = ['date_of_loss', 'total_medical', 'policy_limits', 'client_name'];
+    //
+    // const hasCriticalConflicts = hypergraphResult.conflicts.some(c =>
+    //   CRITICAL_CONFLICT_FIELDS.some(field => c.field.toLowerCase().includes(field.toLowerCase()))
+    // );
+    //
+    // const isSimpleIncremental = isIncremental &&
+    //   files.length <= 3 &&
+    //   !hasCriticalConflicts;
+    //
+    // let summaryUsage: UsageStats;
+    //
+    // if (isSimpleIncremental) {
+    //   // Skip full synthesis for simple incremental updates
+    //   console.log(`[Sonnet] Skipping synthesis - simple incremental update (${files.length} files, no critical conflicts)`);
+    //   onProgress({ type: "status", caseName, message: `Quick update (${files.length} file(s), no re-synthesis needed)` });
+    //   summaryUsage = {
+    //     inputTokens: 0,
+    //     inputTokensNew: 0,
+    //     inputTokensCacheWrite: 0,
+    //     inputTokensCacheRead: 0,
+    //     outputTokens: 0,
+    //     apiCalls: 0,
+    //     model: 'sonnet'
+    //   };
+    // } else {
+    //   onProgress({ type: "status", caseName, message: "Reconciling conflicts and generating case summary..." });
+    //   summaryUsage = await synthesizeCaseSummary(caseFolder, hypergraphResult.conflicts.length, options?.firmRoot);
+    // }
+    //
+    // // Add summary usage with cache breakdown
+    // totalUsage.sonnet.inputTokens += summaryUsage.inputTokens;
+    // totalUsage.sonnet.inputTokensNew += summaryUsage.inputTokensNew || 0;
+    // totalUsage.sonnet.inputTokensCacheWrite += summaryUsage.inputTokensCacheWrite || 0;
+    // totalUsage.sonnet.inputTokensCacheRead += summaryUsage.inputTokensCacheRead || 0;
+    // totalUsage.sonnet.outputTokens += summaryUsage.outputTokens;
+    // totalUsage.sonnet.apiCalls += summaryUsage.apiCalls;
+    // ========== END SONNET SYNTHESIS ==========
 
     // Report usage stats with cache breakdown
     const usageReport = {
@@ -1955,6 +1989,33 @@ USER QUESTION: `;
       }
     } catch (error) {
       console.error("Firm chat error:", error);
+      await stream.writeSSE({
+        data: JSON.stringify({
+          type: "error",
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      });
+    }
+  });
+});
+
+// Direct firm chat - lightweight Haiku-based chat with tools
+app.post("/direct-chat", async (c) => {
+  const { root, message, history = [] } = await c.req.json();
+
+  if (!root || !message) {
+    return c.json({ error: "root and message required" }, 400);
+  }
+
+  return streamSSE(c, async (stream) => {
+    try {
+      for await (const event of directFirmChat(root, message, history)) {
+        await stream.writeSSE({
+          data: JSON.stringify(event)
+        });
+      }
+    } catch (error) {
+      console.error("Direct firm chat error:", error);
       await stream.writeSSE({
         data: JSON.stringify({
           type: "error",

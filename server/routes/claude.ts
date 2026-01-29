@@ -7,6 +7,7 @@ import { getSession, saveSession } from "../sessions";
 import { indexCase } from "./firm";
 import { buildPhasePrompt } from "../shared/phase-rules";
 import { isPathWithinBounds, extractPathsFromBash } from "../lib/path-validator";
+import { directChat, type ChatMessage as DirectChatMessage } from "../lib/direct-chat";
 
 // Types for chat history
 interface ChatMessage {
@@ -447,6 +448,72 @@ USER REQUEST: `;
           }),
         });
       }
+    }
+  });
+});
+
+// Direct API chat endpoint - faster, lighter weight
+// Uses direct Anthropic API calls instead of Agent SDK
+app.post("/chat-v2", async (c) => {
+  const { caseFolder, message, history } = await c.req.json();
+
+  if (!caseFolder || !message) {
+    return c.json({ error: "caseFolder and message required" }, 400);
+  }
+
+  // Convert history format if needed
+  const chatHistory: DirectChatMessage[] = (history || []).map((m: any) => ({
+    role: m.role as "user" | "assistant",
+    content: m.content
+  }));
+
+  return streamSSE(c, async (stream) => {
+    try {
+      let fullResponse = "";
+
+      for await (const event of directChat(caseFolder, message, chatHistory)) {
+        if (event.type === "text" && event.content) {
+          fullResponse += event.content;
+          await stream.writeSSE({
+            data: JSON.stringify({ type: "text", content: event.content }),
+          });
+        } else if (event.type === "tool") {
+          await stream.writeSSE({
+            data: JSON.stringify({ type: "tool", name: event.tool || event.content }),
+          });
+        } else if (event.type === "tool_executing") {
+          await stream.writeSSE({
+            data: JSON.stringify({ type: "tool_executing", name: event.tool }),
+          });
+        } else if (event.type === "delegating") {
+          // Document generation agent is taking over
+          await stream.writeSSE({
+            data: JSON.stringify({ type: "delegating", message: event.content }),
+          });
+        } else if (event.type === "status") {
+          // Status update from document agent
+          await stream.writeSSE({
+            data: JSON.stringify({ type: "status", message: event.content }),
+          });
+        } else if (event.type === "done") {
+          await stream.writeSSE({
+            data: JSON.stringify({
+              type: "done",
+              success: true,
+              usage: event.usage,
+              filePath: event.filePath,
+            }),
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Direct chat error:", error);
+      await stream.writeSSE({
+        data: JSON.stringify({
+          type: "error",
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      });
     }
   });
 });

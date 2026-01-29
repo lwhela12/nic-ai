@@ -52,13 +52,13 @@ export interface DocxStyles {
 }
 
 /**
- * Extract text content from a PDF file using pdftotext with OCR fallback.
- * Uses CLI tools instead of pdf-parse for better handling of various PDF types.
+ * Extract text content from a PDF file using pdftotext.
+ * For scanned/image PDFs, returns empty string to trigger agent fallback
+ * (which uses Claude's vision for better accuracy than OCR).
  */
 export async function extractTextFromPdf(filePath: string): Promise<string> {
   const escapedPath = shellEscape(filePath);
 
-  // Step 1: Try pdftotext (fast, works for text-based PDFs)
   try {
     const { stdout } = await execAsync(`pdftotext ${escapedPath} -`, {
       maxBuffer: 10 * 1024 * 1024, // 10MB buffer for large PDFs
@@ -67,60 +67,13 @@ export async function extractTextFromPdf(filePath: string): Promise<string> {
     if (text.length > 50) {
       return text;
     }
-    // Text too short - likely a scanned PDF, fall through to OCR
-    console.log(`[Extract] pdftotext returned only ${text.length} chars, trying OCR...`);
+    // Text too short - likely a scanned PDF, return empty to trigger agent fallback
+    console.log(`[Extract] pdftotext returned only ${text.length} chars, deferring to agent`);
+    return '';
   } catch (e) {
-    // pdftotext failed, continue to OCR
-    console.log(`[Extract] pdftotext failed for ${filePath}, trying OCR...`);
-  }
-
-  // Step 2: OCR fallback for scanned PDFs
-  try {
-    // Create unique temp directory for this extraction
-    const tempDir = `/tmp/ocr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    await execAsync(`mkdir -p '${tempDir}'`);
-
-    try {
-      // Convert PDF to images (200 DPI for reasonable quality/speed tradeoff)
-      await execAsync(`pdftoppm ${escapedPath} '${tempDir}/page' -png -r 200`, {
-        timeout: 60000, // 60 second timeout for conversion
-      });
-
-      // Find all generated page images
-      const { stdout: pages } = await execAsync(`ls '${tempDir}'/*.png 2>/dev/null || true`);
-      const pageFiles = pages.trim().split('\n').filter(Boolean);
-
-      if (pageFiles.length === 0) {
-        console.log(`[Extract] No pages generated from PDF: ${filePath}`);
-        return '';
-      }
-
-      // OCR each page
-      const texts: string[] = [];
-      for (const pageFile of pageFiles) {
-        try {
-          const { stdout } = await execAsync(`tesseract "${pageFile}" stdout 2>/dev/null`, {
-            timeout: 30000, // 30 second timeout per page
-          });
-          if (stdout.trim()) {
-            texts.push(stdout.trim());
-          }
-        } catch (ocrErr) {
-          // Skip pages that fail OCR
-          console.log(`[Extract] OCR failed for page: ${pageFile}`);
-        }
-      }
-
-      const result = texts.join('\n\n--- Page Break ---\n\n').trim();
-      console.log(`[Extract] OCR extracted ${result.length} chars from ${pageFiles.length} pages`);
-      return result;
-    } finally {
-      // Always cleanup temp directory
-      await execAsync(`rm -rf '${tempDir}'`).catch(() => {});
-    }
-  } catch (e) {
-    console.error(`[Extract] OCR fallback failed for ${filePath}:`, e);
-    return ''; // Return empty if all extraction fails
+    // pdftotext failed, return empty to trigger agent fallback
+    console.log(`[Extract] pdftotext failed for ${filePath}, deferring to agent`);
+    return '';
   }
 }
 

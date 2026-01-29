@@ -510,15 +510,21 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
     let compactionDetected = false
 
     try {
-      // Include conversation summary in message if we have one and no active session
-      const messageWithContext = conversationSummary && !sessionId
+      // Build conversation history for the API (excluding the message we just added)
+      const historyForApi = messages
+        .filter(m => !m.isView) // Skip view-only messages
+        .map(m => ({ role: m.role, content: m.content }))
+
+      // Include conversation summary as context if we have one
+      const messageWithContext = conversationSummary
         ? `[Previous conversation summary: ${conversationSummary}]\n\n${userMessage}`
         : userMessage
 
-      const response = await fetch(`${apiUrl}/api/claude/chat`, {
+      // Use direct API chat endpoint (faster, no agent SDK overhead)
+      const response = await fetch(`${apiUrl}/api/claude/chat-v2`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ caseFolder, message: messageWithContext, sessionId }),
+        body: JSON.stringify({ caseFolder, message: messageWithContext, history: historyForApi }),
       })
 
       const reader = response.body?.getReader()
@@ -540,8 +546,27 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
             try {
               const data = JSON.parse(line.slice(6))
 
+              // Note: chat-v2 doesn't use sessions, so no 'init' event
               if (data.type === 'init' && data.sessionId) {
                 setSessionId(data.sessionId)
+              }
+
+              if (data.type === 'tool_executing') {
+                // Tool is being executed (direct API mode)
+                toolsUsed = [...toolsUsed, `${data.name}...`]
+                setCurrentTools(toolsUsed)
+              }
+
+              if (data.type === 'delegating') {
+                // Document agent is taking over
+                toolsUsed = [...toolsUsed, '📄 ' + (data.message || 'Generating document...')]
+                setCurrentTools(toolsUsed)
+              }
+
+              if (data.type === 'status') {
+                // Status update from document agent
+                toolsUsed = [...toolsUsed, data.message || 'Working...']
+                setCurrentTools(toolsUsed)
               }
 
               if (data.type === 'text') {
@@ -603,30 +628,34 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
               }
 
               if (data.type === 'done') {
+                // chat-v2 doesn't use sessions
                 if (data.sessionId) setSessionId(data.sessionId)
                 // Update final usage if provided
                 if (data.usage) {
                   setContextUsage({
                     inputTokens: data.usage.inputTokens,
                     outputTokens: data.usage.outputTokens,
-                    percent: data.usage.contextPercent,
+                    percent: Math.round((data.usage.inputTokens / 200000) * 100),
                   })
                 }
                 setMessages((prev) => {
                   const updated = [...prev]
                   const lastIdx = updated.length - 1
                   if (updated[lastIdx]?.role === 'assistant') {
-                    updated[lastIdx] = { ...updated[lastIdx], tools: toolsUsed }
+                    updated[lastIdx] = { ...updated[lastIdx], tools: toolsUsed.map(t => t.replace('...', '')) }
                   }
                   return updated
                 })
-                // If Edit or Bash tool was used, the document index may have changed
-                // (Bash is used for curl commands that resolve review items)
-                if ((toolsUsed.includes('Edit') || toolsUsed.includes('Bash')) && onIndexMayHaveChanged) {
+                // Check if index-modifying tools were used
+                const indexTools = ['Edit', 'Bash', 'update_index', 'write_file']
+                if (toolsUsed.some(t => indexTools.some(it => t.includes(it))) && onIndexMayHaveChanged) {
                   onIndexMayHaveChanged()
                 }
-                // If Write tool was used, drafts may have been created/updated
-                if (toolsUsed.includes('Write') && onDraftsMayHaveChanged) {
+                // Check if file-writing tools were used or document agent created a file
+                const writeTools = ['Write', 'write_file']
+                const hasWriteTools = toolsUsed.some(t => writeTools.some(wt => t.includes(wt)))
+                const hasDocGenFile = !!data.filePath
+                if ((hasWriteTools || hasDocGenFile) && onDraftsMayHaveChanged) {
                   onDraftsMayHaveChanged()
                 }
               }
