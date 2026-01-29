@@ -7,6 +7,7 @@ import { join, relative, dirname } from "path";
 import { getFirmSession, saveFirmSession } from "../sessions";
 import { PHASE_RULES } from "../shared/phase-rules";
 import { loadPracticeGuide, loadSectionsByIds, clearKnowledgeCache } from "./knowledge";
+import { extractTextFromFile } from "../lib/extract";
 
 // Initialize Anthropic client for direct API calls (used in single-turn synthesis)
 const anthropic = new Anthropic();
@@ -344,11 +345,12 @@ app.get("/cases", async (c) => {
 // ============================================================================
 
 // System prompt for file extraction agents (Haiku)
+// Note: Text is pre-extracted server-side, so agent just analyzes provided content
 const fileExtractionSystemPrompt = `You are a document extraction agent for a Personal Injury law firm in Nevada (Muslusky Law).
 
-YOUR TASK: Read ONE document and extract key information.
+YOUR TASK: Analyze the provided document text and extract key information.
 
-DOCUMENT TYPES YOU MAY ENCOUNTER:
+DOCUMENT TYPES:
 - intake_form: Client intake, accident details, contact info
 - lor: Letter of Representation to insurance companies
 - declaration: Insurance policy declarations page (coverage limits)
@@ -402,7 +404,54 @@ OUTPUT FORMAT - Return ONLY valid JSON:
 
 IMPORTANT:
 - Return ONLY the JSON object, no markdown, no explanation
-- If the file cannot be read or is empty, still return the JSON with key_info explaining the issue
+- If the text is empty or unreadable, still return the JSON with key_info explaining the issue`;
+
+// System prompt for fallback when pre-extraction fails (agent reads file with tools)
+const fileExtractionSystemPromptWithTools = `You are a document extraction agent for a Personal Injury law firm in Nevada (Muslusky Law).
+
+YOUR TASK: Read ONE document and extract key information.
+
+DOCUMENT TYPES:
+- intake_form: Client intake, accident details, contact info
+- lor: Letter of Representation to insurance companies
+- declaration: Insurance policy declarations page (coverage limits)
+- medical_record: Medical treatment records, doctor notes
+- medical_bill: Bills from medical providers (charges, dates)
+- correspondence: Letters, emails with adjusters
+- authorization: HIPAA forms, signed authorizations
+- identification: Driver's license, ID documents
+- police_report: Accident/police reports
+- demand: Demand letter to insurance
+- settlement: Settlement memos, releases
+- lien: Medical liens from providers
+- balance_request: Balance confirmation requests
+- balance_confirmation: Confirmed balances from providers
+- property_damage: Vehicle repair estimates, rental receipts
+- other: Anything that doesn't fit above
+
+EXTRACTION FOCUS:
+- Client name, DOB, contact info (phone, email, address)
+- Date of loss (accident date)
+- Insurance policy numbers and limits
+- Medical provider names
+- Treatment dates and charges (dollar amounts)
+- Claim numbers
+- Health insurance details (carrier, group number, member ID)
+- Any issues or gaps noted in the document
+
+OUTPUT FORMAT - Return ONLY valid JSON:
+{
+  "filename": "<exact filename>",
+  "folder": "<folder name>",
+  "type": "<document_type from list above>",
+  "key_info": "<2-3 sentence summary of most important information>",
+  "extracted_data": {
+    // Include any specific data points found
+  }
+}
+
+IMPORTANT:
+- Return ONLY the JSON object, no markdown, no explanation
 - For PDFs: use pdftotext "filename" - 2>/dev/null | head -200
 - For all other files: use the Read tool directly
 - If a file cannot be read or parsed, return the JSON with key_info explaining the issue`;
@@ -547,71 +596,6 @@ function normalizeFolders(input: any): Record<string, { files: any[] }> {
   return normalized;
 }
 
-/**
- * Tiered PDF text extraction:
- * 1. pdftotext (fastest) - extracts embedded text layer
- * 2. tesseract OCR (medium) - for scanned documents
- * 3. null (fallback to Claude Read tool) - for complex layouts, handwriting
- */
-async function extractPdfText(
-  filePath: string
-): Promise<{ text: string | null; method: 'pdftotext' | 'tesseract' | 'claude-read' }> {
-  const MIN_TEXT_LENGTH = 100; // Minimum chars to consider extraction successful
-
-  // Tier 1: pdftotext (works on native PDFs and pre-OCR'd scans)
-  try {
-    const pdfProc = Bun.spawn(['pdftotext', filePath, '-'], {
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    const pdfText = await new Response(pdfProc.stdout).text();
-    await pdfProc.exited;
-
-    if (pdfText.trim().length > MIN_TEXT_LENGTH) {
-      console.log(`  → pdftotext succeeded (${pdfText.length} chars)`);
-      return { text: pdfText.slice(0, 50000), method: 'pdftotext' };
-    }
-  } catch (err) {
-    console.log(`  → pdftotext failed: ${err}`);
-  }
-
-  // Tier 2: tesseract OCR (for scanned documents)
-  try {
-    // Convert PDF to images and OCR them
-    const tempDir = `/tmp/ocr_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    await Bun.spawn(['mkdir', '-p', tempDir]).exited;
-
-    // Convert PDF pages to PNG images (300 DPI for good OCR quality)
-    const convertProc = Bun.spawn(['pdftoppm', '-png', '-r', '300', filePath, `${tempDir}/page`], {
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    await convertProc.exited;
-
-    // OCR all page images
-    const ocrProc = Bun.spawn(['sh', '-c', `tesseract ${tempDir}/page-*.png stdout 2>/dev/null`], {
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-    const ocrText = await new Response(ocrProc.stdout).text();
-    await ocrProc.exited;
-
-    // Cleanup temp files
-    await Bun.spawn(['rm', '-rf', tempDir]).exited;
-
-    if (ocrText.trim().length > MIN_TEXT_LENGTH / 2) {
-      console.log(`  → tesseract OCR succeeded (${ocrText.length} chars)`);
-      return { text: ocrText.slice(0, 50000), method: 'tesseract' };
-    }
-  } catch (err) {
-    console.log(`  → tesseract OCR failed: ${err}`);
-  }
-
-  // Tier 3: Fall back to Claude Read tool
-  console.log(`  → Falling back to Claude Read tool`);
-  return { text: null, method: 'claude-read' };
-}
-
 async function extractFile(
   caseFolder: string,
   filePath: string, // relative path like "Intake/Intake.pdf"
@@ -654,6 +638,30 @@ async function extractFile(
     console.log(`[${fileIndex + 1}/${totalFiles}] Starting: ${filename} (${fileSizeMB.toFixed(2)}MB)`);
     onProgress?.({ type: "file_start", fileIndex, totalFiles, filename, folder });
 
+    // PRE-EXTRACT: Try to extract text server-side before calling agent
+    let extractedText = '';
+    let usePreExtracted = false;
+    const extractStartTime = Date.now();
+    try {
+      extractedText = await extractTextFromFile(fullPath);
+      const extractElapsed = ((Date.now() - extractStartTime) / 1000).toFixed(1);
+      console.log(`[${fileIndex + 1}/${totalFiles}] Extracted ${extractedText.length} chars in ${extractElapsed}s`);
+
+      // Only use pre-extracted text if we got meaningful content
+      usePreExtracted = extractedText.length > 50 &&
+        !extractedText.startsWith('[Could not') &&
+        !extractedText.startsWith('[Binary file');
+    } catch (extractErr) {
+      console.warn(`[${fileIndex + 1}/${totalFiles}] Text extraction failed, falling back to agent:`, extractErr);
+    }
+
+    // Truncate if too long to avoid token limits
+    const MAX_CHARS = 15000;
+    if (usePreExtracted && extractedText.length > MAX_CHARS) {
+      extractedText = extractedText.slice(0, MAX_CHARS) + '\n\n[... truncated ...]';
+      console.log(`[${fileIndex + 1}/${totalFiles}] Truncated to ${MAX_CHARS} chars`);
+    }
+
     let result: FileExtraction = { filename, folder, type: 'other', key_info: '' };
     let usage: UsageStats = {
       inputTokens: 0,
@@ -665,62 +673,46 @@ async function extractFile(
       model: 'haiku'
     };
 
-    // Determine extraction strategy based on file type
-    const isPdf = fullPath.toLowerCase().endsWith('.pdf');
-    let preExtractedText: string | null = null;
-    let extractionMethod: 'pdftotext' | 'tesseract' | 'claude-read' | 'direct' = 'direct';
+    // Choose prompt and options based on whether we have pre-extracted text
+    const prompt = usePreExtracted
+      ? `Extract information from this document.
 
-    if (isPdf) {
-      const pdfResult = await extractPdfText(fullPath);
-      preExtractedText = pdfResult.text;
-      extractionMethod = pdfResult.method;
-    }
+FILENAME: ${filename}
+FOLDER: ${folder}
 
-    // Build prompt and options based on extraction strategy
-    const prompt = preExtractedText
-      ? `Extract information from this file: ${filename} (extracted via ${extractionMethod})
+DOCUMENT TEXT:
+${extractedText}
 
-Document content:
----
-${preExtractedText}
----
+Return the JSON extraction.`
+      : `Extract information from this file: ${fullPath}
 
-Return the JSON extraction based on the content above.`
-      : isPdf
-        ? `Extract information from this file: ${fullPath}
+Use the Read tool to read the file. Then return the JSON extraction.`;
 
-Use the Read tool to read the file (it may contain scanned images or complex layouts).
-
-Then return the JSON extraction.`
-        : `Extract information from this file: ${fullPath}
-
-Use the Read tool to read the file.
-
-Then return the JSON extraction.`;
-
-    const options = preExtractedText
+    const queryOptions = usePreExtracted
       ? {
-          // Fast path: text already extracted, no tools needed
           cwd: caseFolder,
           systemPrompt: fileExtractionSystemPrompt,
           model: "haiku" as const,
-          allowedTools: [] as string[],
+          allowedTools: [] as string[],  // No tools needed - text already provided
           permissionMode: "acceptEdits" as const,
-          maxTurns: 1,
+          maxTurns: 1,  // Single turn - just return JSON
         }
       : {
-          // Fallback: let agent use Read tool
           cwd: caseFolder,
-          systemPrompt: fileExtractionSystemPrompt,
+          systemPrompt: fileExtractionSystemPromptWithTools,
           model: "haiku" as const,
-          allowedTools: ["Read"],
+          allowedTools: ["Bash", "Read"],
           permissionMode: "acceptEdits" as const,
-          maxTurns: 3,
+          maxTurns: 5,  // Allow multiple turns to read file
         };
+
+    if (!usePreExtracted) {
+      console.log(`[${fileIndex + 1}/${totalFiles}] Using agent fallback with tools`);
+    }
 
     for await (const msg of query({
       prompt,
-      options,
+      options: queryOptions,
     })) {
       // Log all message types for debugging
       const msgAny = msg as any;
@@ -877,8 +869,8 @@ async function synthesizeCaseSummary(
 
     // Step 3: Make single API call with tool use for structured output
     const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-5-20250514",
-      max_tokens: 8192,
+      model: "claude-sonnet-4-5-20250929",
+      max_tokens: 16000,
       system: synthesisSystemPrompt,
       messages: [{
         role: "user",

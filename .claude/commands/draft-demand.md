@@ -26,6 +26,27 @@ Before reading any documents or writing anything, you MUST determine whether thi
 
 **You CANNOT demand more than 3P policy limits. The insurer cannot pay more than their policy allows.**
 
+## Step 1b: Check for Firm Templates
+
+Before using the default templates below, check if the firm has custom templates:
+
+1. **Check for templates.json** (templates are at firm root, one level up from case folder):
+   ```bash
+   cat "../.pi_tool/templates/templates.json" 2>/dev/null
+   ```
+
+2. **Look for a demand letter template:**
+   - Check each template's `name` for "demand", "3P", "third party", etc.
+   - Match to your Step 1 determination (policy limits vs specific amount)
+
+3. **If a matching template exists:**
+   - Read the full template: `../.pi_tool/templates/parsed/{template-id}.md`
+   - Use that template's structure, language, and sections instead of Template A/B below
+   - Fill placeholders with case data
+
+4. **If no matching template or templates.json doesn't exist:**
+   - Continue with Template A or B below (the defaults)
+
 ## Step 2: Verify Prerequisites
 
 Confirm these exist in the index or case folder:

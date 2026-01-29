@@ -10,8 +10,22 @@ import {
   loadFirmInfo,
   ExportOptions,
 } from "../lib/export";
+import type { DocxStyles } from "../lib/extract";
 
 const execAsync = promisify(exec);
+
+// Helper to load template styles from .pi_tool/template-styles.json
+async function loadTemplateStyles(firmRoot: string): Promise<DocxStyles | undefined> {
+  try {
+    const stylesPath = join(firmRoot, ".pi_tool", "template-styles.json");
+    const content = await readFile(stylesPath, "utf-8");
+    const data = JSON.parse(content);
+    return data.styles;
+  } catch {
+    // No template styles found, return undefined
+    return undefined;
+  }
+}
 
 const app = new Hono();
 
@@ -172,6 +186,9 @@ app.post("/export", async (c) => {
     const firmInfoRoot = firmRoot || dirname(caseFolder);
     const firmInfo = await loadFirmInfo(firmInfoRoot);
 
+    // Load template styles if available
+    const templateStyles = await loadTemplateStyles(firmInfoRoot);
+
     // Build export options
     const exportOptions: ExportOptions = {
       documentType: inferredType,
@@ -179,6 +196,7 @@ app.post("/export", async (c) => {
       caseName,
       showLetterhead: showLetterhead ?? inferredType === "demand",
       showPageNumbers: showPageNumbers ?? inferredType !== "memo",
+      templateStyles,
     };
 
     const html = markdownToHtml(content, exportOptions);
@@ -261,12 +279,16 @@ app.get("/download", async (c) => {
     const firmInfoRoot = firmRoot || dirname(caseFolder);
     const firmInfo = await loadFirmInfo(firmInfoRoot);
 
+    // Load template styles if available
+    const templateStyles = await loadTemplateStyles(firmInfoRoot);
+
     const exportOptions: ExportOptions = {
       documentType,
       firmInfo: firmInfo || undefined,
       caseName: caseName || undefined,
       showLetterhead: showLetterhead && documentType === "demand",
       showPageNumbers: showPageNumbers && documentType !== "memo",
+      templateStyles,
     };
 
     switch (format) {
@@ -434,6 +456,9 @@ app.post("/approve", async (c) => {
       }
     }
 
+    // 4. Load template styles if available
+    const templateStyles = await loadTemplateStyles(firmInfoRoot);
+
     // Build export options
     const exportOptions: ExportOptions = {
       documentType,
@@ -441,14 +466,15 @@ app.post("/approve", async (c) => {
       caseName: clientName,
       showLetterhead: showLetterhead ?? documentType === "demand",
       showPageNumbers: showPageNumbers ?? documentType !== "memo",
+      templateStyles,
     };
 
     const html = markdownToHtml(content, exportOptions);
 
-    // 4. Ensure output directory exists
+    // 5. Ensure output directory exists
     await mkdir(dirname(fullOutputPath), { recursive: true });
 
-    // 5. Convert and save
+    // 6. Convert and save
     if (format === "docx") {
       const nameWithoutExt = basename(outputPath).replace(/\.[^/.]+$/, "");
       const docxBuffer = await htmlToDocx(html, nameWithoutExt);
@@ -459,10 +485,10 @@ app.post("/approve", async (c) => {
       await writeFile(fullOutputPath, pdfBuffer);
     }
 
-    // 6. Delete the draft file
+    // 7. Delete the draft file
     await unlink(fullDraftPath);
 
-    // 7. Update manifest to remove this draft entry
+    // 8. Update manifest to remove this draft entry
     const manifestPath = join(caseFolder, ".pi_tool", "drafts", "manifest.json");
     try {
       const manifestContent = await readFile(manifestPath, "utf-8");

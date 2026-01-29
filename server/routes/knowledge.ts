@@ -1,9 +1,13 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import Anthropic from "@anthropic-ai/sdk";
 import { readdir, readFile, writeFile, mkdir, copyFile, unlink, stat } from "fs/promises";
 import { join, dirname, basename, extname } from "path";
-import { extractTextFromPdf, extractTextFromDocx } from "../lib/extract";
+import { extractTextFromPdf, extractTextFromDocx, extractStylesFromDocx, DocxStyles } from "../lib/extract";
+
+// Initialize Anthropic client for template analysis
+const anthropic = new Anthropic();
 
 const app = new Hono();
 
@@ -656,21 +660,42 @@ app.post("/doc-templates/:id/parse", async (c) => {
 
     // Extract text based on file type
     let extractedText: string;
+    let extractedStyles: DocxStyles | null = null;
+
     if (ext === ".pdf") {
       extractedText = await extractTextFromPdf(sourceFilePath);
     } else if (ext === ".docx") {
       extractedText = await extractTextFromDocx(sourceFilePath);
+      // Also extract styles from DOCX (non-fatal if this fails)
+      try {
+        extractedStyles = await extractStylesFromDocx(sourceFilePath);
+      } catch (styleErr) {
+        console.error("Style extraction failed (non-fatal):", styleErr);
+      }
     } else {
       return c.json({ error: "Unsupported file format" }, 400);
     }
 
-    // Format as markdown
-    const markdown = formatAsMarkdown(extractedText, formatTemplateName(templateId));
+    // Use Claude to intelligently analyze and structure the template
+    const templateName = formatTemplateName(templateId);
+    const markdown = await analyzeTemplateWithAI(extractedText, templateName);
 
     // Save parsed file
     const parsedFilename = `${templateId}.md`;
     const parsedFilePath = join(parsedDir, parsedFilename);
     await writeFile(parsedFilePath, markdown);
+
+    // Save extracted styles if available (DOCX only)
+    if (extractedStyles) {
+      const stylesData = {
+        sourceTemplate: sourceFile,
+        templateName,
+        extractedAt: new Date().toISOString(),
+        styles: extractedStyles,
+      };
+      const stylesPath = join(root, ".pi_tool", "template-styles.json");
+      await writeFile(stylesPath, JSON.stringify(stylesData, null, 2));
+    }
 
     // Update index
     let index: TemplatesIndex = { templates: [] };
@@ -704,6 +729,8 @@ app.post("/doc-templates/:id/parse", async (c) => {
       success: true,
       template: entry,
       previewLength: markdown.length,
+      stylesExtracted: extractedStyles !== null,
+      styles: extractedStyles,
     });
   } catch (error) {
     console.error("Parse template error:", error);
@@ -814,6 +841,88 @@ app.delete("/doc-templates/:id", async (c) => {
   }
 });
 
+// Extract styles from a DOCX template
+app.post("/doc-templates/:id/extract-styles", async (c) => {
+  const root = c.req.query("root");
+  const templateId = c.req.param("id");
+
+  if (!root) return c.json({ error: "root query param required" }, 400);
+
+  const templatesDir = join(root, ".pi_tool", "templates");
+  const sourceDir = join(templatesDir, "source");
+
+  try {
+    // Find source file
+    const sourceFiles = await readdir(sourceDir);
+    const sourceFile = sourceFiles.find(
+      (f) => basename(f, extname(f)) === templateId && extname(f).toLowerCase() === ".docx"
+    );
+
+    if (!sourceFile) {
+      return c.json({ error: "DOCX source file not found (style extraction only works with DOCX)" }, 404);
+    }
+
+    const sourceFilePath = join(sourceDir, sourceFile);
+
+    // Extract styles from DOCX
+    const styles = await extractStylesFromDocx(sourceFilePath);
+
+    // Load existing index to get template name
+    const indexPath = join(templatesDir, "templates.json");
+    let templateName = formatTemplateName(templateId);
+    try {
+      const indexContent = await readFile(indexPath, "utf-8");
+      const index: TemplatesIndex = JSON.parse(indexContent);
+      const template = index.templates.find((t) => t.id === templateId);
+      if (template?.name) templateName = template.name;
+    } catch {
+      // No index, use default name
+    }
+
+    // Save to template-styles.json
+    const stylesData = {
+      sourceTemplate: sourceFile,
+      templateName,
+      extractedAt: new Date().toISOString(),
+      styles,
+    };
+
+    const stylesPath = join(root, ".pi_tool", "template-styles.json");
+    await writeFile(stylesPath, JSON.stringify(stylesData, null, 2));
+
+    return c.json({
+      success: true,
+      styles,
+      sourceTemplate: sourceFile,
+    });
+  } catch (error) {
+    console.error("Extract styles error:", error);
+    return c.json({
+      error: error instanceof Error ? error.message : String(error),
+    }, 500);
+  }
+});
+
+// Get current template styles
+app.get("/template-styles", async (c) => {
+  const root = c.req.query("root");
+
+  if (!root) return c.json({ error: "root query param required" }, 400);
+
+  const stylesPath = join(root, ".pi_tool", "template-styles.json");
+
+  try {
+    const content = await readFile(stylesPath, "utf-8");
+    const data = JSON.parse(content);
+    return c.json(data);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return c.json({ error: "No template styles found" }, 404);
+    }
+    return c.json({ error: "Failed to load template styles" }, 500);
+  }
+});
+
 // Helper: Format template ID to readable name
 function formatTemplateName(id: string): string {
   return id
@@ -821,7 +930,7 @@ function formatTemplateName(id: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-// Helper: Format extracted text as markdown
+// Helper: Format extracted text as markdown (fallback if AI fails)
 function formatAsMarkdown(text: string, title: string): string {
   // Clean up the extracted text
   const cleaned = text
@@ -833,6 +942,70 @@ function formatAsMarkdown(text: string, title: string): string {
 
 ${cleaned}
 `;
+}
+
+// Helper: Use Claude to intelligently analyze and structure template content
+async function analyzeTemplateWithAI(rawText: string, templateName: string): Promise<string> {
+  const prompt = `You are analyzing a legal document template to make it useful for an AI agent that will generate similar documents.
+
+TEMPLATE NAME: ${templateName}
+
+RAW EXTRACTED TEXT:
+${rawText}
+
+---
+
+Please analyze this template and produce a well-structured markdown document that includes:
+
+1. **TEMPLATE OVERVIEW** (at the top)
+   - What type of document this is
+   - When to use this template
+   - Key characteristics or tone
+
+2. **STRUCTURE ANALYSIS**
+   - Identify all major sections/headings
+   - Explain the purpose of each section
+   - Note the typical order and flow
+
+3. **PLACEHOLDERS & VARIABLES**
+   - List all placeholders you find (things like [CLIENT NAME], blanks, or variable content)
+   - For each, explain what information should go there
+   - Use consistent placeholder format: \`{{PLACEHOLDER_NAME}}\`
+
+4. **TEMPLATE CONTENT**
+   - Reproduce the template with:
+     - Clear section headings (## for major sections)
+     - Placeholders converted to \`{{PLACEHOLDER_NAME}}\` format
+     - Preserved formatting and structure
+     - Any boilerplate language clearly marked
+
+5. **USAGE NOTES**
+   - Any special considerations
+   - Required information to fill this template
+   - Common variations or optional sections
+
+Format everything as clean markdown. The goal is to help an AI agent understand this template well enough to generate high-quality documents following the same structure and style.`;
+
+  try {
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 8000,
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    // Extract text from response
+    const textBlock = response.content.find((block) => block.type === "text");
+    if (textBlock && textBlock.type === "text") {
+      return textBlock.text;
+    }
+
+    // Fallback to simple formatting
+    return formatAsMarkdown(rawText, templateName);
+  } catch (error) {
+    console.error("AI template analysis failed:", error);
+    // Fallback to simple formatting
+    return formatAsMarkdown(rawText, templateName);
+  }
 }
 
 /**

@@ -1,0 +1,148 @@
+{
+  "case_name": "lozoya-in-progress",
+  "case_phase": "Treatment",
+  "needs_review": [
+    {
+      "field": "insurance_claim_numbers",
+      "conflicting_values": [
+        "8709459860000003",
+        "870945986 0000 003",
+        "I4V2499",
+        "I4V2499-002",
+        "260 AB I4V2499 002"
+      ],
+      "sources": [
+        "LOR 3P GEICO.pdf",
+        "3P Geico follow up.pdf",
+        "1P Travlers MP exhausted.pdf",
+        "MedPay Demand.pdf",
+        "LOR 1P Travelers.pdf"
+      ],
+      "reason": "Multiple claim numbers exist for both third-party (GEICO) and first-party (Travelers) claims. Need clarification on which claim numbers correspond to which insurance carrier and coverage type (liability vs. med pay)."
+    },
+    {
+      "field": "charges:Southern Nevada Chiropractic",
+      "conflicting_values": [
+        "$4,253.00",
+        "$569.00"
+      ],
+      "sources": [
+        "MRB Southern NV Chiro.pdf",
+        "BC Southern NV Chiro.pdf",
+        "MedPay Demand.pdf"
+      ],
+      "reason": "MedPay demand shows only $569 submitted to Travelers while full provider bill is $4,253. This appears to be partial billing for med pay purposes, but needs confirmation whether full amount will be claimed from liability carrier."
+    },
+    {
+      "field": "date_of_loss",
+      "conflicting_values": [
+        "03/21/2024",
+        "03/11/2024"
+      ],
+      "sources": [
+        "Multiple medical/insurance docs",
+        "SPOA.pdf"
+      ],
+      "reason": "SPOA document shows DOL as 03/11/2024 while all other documents (22 sources) consistently show 03/21/2024. This 10-day discrepancy needs investigation - SPOA may contain typo or may reference different date."
+    }
+  ],
+  "errata": [
+    {
+      "field": "date_of_birth",
+      "decision": "05/05/1964",
+      "evidence": "Confirmed by 16 sources including medical records, ID card (ID F&B.pdf shows DOB 05/05/1964), health insurance card, and intake form. Three outlier dates (05/05/1924, 05/05/1994, 05/01/1924) are clear data entry errors - would make client either 100 years old, 30 years old, or have wrong day of birth.",
+      "confidence": "high"
+    },
+    {
+      "field": "date_of_loss",
+      "decision": "03/21/2024",
+      "evidence": "Confirmed by 22 sources including all medical records, insurance correspondence, bills, and LORs from both carriers. SPOA.pdf showing 03/11/2024 is isolated outlier and likely represents execution date error or different reference date.",
+      "confidence": "high"
+    },
+    {
+      "field": "client_address",
+      "decision": "5190 Varsity Ave, Las Vegas, NV 89146",
+      "evidence": "Confirmed by 5 sources including intake form, medical bills, and insurance documents. Driver's license (ID F&B.pdf) shows 6100 Varsity Ave which appears to be typo (6100 vs 5190) as all other official documents use 5190.",
+      "confidence": "high"
+    },
+    {
+      "field": "client_phone",
+      "decision": "702-917-5532",
+      "evidence": "Confirmed by 5 sources including intake, medical records, and billing documents. Formatting variations ((702) 917-5532, 702-9175532) are cosmetic only. Alternate phone 702-298-9015 listed on intake as secondary contact.",
+      "confidence": "high"
+    },
+    {
+      "field": "pharmacy_charges",
+      "decision": "$356.90",
+      "evidence": "Las Vegas Pharmacy invoice (MB LV Pharma.pdf) and balance confirmation (BC- LV Pharmacy.pdf) both show exact amount of $356.90. MedPay demand shows rounded $360.00 which is estimate for demand purposes only.",
+      "confidence": "high"
+    },
+    {
+      "field": "total_medical_charges",
+      "decision": "$24,419.90",
+      "evidence": "Calculated from confirmed provider bills: Southern NV Chiro $4,253.00 + Simon Med Imaging $4,000.00 + AL Medical Group/Red Rock Neuro $7,080.00 + Las Vegas Radiology $750.00 + Las Vegas Pharmacy $356.90 = $24,419.90. Note: BC Rock Neuro shows $7,980 but MRB shows $7,080 from same provider - using invoice amount.",
+      "confidence": "medium"
+    },
+    {
+      "field": "policy_limits_3P_GEICO",
+      "decision": "$50,000 per person / $100,000 per occurrence",
+      "evidence": "GEICO declarations page (3P GEICO Dec Page.pdf) clearly shows bodily injury liability limits of $50,000/$100,000 for policy period 01-16-24 through 07-16-24 covering DOL of 03/21/2024.",
+      "confidence": "high"
+    },
+    {
+      "field": "medpay_coverage_1P_Travelers",
+      "decision": "$1,000.00 (EXHAUSTED)",
+      "evidence": "MedPay Demand.pdf requests payment against $1,000 limit. Travelers EOB (1P Travlers MP exhausted.pdf) dated 05/23/2024 shows policy benefits exhausted with $0 paid on $750 radiology bill.",
+      "confidence": "high"
+    }
+  ],
+  "case_analysis": "**LIABILITY ASSESSMENT:**\n\nThis is a CLEAR liability case. The accident narrative from intake describes a rear-end collision where client Ana Maria Lozoya was stopped/slowing to make a right turn at Valley View and Desert Inn when another vehicle (2009 Honda Civic) struck her 2022 Nissan Frontier from behind. While the intake mentions a third vehicle making a U-turn that caused client to brake, the ultimate collision was a classic rear-end impact. Nevada law presumes the following driver is negligent in rear-end collisions. No police report was filed and no witnesses stopped, but the property damage photos (Scene Photos.pdf) clearly show rear impact damage to client's red Nissan and front-end damage to the white Honda, corroborating the rear-end collision narrative. The adverse driver's insurance is GEICO with policy limits of $50,000/$100,000.\n\n**INJURY TIER ASSESSMENT:**\n\nThis case presents as TIER 2 STRUCTURAL injuries. Client sustained cervical, thoracic, and lumbar spine injuries with initial pain levels of 8/10 across all regions. Key diagnostic findings include:\n\n- CT imaging of cervical and lumbar spine (05/03/2024) - $4,000 in diagnostic costs indicates significant workup\n- X-rays of all three spine regions showing spondylosis and disc space narrowing\n- Diagnosis of radiculopathy (both cervical M54.12 and lumbar M54.16) indicating nerve involvement\n- Spondylolysis lumbar region (M43.06) - structural defect in vertebrae\n\nTreatment included:\n- 2 months of chiropractic care (3/26/24-5/22/24) with manual manipulation, traction, and modalities\n- Pain management with Dr. Al-Hawarey including trigger point injections, occipital nerve blocks\n- Medications (meloxicam, methocarbamol)\n- TENS unit\n\nWhile no surgery was performed, the presence of radiculopathy, nerve blocks, and injections elevates this beyond soft tissue (Tier 1). The structural findings on imaging, documented neurological symptoms, and interventional pain management support Tier 2 classification. Client achieved approximately 90% recovery per final chiropractic note (5/22/24) and was signed off by pain management (6/13/24), suggesting good recovery trajectory.\n\n**SPECIAL DAMAGES:**\n\nTotal medical charges: $24,419.90 (breakdown below)\n- Southern Nevada Chiropractic: $4,253.00\n- Simon Med Imaging (National Imaging Centers): $4,000.00  \n- AL Medical Group (Red Rock Neurology): $7,080.00\n- Las Vegas Radiology: $750.00\n- Las Vegas Pharmacy: $356.90\n\nMed Pay status: Travelers $1,000 limit has been exhausted per EOB dated 05/23/2024. Only $1,679 was submitted in the MedPay demand (partial bills), but the EOB shows $0 paid and \"policy benefits exhausted\" notation.\n\nLost wages: Client reported NO time lost from work per intake. She is employed as a Pantry Person at Caesars Forum.\n\n**GENERAL DAMAGES ANALYSIS:**\n\nClient is a 60-year-old female (DOB 05/05/1964) who sustained multi-level spine injuries requiring approximately 3 months of active treatment (late March through mid-June 2024). Pain levels were severe initially (8/10 across cervical, thoracic, lumbar regions) but resolved well with treatment. The injury trajectory and treatment pattern are favorable:\n\n- Quick treatment initiation (within 5 days of accident)\n- Consistent treatment compliance \n- Multi-modal approach with both conservative and interventional care\n- Good resolution (90% recovery, pain free at final exams)\n- No ongoing treatment needs\n\nNegative factors:\n- No lost wages documented\n- Pre-existing conditions (hypertension, diabetes, high cholesterol, prior left knee surgery, hysterectomy)\n- Relatively short treatment duration (under 3 months active care)\n- No surgical intervention\n\nPositive factors:\n- Clear liability (rear-end collision)\n- Objective findings (radiculopathy, structural imaging findings)\n- Interventional treatment (injections, nerve blocks) demonstrates significant injury\n- Multiple treating providers corroborate injury severity\n- Well-documented medical records\n\n**VALUE ASSESSMENT:**\n\nGiven Tier 2 structural injuries with radiculopathy, interventional pain management, and $24,419.90 in medical specials, applying a conservative 2.5-3.5x multiplier for cases with good recovery:\n\nLow estimate: $24,419.90 × 2.5 = $61,049.75\nHigh estimate: $24,419.90 × 3.5 = $85,469.65\n\nEstimated case value range: **$60,000 - $85,000**\n\nHowever, the GEICO policy limits are $50,000 per person, which caps the available recovery from the primary liability carrier. This creates a potential underinsured motorist (UIM) claim scenario if case value exceeds $50,000.\n\n**POLICY LIMITS DEMAND:**\n\nA policy limits demand to GEICO for $50,000 IS APPROPRIATE given:\n1. Medical specials alone are $24,419.90 (nearly 50% of limits)\n2. Tier 2 structural injuries with radiculopathy and interventional treatment\n3. Clear liability in rear-end collision\n4. Case value likely exceeds $50,000 in fair evaluation\n5. Client achieved good recovery supporting reasonable settlement\n\nThe case should proceed with a policy limits demand to GEICO. Simultaneously, investigate UIM coverage under client's Travelers policy (policy number 6118622333) as the $50,000 GEICO limits may be insufficient to fully compensate client's injuries.\n\n**GAPS AND ISSUES:**\n\n1. **Med Pay Recovery Unclear**: Only $1,679 was submitted to Travelers in the MedPay demand, but the policy shows as exhausted. Need to confirm if any payments were actually received and if the full $1,000 was paid out.\n\n2. **Provider Balance Discrepancy**: Red Rock Neurology balance confirmation shows $7,980.00 but the medical bill/records show $7,080.00 - $900 difference needs reconciliation.\n\n3. **Missing Treatment Records**: While we have billing from AL Medical Group/Red Rock Neurology, the detailed SOAP notes are somewhat disorganized per the file name. Ensure complete narrative records are available for demand.\n\n4. **UIM Coverage Unknown**: No declarations page or coverage confirmation for client's Travelers policy. Need to verify UIM limits available given likely policy limits demand scenario.\n\n5. **Property Damage Status**: Scene photos show damage but no estimate, repair bills, or PD settlement documentation. Verify if PD claim was resolved separately.\n\n6. **Lien Status**: Only Las Vegas Pharmacy has a signed lien on file. Need to confirm lien status with other providers, especially those with large balances (Simon Med $4,000, Red Rock $7,080-7,980, Southern NV Chiro $4,253).\n\n7. **Prior Accident History**: Need to confirm no prior accidents or injuries, especially given pre-existing medical conditions and prior left knee surgery noted in history.\n\n**STRATEGIC RECOMMENDATIONS:**\n\n1. Prepare comprehensive policy limits demand package to GEICO for $50,000\n2. Simultaneously investigate UIM coverage with Travelers \n3. Reconcile Red Rock Neurology billing discrepancy before demand\n4. Obtain signed liens from all providers before settlement\n5. Confirm Med Pay recovery amount and apply as credit/offset in demand\n6. Consider retaining medical expert to support radiculopathy/structural injury findings if GEICO contests value\n7. Verify no Medicare/Medicaid involvement (client completed forms indicating no Medicare enrollment)",
+  "liability_assessment": "clear",
+  "injury_tier": "tier_2_structural",
+  "estimated_value_range": "$60,000 - $85,000",
+  "policy_limits_demand_appropriate": true,
+  "summary": {
+    "client": "Ana Maria Lozoya",
+    "dob": "05/05/1964",
+    "dol": "03/21/2024",
+    "contact": {
+      "phone": "702-917-5532",
+      "alternate_phone": "702-298-9015",
+      "email": "Ana_85Lozoya@outlook.com",
+      "address": "5190 Varsity Ave, Las Vegas, NV 89146"
+    },
+    "providers": [
+      "Southern Nevada Chiropractic",
+      "Simon Med Imaging (National Imaging Centers)",
+      "AL Medical Group (Red Rock Neurology & Pain Management)",
+      "Las Vegas Radiology",
+      "Las Vegas Pharmacy"
+    ],
+    "total_charges": 24419.9,
+    "policy_limits": {
+      "3P_GEICO": {
+        "carrier": "GEICO Advantage Insurance Company",
+        "policy_number": "6048-68-33-68",
+        "bi_per_person": "$50,000",
+        "bi_per_occurrence": "$100,000",
+        "insured": "Niculina Mijaica"
+      },
+      "1P_Travelers": {
+        "carrier": "The Travelers Home and Marine Insurance Company",
+        "policy_number": "6118622333",
+        "med_pay": "$1,000 (EXHAUSTED)",
+        "uim_limits": "Unknown - needs verification"
+      }
+    },
+    "health_insurance": {
+      "carrier": "Culinary Health Fund",
+      "group": "150",
+      "member_id": "005947"
+    },
+    "claim_numbers": {
+      "3P_GEICO": "8709459860000003",
+      "1P_Travelers": "I4V2499-002"
+    },
+    "case_summary": "60-year-old female injured in rear-end collision on 03/21/2024 at Valley View and Desert Inn, Las Vegas. Client was driver of 2022 Nissan Frontier struck from behind by 2009 Honda Civic while slowing/stopped to make right turn. Sustained cervical, thoracic, and lumbar spine injuries with radiculopathy. Treatment included 2 months chiropractic care, diagnostic imaging (CT scans, X-rays), pain management with trigger point injections and nerve blocks, and medications. Achieved approximately 90% recovery by end of treatment (June 2024). Clear liability rear-end collision. Total medical specials $24,419.90. No lost wages. GEICO policy limits $50,000/$100,000. Case value likely exceeds policy limits, warranting policy limits demand and investigation of UIM coverage."
+  }
+}

@@ -15,6 +15,7 @@ import {
 import puppeteer from "puppeteer";
 import { readFile } from "fs/promises";
 import { join } from "path";
+import type { DocxStyles } from "./extract";
 
 // Export options interface for customization
 export interface ExportOptions {
@@ -23,6 +24,7 @@ export interface ExportOptions {
   caseName?: string;
   showPageNumbers?: boolean;
   showLetterhead?: boolean;
+  templateStyles?: DocxStyles;
 }
 
 export interface FirmInfo {
@@ -139,9 +141,36 @@ function generateLetterheadHtml(firmInfo: FirmInfo): string {
 // Convert markdown to HTML with legal document styling
 export function markdownToHtml(markdown: string, options: ExportOptions = {}): string {
   const html = marked.parse(markdown, { async: false }) as string;
+  const styles = options.templateStyles;
 
   const showLetterhead = options.showLetterhead && options.firmInfo;
   const letterheadHtml = showLetterhead ? generateLetterheadHtml(options.firmInfo!) : "";
+
+  // Apply extracted template styles or use defaults
+  const fontFamily = styles?.defaultFont
+    ? `'${styles.defaultFont}', Times, serif`
+    : "'Times New Roman', Times, serif";
+  const fontSize = styles?.defaultFontSize || 12;
+  const lineHeight = styles?.bodyText?.lineHeight || 1.6;
+
+  // Heading styles from template or defaults
+  const h1Size = styles?.heading1?.size || 16;
+  const h1Color = styles?.heading1?.color || "#000";
+  const h2Size = styles?.heading2?.size || 14;
+  const h2Color = styles?.heading2?.color || "#000";
+  const h3Size = styles?.heading3?.size || 12;
+  const h3Color = styles?.heading3?.color || "#000";
+
+  // Page margins from template or defaults
+  const margins = styles?.pageMargins || { top: 1, right: 1, bottom: 1, left: 1 };
+  const paddingCss = `${margins.top}in ${margins.right}in ${margins.bottom}in ${margins.left}in`;
+
+  // Table styling
+  const tableBorderColor = styles?.tableBorderColor || "#666";
+  const tableHeaderBg = styles?.tableHeaderBg || "#f5f5f5";
+
+  // Primary color for borders etc
+  const primaryColor = styles?.primaryColor || "#666";
 
   // Add letterhead-specific CSS only if showing letterhead
   const letterheadCss = showLetterhead
@@ -181,35 +210,38 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
   <meta charset="UTF-8">
   <style>
     body {
-      font-family: 'Times New Roman', Times, serif;
-      font-size: 12pt;
-      line-height: 1.6;
+      font-family: ${fontFamily};
+      font-size: ${fontSize}pt;
+      line-height: ${lineHeight};
       max-width: 8.5in;
       margin: 0 auto;
-      padding: 1in;
+      padding: ${paddingCss};
       color: #000;
     }
     h1 {
-      font-size: 16pt;
+      font-size: ${h1Size}pt;
       font-weight: bold;
       margin-top: 24pt;
       margin-bottom: 12pt;
       text-align: center;
+      color: ${h1Color};
     }
     h2 {
-      font-size: 14pt;
+      font-size: ${h2Size}pt;
       font-weight: bold;
       margin-top: 18pt;
       margin-bottom: 10pt;
       font-variant: small-caps;
-      border-bottom: 1px solid #666;
+      border-bottom: 1px solid ${primaryColor};
       padding-bottom: 4pt;
+      color: ${h2Color};
     }
     h3 {
-      font-size: 12pt;
+      font-size: ${h3Size}pt;
       font-weight: bold;
       margin-top: 14pt;
       margin-bottom: 8pt;
+      color: ${h3Color};
     }
     p {
       margin: 10pt 0;
@@ -226,14 +258,14 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
       margin: 12pt 0;
     }
     th, td {
-      border: 1px solid #666;
+      border: 1px solid ${tableBorderColor};
       padding: 8px 12px;
       text-align: left;
     }
     th {
-      background-color: #f5f5f5;
+      background-color: ${tableHeaderBg};
       font-weight: bold;
-      border-bottom: 2px solid #666;
+      border-bottom: 2px solid ${tableBorderColor};
     }
     /* Zebra striping for table rows */
     tbody tr:nth-child(even) {
@@ -274,7 +306,7 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
     ${letterheadCss}
     @page {
       size: letter;
-      margin: 1in;
+      margin: ${margins.top}in ${margins.right}in ${margins.bottom}in ${margins.left}in;
     }
     @media print {
       body {

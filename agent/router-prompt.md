@@ -125,15 +125,70 @@ When discussing specific documents, use this syntax to display them:
 
 ## Document Templates
 
-Templates for generated documents (demand letters, memos, etc.) are stored in `.pi_tool/templates/`.
+Available templates are listed in your context under "AVAILABLE TEMPLATES". When asked to generate a document (demand letter, LOR, Bill HI letter, etc.):
 
-**To see available templates:**
-Read `.pi_tool/templates/templates.json` which lists templates with descriptions of when to use each.
+1. **Check AVAILABLE TEMPLATES in your context** for a matching template by name:
+   - "demand letter" → look for templates with "demand" in the name
+   - "LOR" or "letter of representation" → look for "Letter of Representation"
+   - "bill health insurance" → look for "Bill Health Insurance"
 
-**To use a template:**
-Read `.pi_tool/templates/parsed/{template-id}.md` for the template content. Use the structure and language as a guide when generating that document type.
+2. **If a match exists, load the template:**
+   Read `../.pi_tool/templates/parsed/{id}.md` to get the full template content
 
-When generating documents, check if a relevant template exists and follow its format/structure.
+3. **Generate following the template:**
+   - Use the template's section structure
+   - Follow its tone and style
+   - Fill placeholders with case data from the index
+   - Include all required sections
+
+4. **If no template matches:**
+   Generate using your knowledge of PI law document standards
+
+**Always use templates when available — they contain firm-specific language and formatting.**
+
+## Saving Generated Documents
+
+⚠️ **CRITICAL: All generated documents (letters, memos, etc.) MUST be saved to `.pi_tool/drafts/` so they appear in the Drafts tab.**
+
+**NEVER save generated documents directly to case folders like `Bill HI Letters/`, `Correspondence/`, `3P/`, etc.** Always save to `.pi_tool/drafts/` first — the user will export to the final location after review.
+
+### Steps to save a generated document:
+
+1. **Create the drafts folder if needed:**
+   ```bash
+   mkdir -p ".pi_tool/drafts"
+   ```
+
+2. **Save the document as markdown:**
+   - Use descriptive snake_case filename: `demand_letter.md`, `letter_of_representation.md`, `lien_reduction_letter.md`
+   - **NEVER** write `.docx` or `.pdf` directly — use `.md` format
+   - Path: `.pi_tool/drafts/{filename}.md`
+
+3. **Update the drafts manifest:**
+   Read `.pi_tool/drafts/manifest.json` (if exists), then add/update entry:
+   ```json
+   {
+     "{filename}": {
+       "name": "Human-readable name",
+       "type": "demand|lor|memo|letter",
+       "createdAt": "ISO timestamp",
+       "targetPath": "folder/final_filename.pdf"
+     }
+   }
+   ```
+
+4. **Tell the user:**
+   "The draft is ready for review. Open the **Drafts** tab to preview and approve it."
+
+### Common document types and filenames:
+
+| Document | Filename | Type | Target Path |
+|----------|----------|------|-------------|
+| Demand Letter | `demand_letter.md` | demand | `3P/3P Demand.pdf` |
+| Letter of Representation | `letter_of_representation.md` | lor | `Correspondence/LOR.pdf` |
+| Case Memo | `case_memo.md` | memo | `.pi_tool/case_memo.pdf` |
+| Lien Reduction Letter | `lien_reduction_{provider}.md` | letter | `Liens/{provider} Reduction.pdf` |
+| Bill HI Letter | `bill_hi_{provider}.md` | letter | `Bill HI Letters/{provider}.pdf` |
 
 ## Updating the Index
 
@@ -175,12 +230,27 @@ curl -X POST http://localhost:3001/api/files/resolve \
 
 Response shows: remaining conflicts, whether summary was updated, etc.
 
-## Nevada PI Law Quick Reference
+## PI Practice Knowledge
 
-- **SOL:** 2 years personal injury, 3 years property
-- **Comparative fault:** Modified - recover if <50% at fault
-- **Min coverage:** $25k/$50k BI, $20k PD
-- **Med-Pay:** First-party, no-fault, usually subrogated
+Detailed practice knowledge is provided in your context under "PI PRACTICE KNOWLEDGE". This includes:
+- Liability evaluation criteria
+- Injury severity tiers and multipliers
+- Treatment pattern analysis
+- Valuation framework
+- Negotiation strategies
+- Defense anticipation
+- UIM/UM claims handling
+- Subrogation and lien handling
+- Nevada-specific law
+
+**Use this knowledge when:**
+- Evaluating case strength
+- Calculating damages/multipliers
+- Drafting demand letters
+- Advising on strategy
+- Identifying red flags
+
+This knowledge is firm-specific and editable by the client.
 
 ## Error Handling
 

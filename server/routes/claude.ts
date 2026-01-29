@@ -121,10 +121,62 @@ app.post("/chat", async (c) => {
       }
     }
 
+    // Load templates from firm root (parent of case folder)
+    let templatesContext = "";
+    try {
+      const firmRoot = dirname(caseFolder);
+      const templatesPath = join(firmRoot, ".pi_tool", "templates", "templates.json");
+      const templatesContent = await readFile(templatesPath, "utf-8");
+      const templatesData = JSON.parse(templatesContent);
+      if (templatesData.templates && templatesData.templates.length > 0) {
+        templatesContext = `
+AVAILABLE TEMPLATES (at firm root ${firmRoot}/.pi_tool/templates/):
+${JSON.stringify(templatesData.templates.map((t: any) => ({ id: t.id, name: t.name, description: t.description })), null, 2)}
+
+To use a template, read: ../.pi_tool/templates/parsed/{id}.md
+
+`;
+      }
+    } catch {
+      // No templates available - that's fine
+    }
+
+    // Load knowledge from firm root
+    let knowledgeContext = "";
+    try {
+      const firmRoot = dirname(caseFolder);
+      const knowledgePath = join(firmRoot, ".pi_tool", "knowledge", "manifest.json");
+      const manifestContent = await readFile(knowledgePath, "utf-8");
+      const manifest = JSON.parse(manifestContent);
+
+      // Load each knowledge section
+      const sections: string[] = [];
+      for (const section of manifest.sections || []) {
+        try {
+          const sectionPath = join(firmRoot, ".pi_tool", "knowledge", section.filename);
+          const content = await readFile(sectionPath, "utf-8");
+          sections.push(content);
+        } catch {
+          // Skip missing sections
+        }
+      }
+
+      if (sections.length > 0) {
+        knowledgeContext = `
+PI PRACTICE KNOWLEDGE (${manifest.practiceArea} - ${manifest.jurisdiction}):
+
+${sections.join("\n\n---\n\n")}
+
+`;
+      }
+    } catch {
+      // No knowledge base - that's fine
+    }
+
     caseContext = `
 CASE INDEX (use this to answer questions):
 ${indexJson}
-
+${templatesContext}${knowledgeContext}
 WORKING DIRECTORY: ${caseFolder}
 
 USER REQUEST: `;

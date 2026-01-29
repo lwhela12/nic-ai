@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { DocumentIndex, ErrataItem, NeedsReviewItem } from '../App'
-import KnowledgeTab from './KnowledgeTab'
 
 interface Draft {
   id: string
@@ -96,7 +95,7 @@ const DocumentTextIcon = () => (
 )
 
 export default function Visualizer({ content, docPath, fileUrl, fileName, caseFolder, apiUrl, documentIndex, firmRoot, onCloseFile, onIndexUpdated, onDraftsUpdated }: Props) {
-  const [activeTab, setActiveTab] = useState<'view' | 'review' | 'drafts' | 'knowledge'>('view')
+  const [activeTab, setActiveTab] = useState<'view' | 'review' | 'drafts'>('view')
   const [verifiedItems, setVerifiedItems] = useState<Set<string>>(new Set())
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const [editingItem, setEditingItem] = useState<string | null>(null)
@@ -358,28 +357,10 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
         >
           Drafts {drafts.length > 0 && <span className="ml-1.5 text-xs px-1.5 py-0.5 rounded-full bg-accent-100 text-accent-700">{drafts.length}</span>}
         </button>
-        <button
-          onClick={() => setActiveTab('knowledge')}
-          className={`flex-1 px-6 py-3 text-sm font-medium transition-colors ${
-            activeTab === 'knowledge'
-              ? 'text-brand-900 border-b-2 border-brand-900 bg-white'
-              : 'text-brand-500 hover:text-brand-700 hover:bg-surface-50'
-          }`}
-        >
-          Knowledge
-        </button>
       </div>
 
       {/* Content */}
-      {activeTab === 'knowledge' ? (
-        firmRoot ? (
-          <KnowledgeTab firmRoot={firmRoot} apiUrl={apiUrl} />
-        ) : (
-          <div className="flex-1 flex items-center justify-center p-8">
-            <p className="text-brand-400">No firm root configured</p>
-          </div>
-        )
-      ) : activeTab === 'drafts' ? (
+      {activeTab === 'drafts' ? (
         <div className="flex-1 overflow-auto">
           {selectedDraft ? (
             // Draft preview view
