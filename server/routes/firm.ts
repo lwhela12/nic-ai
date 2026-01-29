@@ -547,6 +547,71 @@ function normalizeFolders(input: any): Record<string, { files: any[] }> {
   return normalized;
 }
 
+/**
+ * Tiered PDF text extraction:
+ * 1. pdftotext (fastest) - extracts embedded text layer
+ * 2. tesseract OCR (medium) - for scanned documents
+ * 3. null (fallback to Claude Read tool) - for complex layouts, handwriting
+ */
+async function extractPdfText(
+  filePath: string
+): Promise<{ text: string | null; method: 'pdftotext' | 'tesseract' | 'claude-read' }> {
+  const MIN_TEXT_LENGTH = 100; // Minimum chars to consider extraction successful
+
+  // Tier 1: pdftotext (works on native PDFs and pre-OCR'd scans)
+  try {
+    const pdfProc = Bun.spawn(['pdftotext', filePath, '-'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const pdfText = await new Response(pdfProc.stdout).text();
+    await pdfProc.exited;
+
+    if (pdfText.trim().length > MIN_TEXT_LENGTH) {
+      console.log(`  → pdftotext succeeded (${pdfText.length} chars)`);
+      return { text: pdfText.slice(0, 50000), method: 'pdftotext' };
+    }
+  } catch (err) {
+    console.log(`  → pdftotext failed: ${err}`);
+  }
+
+  // Tier 2: tesseract OCR (for scanned documents)
+  try {
+    // Convert PDF to images and OCR them
+    const tempDir = `/tmp/ocr_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    await Bun.spawn(['mkdir', '-p', tempDir]).exited;
+
+    // Convert PDF pages to PNG images (300 DPI for good OCR quality)
+    const convertProc = Bun.spawn(['pdftoppm', '-png', '-r', '300', filePath, `${tempDir}/page`], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    await convertProc.exited;
+
+    // OCR all page images
+    const ocrProc = Bun.spawn(['sh', '-c', `tesseract ${tempDir}/page-*.png stdout 2>/dev/null`], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const ocrText = await new Response(ocrProc.stdout).text();
+    await ocrProc.exited;
+
+    // Cleanup temp files
+    await Bun.spawn(['rm', '-rf', tempDir]).exited;
+
+    if (ocrText.trim().length > MIN_TEXT_LENGTH / 2) {
+      console.log(`  → tesseract OCR succeeded (${ocrText.length} chars)`);
+      return { text: ocrText.slice(0, 50000), method: 'tesseract' };
+    }
+  } catch (err) {
+    console.log(`  → tesseract OCR failed: ${err}`);
+  }
+
+  // Tier 3: Fall back to Claude Read tool
+  console.log(`  → Falling back to Claude Read tool`);
+  return { text: null, method: 'claude-read' };
+}
+
 async function extractFile(
   caseFolder: string,
   filePath: string, // relative path like "Intake/Intake.pdf"
@@ -600,20 +665,62 @@ async function extractFile(
       model: 'haiku'
     };
 
+    // Determine extraction strategy based on file type
+    const isPdf = fullPath.toLowerCase().endsWith('.pdf');
+    let preExtractedText: string | null = null;
+    let extractionMethod: 'pdftotext' | 'tesseract' | 'claude-read' | 'direct' = 'direct';
+
+    if (isPdf) {
+      const pdfResult = await extractPdfText(fullPath);
+      preExtractedText = pdfResult.text;
+      extractionMethod = pdfResult.method;
+    }
+
+    // Build prompt and options based on extraction strategy
+    const prompt = preExtractedText
+      ? `Extract information from this file: ${filename} (extracted via ${extractionMethod})
+
+Document content:
+---
+${preExtractedText}
+---
+
+Return the JSON extraction based on the content above.`
+      : isPdf
+        ? `Extract information from this file: ${fullPath}
+
+Use the Read tool to read the file (it may contain scanned images or complex layouts).
+
+Then return the JSON extraction.`
+        : `Extract information from this file: ${fullPath}
+
+Use the Read tool to read the file.
+
+Then return the JSON extraction.`;
+
+    const options = preExtractedText
+      ? {
+          // Fast path: text already extracted, no tools needed
+          cwd: caseFolder,
+          systemPrompt: fileExtractionSystemPrompt,
+          model: "haiku" as const,
+          allowedTools: [] as string[],
+          permissionMode: "acceptEdits" as const,
+          maxTurns: 1,
+        }
+      : {
+          // Fallback: let agent use Read tool
+          cwd: caseFolder,
+          systemPrompt: fileExtractionSystemPrompt,
+          model: "haiku" as const,
+          allowedTools: ["Read"],
+          permissionMode: "acceptEdits" as const,
+          maxTurns: 3,
+        };
+
     for await (const msg of query({
-      prompt: `Extract information from this file: ${fullPath}
-
-Use the Read tool to read the file. If it's a PDF and Read doesn't return useful content, fall back to: pdftotext "${fullPath}" - 2>/dev/null | head -300
-
-Then return the JSON extraction.`,
-      options: {
-        cwd: caseFolder,
-        systemPrompt: fileExtractionSystemPrompt,
-        model: "haiku",
-        allowedTools: ["Bash", "Read"],
-        permissionMode: "acceptEdits",
-        maxTurns: 5,
-      },
+      prompt,
+      options,
     })) {
       // Log all message types for debugging
       const msgAny = msg as any;
@@ -671,7 +778,7 @@ Then return the JSON extraction.`,
 
     result.usage = usage;
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`[${fileIndex + 1}/${totalFiles}] ✓ Done: ${filename} (${elapsed}s) - ${result.type}`);
+    console.log(`[${fileIndex + 1}/${totalFiles}] ✓ Done: ${filename} (${elapsed}s) - ${result.type} [${extractionMethod}]`);
     onProgress?.({
       type: "file_done",
       fileIndex,
@@ -679,6 +786,7 @@ Then return the JSON extraction.`,
       filename,
       folder,
       docType: result.type,
+      extractionMethod,
       elapsed: parseFloat(elapsed)
     });
     return result;
