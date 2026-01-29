@@ -67,10 +67,15 @@ export default function TemplateManager({ firmRoot, apiUrl }: Props) {
   const [selectedTemplate, setSelectedTemplate] = useState<Template | null>(null)
   const [previewContent, setPreviewContent] = useState<string>('')
   const [parsing, setParsing] = useState<string | null>(null)
+  const [batchParsing, setBatchParsing] = useState(false)
+  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null)
   const [editing, setEditing] = useState(false)
   const [editName, setEditName] = useState('')
   const [editDescription, setEditDescription] = useState('')
   const [saving, setSaving] = useState(false)
+  const [showUploadModal, setShowUploadModal] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [dragOver, setDragOver] = useState(false)
 
   const loadTemplates = useCallback(async () => {
     try {
@@ -138,6 +143,90 @@ export default function TemplateManager({ firmRoot, apiUrl }: Props) {
     }
   }
 
+  const handleParseAll = async (reparseAll: boolean = false) => {
+    const toParse = reparseAll
+      ? templates
+      : templates.filter(t => t.status !== 'parsed')
+
+    if (toParse.length === 0) {
+      setError(reparseAll ? 'No templates to reparse' : 'All templates are already parsed')
+      return
+    }
+
+    setBatchParsing(true)
+    setBatchProgress({ current: 0, total: toParse.length })
+    setError(null)
+
+    try {
+      const res = await fetch(`${apiUrl}/api/knowledge/doc-templates/parse-batch?root=${encodeURIComponent(firmRoot)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          templateIds: reparseAll ? undefined : toParse.map(t => t.id),
+          reparse: reparseAll,
+        }),
+      })
+
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.error || 'Batch parse failed')
+      }
+
+      // Handle SSE stream
+      const reader = res.body?.getReader()
+      if (!reader) throw new Error('No response body')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const event = JSON.parse(line.slice(6))
+
+              if (event.type === 'start') {
+                setBatchProgress({ current: 0, total: event.total })
+              } else if (event.type === 'template_start') {
+                setParsing(event.id)
+              } else if (event.type === 'template_done') {
+                setBatchProgress({ current: event.index + 1, total: event.total })
+              } else if (event.type === 'template_error') {
+                setBatchProgress({ current: event.index + 1, total: event.total })
+                console.error(`Parse error for ${event.id}:`, event.error)
+              } else if (event.type === 'done') {
+                if (!event.success) {
+                  const failed = event.results?.filter((r: { success: boolean }) => !r.success) || []
+                  if (failed.length > 0) {
+                    setError(`${failed.length} template(s) failed to parse`)
+                  }
+                }
+              } else if (event.type === 'error') {
+                throw new Error(event.error)
+              }
+            } catch (parseErr) {
+              // Ignore JSON parse errors for incomplete chunks
+            }
+          }
+        }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Batch parse failed')
+    } finally {
+      setParsing(null)
+      setBatchParsing(false)
+      setBatchProgress(null)
+      await loadTemplates()
+    }
+  }
+
   const handleSaveMetadata = async () => {
     if (!selectedTemplate) return
     setSaving(true)
@@ -176,6 +265,80 @@ export default function TemplateManager({ firmRoot, apiUrl }: Props) {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Delete failed')
     }
+  }
+
+  const handleUpload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return
+
+    const file = files[0]
+    const ext = file.name.split('.').pop()?.toLowerCase()
+
+    if (!['pdf', 'docx'].includes(ext || '')) {
+      setError('Only PDF and DOCX files are supported')
+      return
+    }
+
+    setUploading(true)
+    setError(null)
+
+    try {
+      // Upload the file (instant - just copies to folder)
+      const formData = new FormData()
+      formData.append('file', file)
+
+      const uploadRes = await fetch(`${apiUrl}/api/knowledge/doc-templates/upload?root=${encodeURIComponent(firmRoot)}`, {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!uploadRes.ok) {
+        const err = await uploadRes.json()
+        throw new Error(err.error || 'Upload failed')
+      }
+
+      const { id } = await uploadRes.json()
+
+      // Close modal and refresh list immediately
+      setShowUploadModal(false)
+      setUploading(false)
+      await loadTemplates()
+
+      // Auto-parse in background
+      setParsing(id)
+      fetch(`${apiUrl}/api/knowledge/doc-templates/${id}/parse?root=${encodeURIComponent(firmRoot)}`, {
+        method: 'POST',
+      }).then(async (parseRes) => {
+        if (!parseRes.ok) {
+          const err = await parseRes.json()
+          setError(`Parse failed: ${err.error || 'Unknown error'}`)
+        }
+        await loadTemplates()
+      }).catch((err) => {
+        setError(err instanceof Error ? err.message : 'Parse failed')
+      }).finally(() => {
+        setParsing(null)
+      })
+
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Upload failed')
+      setUploading(false)
+    }
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setDragOver(false)
+    handleUpload(e.dataTransfer.files)
+  }
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    setDragOver(true)
+  }
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    setDragOver(false)
   }
 
   const formatDate = (dateStr: string) => {
@@ -396,17 +559,56 @@ export default function TemplateManager({ firmRoot, apiUrl }: Props) {
   }
 
   // List view
+  const unparsedCount = templates.filter(t => t.status !== 'parsed').length
+
   return (
     <div className="p-6">
       <div className="flex items-center gap-3 mb-6">
         <div className="w-10 h-10 rounded-xl bg-accent-100 flex items-center justify-center text-accent-600">
           <DocumentIcon />
         </div>
-        <div>
+        <div className="flex-1">
           <h3 className="font-semibold text-brand-900">Document Templates</h3>
           <p className="text-sm text-brand-500">
-            Drop PDF/DOCX templates in <code className="text-xs bg-surface-100 px-1 py-0.5 rounded">.pi_tool/templates/source/</code>
+            PDF/DOCX templates the agent uses when generating documents
           </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowUploadModal(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white
+                       text-sm font-medium rounded-lg hover:bg-emerald-700 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+            </svg>
+            Add Template
+          </button>
+          {templates.length > 0 && unparsedCount > 0 && (
+            <button
+              onClick={() => handleParseAll(false)}
+              disabled={batchParsing}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent-600 text-white
+                         text-sm font-medium rounded-lg hover:bg-accent-700 transition-colors
+                         disabled:opacity-50"
+            >
+              <ArrowPathIcon />
+              {batchParsing ? `Parsing ${batchProgress?.current}/${batchProgress?.total}...` : `Parse All (${unparsedCount})`}
+            </button>
+          )}
+          {templates.length > 0 && (
+            <button
+              onClick={() => handleParseAll(true)}
+              disabled={batchParsing}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-surface-100 text-brand-700
+                         text-sm font-medium rounded-lg hover:bg-surface-200 transition-colors
+                         disabled:opacity-50"
+              title="Re-parse all templates"
+            >
+              <ArrowPathIcon />
+              {batchParsing && unparsedCount === 0 ? `Reparsing ${batchProgress?.current}/${batchProgress?.total}...` : 'Reparse All'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -488,6 +690,71 @@ export default function TemplateManager({ firmRoot, apiUrl }: Props) {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Upload Modal */}
+      {showUploadModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md mx-4">
+            <div className="px-6 py-4 border-b border-surface-200 flex items-center justify-between">
+              <h3 className="font-semibold text-brand-900">Add Template</h3>
+              <button
+                onClick={() => setShowUploadModal(false)}
+                className="p-1.5 text-brand-400 hover:text-brand-600 hover:bg-surface-100 rounded-lg"
+              >
+                <XMarkIcon />
+              </button>
+            </div>
+
+            <div className="p-6">
+              <div
+                onDrop={handleDrop}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                className={`relative border-2 border-dashed rounded-xl p-8 text-center transition-colors
+                  ${dragOver
+                    ? 'border-accent-500 bg-accent-50'
+                    : 'border-surface-300 hover:border-surface-400'
+                  }
+                  ${uploading ? 'opacity-50 pointer-events-none' : ''}
+                `}
+              >
+                <div className="w-12 h-12 rounded-full bg-surface-100 flex items-center justify-center mx-auto mb-4 text-brand-400">
+                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                  </svg>
+                </div>
+
+                {uploading ? (
+                  <div>
+                    <p className="text-brand-700 font-medium">Uploading & parsing...</p>
+                    <p className="text-sm text-brand-400 mt-1">This may take a moment</p>
+                  </div>
+                ) : (
+                  <>
+                    <p className="text-brand-700 font-medium">
+                      Drop your template file here
+                    </p>
+                    <p className="text-sm text-brand-400 mt-1">
+                      or click to browse
+                    </p>
+                    <p className="text-xs text-brand-400 mt-3">
+                      Supports PDF and DOCX files
+                    </p>
+                  </>
+                )}
+
+                <input
+                  type="file"
+                  accept=".pdf,.docx"
+                  onChange={(e) => handleUpload(e.target.files)}
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  disabled={uploading}
+                />
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

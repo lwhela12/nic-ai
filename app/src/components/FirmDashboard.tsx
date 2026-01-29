@@ -4,6 +4,27 @@ import KnowledgeEditor from './KnowledgeEditor'
 import KnowledgeChat from './KnowledgeChat'
 import TemplateManager from './TemplateManager'
 
+// URL param helpers for persisting view state across refreshes
+const getUrlParam = (key: string): string | null => {
+  const params = new URLSearchParams(window.location.search)
+  return params.get(key)
+}
+
+const setUrlParam = (key: string, value: string | null, usePush = true) => {
+  const params = new URLSearchParams(window.location.search)
+  if (value && value !== 'dashboard') {
+    params.set(key, value)
+  } else {
+    params.delete(key)
+  }
+  const newUrl = params.toString() ? `${window.location.pathname}?${params.toString()}` : window.location.pathname
+  if (usePush) {
+    window.history.pushState({}, '', newUrl)
+  } else {
+    window.history.replaceState({}, '', newUrl)
+  }
+}
+
 interface FirmTodo {
   id: string
   text: string
@@ -155,13 +176,58 @@ export default function FirmDashboard({
   const [sortField, setSortField] = useState<SortField>('sol')
   const [filterPhase, setFilterPhase] = useState<string>('all')
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null)
-  const [view, setView] = useState<'dashboard' | 'firmChat' | 'knowledge'>('dashboard')
-  const [knowledgeSubTab, setKnowledgeSubTab] = useState<'editor' | 'chat' | 'templates'>('editor')
+  const [view, setViewState] = useState<'dashboard' | 'firmChat' | 'knowledge'>(() => {
+    const urlView = getUrlParam('view')
+    if (urlView === 'firmChat' || urlView === 'knowledge') return urlView
+    return 'dashboard'
+  })
+  const [knowledgeSubTab, setKnowledgeSubTabState] = useState<'editor' | 'chat' | 'templates'>(() => {
+    const urlTab = getUrlParam('knowledgeTab')
+    if (urlTab === 'editor' || urlTab === 'chat' || urlTab === 'templates') return urlTab
+    return 'editor'
+  })
+
+  // Wrapper to sync view with URL
+  const setView = (newView: 'dashboard' | 'firmChat' | 'knowledge') => {
+    setViewState(newView)
+    setUrlParam('view', newView)
+  }
+
+  // Wrapper to sync knowledgeSubTab with URL
+  const setKnowledgeSubTab = (newTab: 'editor' | 'chat' | 'templates') => {
+    setKnowledgeSubTabState(newTab)
+    setUrlParam('knowledgeTab', newTab === 'editor' ? null : newTab)
+  }
+
+  // Handle browser back/forward for view state
+  useEffect(() => {
+    const handlePopState = () => {
+      const urlView = getUrlParam('view')
+      if (urlView === 'firmChat' || urlView === 'knowledge') {
+        setViewState(urlView)
+      } else {
+        setViewState('dashboard')
+      }
+
+      const urlTab = getUrlParam('knowledgeTab')
+      if (urlTab === 'editor' || urlTab === 'chat' || urlTab === 'templates') {
+        setKnowledgeSubTabState(urlTab)
+      } else {
+        setKnowledgeSubTabState('editor')
+      }
+    }
+
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
   const [selectedCases, setSelectedCases] = useState<Set<string>>(new Set())
   const [knowledgeExists, setKnowledgeExists] = useState<boolean | null>(null)
   const [showFirmConfig, setShowFirmConfig] = useState(false)
   const [firmConfig, setFirmConfig] = useState<Record<string, string>>({})
   const [firmConfigSaving, setFirmConfigSaving] = useState(false)
+  const [logoPreview, setLogoPreview] = useState<string | null>(null)
+  const [uploadingLogo, setUploadingLogo] = useState(false)
+  const [logoDragOver, setLogoDragOver] = useState(false)
 
   const toggleCase = (path: string) => {
     setSelectedCases(prev => {
@@ -225,6 +291,89 @@ export default function FirmDashboard({
       if (res.ok) setFirmConfig(await res.json())
     } catch {}
   }, [apiUrl, firmRoot])
+
+  const loadFirmLogo = useCallback(async () => {
+    try {
+      const res = await fetch(`${apiUrl}/api/knowledge/firm-logo?root=${encodeURIComponent(firmRoot)}`)
+      if (res.ok) {
+        const blob = await res.blob()
+        const url = URL.createObjectURL(blob)
+        setLogoPreview(url)
+      } else {
+        setLogoPreview(null)
+      }
+    } catch {
+      setLogoPreview(null)
+    }
+  }, [apiUrl, firmRoot])
+
+  const handleLogoUpload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return
+
+    const file = files[0]
+    const ext = file.name.split('.').pop()?.toLowerCase()
+
+    if (!['png', 'jpg', 'jpeg'].includes(ext || '')) {
+      alert('Only PNG and JPG images are supported')
+      return
+    }
+
+    setUploadingLogo(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+
+      const res = await fetch(`${apiUrl}/api/knowledge/firm-logo/upload?root=${encodeURIComponent(firmRoot)}`, {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.error || 'Upload failed')
+      }
+
+      // Reload the logo preview
+      await loadFirmLogo()
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Upload failed')
+    } finally {
+      setUploadingLogo(false)
+    }
+  }
+
+  const handleLogoDelete = async () => {
+    try {
+      const res = await fetch(`${apiUrl}/api/knowledge/firm-logo?root=${encodeURIComponent(firmRoot)}`, {
+        method: 'DELETE',
+      })
+
+      if (res.ok) {
+        if (logoPreview) {
+          URL.revokeObjectURL(logoPreview)
+        }
+        setLogoPreview(null)
+      }
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  const handleLogoDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setLogoDragOver(false)
+    handleLogoUpload(e.dataTransfer.files)
+  }
+
+  const handleLogoDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    setLogoDragOver(true)
+  }
+
+  const handleLogoDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    setLogoDragOver(false)
+  }
 
   const saveFirmConfig = async () => {
     setFirmConfigSaving(true)
@@ -773,7 +922,7 @@ export default function FirmDashboard({
               </button>
             </div>
             <button
-              onClick={() => { loadFirmConfig(); setShowFirmConfig(true) }}
+              onClick={() => { loadFirmConfig(); loadFirmLogo(); setShowFirmConfig(true) }}
               className="ml-auto flex items-center gap-1.5 text-sm text-brand-500 hover:text-brand-700 transition-colors"
             >
               <CogIcon />
@@ -959,6 +1108,49 @@ export default function FirmDashboard({
                   />
                 </div>
               ))}
+
+              {/* Logo upload section */}
+              <div className="pt-3 border-t border-surface-200 mt-3">
+                <label className="text-xs font-medium text-brand-600 mb-2 block">Firm Logo</label>
+
+                {logoPreview ? (
+                  <div className="flex items-center gap-4">
+                    <img src={logoPreview} alt="Firm logo" className="h-16 object-contain rounded border border-surface-200" />
+                    <button
+                      onClick={handleLogoDelete}
+                      className="text-sm text-red-500 hover:text-red-700 transition-colors"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ) : (
+                  <div
+                    onDrop={handleLogoDrop}
+                    onDragOver={handleLogoDragOver}
+                    onDragLeave={handleLogoDragLeave}
+                    className={`relative border-2 border-dashed rounded-lg p-4 text-center cursor-pointer transition-colors
+                      ${logoDragOver ? 'border-accent-500 bg-accent-50' : 'border-surface-300 hover:border-accent-500'}
+                      ${uploadingLogo ? 'opacity-50 pointer-events-none' : ''}
+                    `}
+                  >
+                    <input
+                      type="file"
+                      accept=".png,.jpg,.jpeg"
+                      onChange={(e) => handleLogoUpload(e.target.files)}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                      disabled={uploadingLogo}
+                    />
+                    {uploadingLogo ? (
+                      <p className="text-sm text-brand-500">Uploading...</p>
+                    ) : (
+                      <>
+                        <p className="text-sm text-brand-500">Drop image or click to upload</p>
+                        <p className="text-xs text-brand-400 mt-1">PNG or JPG</p>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
             <div className="flex justify-end gap-2 mt-5">
               <button

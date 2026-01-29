@@ -399,6 +399,109 @@ app.post("/apply-edit", async (c) => {
 });
 
 // ============================================================================
+// FIRM LOGO
+// ============================================================================
+
+// Upload firm logo
+app.post("/firm-logo/upload", async (c) => {
+  const root = c.req.query("root");
+  if (!root) return c.json({ error: "root query param required" }, 400);
+
+  try {
+    const formData = await c.req.formData();
+    const file = formData.get("file") as File | null;
+
+    if (!file) {
+      return c.json({ error: "No file provided" }, 400);
+    }
+
+    // Validate file type
+    const ext = extname(file.name).toLowerCase();
+    if (![".png", ".jpg", ".jpeg"].includes(ext)) {
+      return c.json({ error: "Only PNG and JPG images are supported" }, 400);
+    }
+
+    const piToolDir = join(root, ".pi_tool");
+    await mkdir(piToolDir, { recursive: true });
+
+    // Delete any existing logo first
+    for (const oldExt of [".png", ".jpg", ".jpeg"]) {
+      try {
+        await unlink(join(piToolDir, `firm-logo${oldExt}`));
+      } catch {
+        // File may not exist
+      }
+    }
+
+    // Save new logo
+    const logoPath = join(piToolDir, `firm-logo${ext}`);
+    const buffer = Buffer.from(await file.arrayBuffer());
+    await writeFile(logoPath, buffer);
+
+    return c.json({ success: true, filename: `firm-logo${ext}` });
+  } catch (error) {
+    console.error("Logo upload error:", error);
+    return c.json({
+      error: error instanceof Error ? error.message : String(error),
+    }, 500);
+  }
+});
+
+// Get firm logo
+app.get("/firm-logo", async (c) => {
+  const root = c.req.query("root");
+  if (!root) return c.json({ error: "root query param required" }, 400);
+
+  const piToolDir = join(root, ".pi_tool");
+
+  // Check for logo with any supported extension
+  for (const ext of [".png", ".jpg", ".jpeg"]) {
+    const logoPath = join(piToolDir, `firm-logo${ext}`);
+    try {
+      const logoStat = await stat(logoPath);
+      if (logoStat.isFile()) {
+        const logoData = await readFile(logoPath);
+        const mimeType = ext === ".png" ? "image/png" : "image/jpeg";
+        return new Response(logoData, {
+          headers: {
+            "Content-Type": mimeType,
+            "Cache-Control": "max-age=3600",
+          },
+        });
+      }
+    } catch {
+      // Try next extension
+    }
+  }
+
+  return c.json({ error: "No logo found" }, 404);
+});
+
+// Delete firm logo
+app.delete("/firm-logo", async (c) => {
+  const root = c.req.query("root");
+  if (!root) return c.json({ error: "root query param required" }, 400);
+
+  const piToolDir = join(root, ".pi_tool");
+  let deleted = false;
+
+  // Delete logo with any supported extension
+  for (const ext of [".png", ".jpg", ".jpeg"]) {
+    try {
+      await unlink(join(piToolDir, `firm-logo${ext}`));
+      deleted = true;
+    } catch {
+      // File may not exist
+    }
+  }
+
+  if (deleted) {
+    return c.json({ success: true });
+  }
+  return c.json({ error: "No logo found" }, 404);
+});
+
+// ============================================================================
 // FIRM CONFIG
 // ============================================================================
 
@@ -546,6 +649,7 @@ interface TemplateEntry {
   parsedFile: string | null;
   name: string;
   description: string;
+  descriptionSource?: "ai" | "user";  // Track if description was AI-generated or user-edited
   parsedAt: string | null;
   sourceModified: string;
 }
@@ -632,6 +736,55 @@ app.get("/doc-templates", async (c) => {
   }
 });
 
+// Upload a new template file
+app.post("/doc-templates/upload", async (c) => {
+  const root = c.req.query("root");
+  if (!root) return c.json({ error: "root query param required" }, 400);
+
+  const templatesDir = join(root, ".pi_tool", "templates");
+  const sourceDir = join(templatesDir, "source");
+
+  try {
+    // Ensure directory exists
+    await mkdir(sourceDir, { recursive: true });
+
+    // Get the uploaded file from form data
+    const formData = await c.req.formData();
+    const file = formData.get("file") as File | null;
+
+    if (!file) {
+      return c.json({ error: "No file provided" }, 400);
+    }
+
+    // Validate file type
+    const ext = extname(file.name).toLowerCase();
+    if (![".pdf", ".docx"].includes(ext)) {
+      return c.json({ error: "Only PDF and DOCX files are supported" }, 400);
+    }
+
+    // Save file to source directory
+    const filename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_"); // Sanitize filename
+    const filePath = join(sourceDir, filename);
+
+    const arrayBuffer = await file.arrayBuffer();
+    await writeFile(filePath, Buffer.from(arrayBuffer));
+
+    const id = basename(filename, ext);
+
+    return c.json({
+      success: true,
+      id,
+      filename,
+      message: "Template uploaded successfully",
+    });
+  } catch (error) {
+    console.error("Upload template error:", error);
+    return c.json({
+      error: error instanceof Error ? error.message : String(error),
+    }, 500);
+  }
+});
+
 // Parse a template source file into markdown
 app.post("/doc-templates/:id/parse", async (c) => {
   const root = c.req.query("root");
@@ -678,12 +831,12 @@ app.post("/doc-templates/:id/parse", async (c) => {
 
     // Use Claude to intelligently analyze and structure the template
     const templateName = formatTemplateName(templateId);
-    const markdown = await analyzeTemplateWithAI(extractedText, templateName);
+    const analysis = await analyzeTemplateWithAI(extractedText, templateName);
 
     // Save parsed file
     const parsedFilename = `${templateId}.md`;
     const parsedFilePath = join(parsedDir, parsedFilename);
-    await writeFile(parsedFilePath, markdown);
+    await writeFile(parsedFilePath, analysis.markdown);
 
     // Save extracted styles if available (DOCX only)
     if (extractedStyles) {
@@ -707,12 +860,19 @@ app.post("/doc-templates/:id/parse", async (c) => {
     }
 
     const existingIdx = index.templates.findIndex((t) => t.id === templateId);
+    const existing = existingIdx >= 0 ? index.templates[existingIdx] : null;
+
+    // Only preserve description if user manually set it; regenerate AI descriptions
+    const isUserDescription = existing?.descriptionSource === "user";
+    const description = isUserDescription ? existing.description : analysis.description;
+
     const entry: TemplateEntry = {
       id: templateId,
       sourceFile: `source/${sourceFile}`,
       parsedFile: `parsed/${parsedFilename}`,
-      name: existingIdx >= 0 ? index.templates[existingIdx].name : formatTemplateName(templateId),
-      description: existingIdx >= 0 ? index.templates[existingIdx].description : "",
+      name: existing?.name || formatTemplateName(templateId),
+      description,
+      descriptionSource: isUserDescription ? "user" : "ai",
       parsedAt: new Date().toISOString(),
       sourceModified: sourceStat.mtime.toISOString(),
     };
@@ -728,9 +888,10 @@ app.post("/doc-templates/:id/parse", async (c) => {
     return c.json({
       success: true,
       template: entry,
-      previewLength: markdown.length,
+      previewLength: analysis.markdown.length,
       stylesExtracted: extractedStyles !== null,
       styles: extractedStyles,
+      generatedDescription: analysis.description,
     });
   } catch (error) {
     console.error("Parse template error:", error);
@@ -738,6 +899,277 @@ app.post("/doc-templates/:id/parse", async (c) => {
       error: error instanceof Error ? error.message : String(error),
     }, 500);
   }
+});
+
+// Batch parse templates with parallel Haiku calls
+const TEMPLATE_CONCURRENCY = 10;
+
+interface ParseResult {
+  id: string;
+  success: boolean;
+  error?: string;
+  previewLength?: number;
+}
+
+async function processTemplatesWithLimit(
+  templates: Array<{ id: string; sourceFile: string }>,
+  root: string,
+  limit: number,
+  onProgress: (event: { type: string; [key: string]: any }) => Promise<void>
+): Promise<ParseResult[]> {
+  const results: ParseResult[] = new Array(templates.length);
+  let currentIndex = 0;
+
+  const templatesDir = join(root, ".pi_tool", "templates");
+  const sourceDir = join(templatesDir, "source");
+  const parsedDir = join(templatesDir, "parsed");
+  const indexPath = join(templatesDir, "templates.json");
+
+  async function worker() {
+    while (currentIndex < templates.length) {
+      const index = currentIndex++;
+      const template = templates[index];
+
+      try {
+        await onProgress({
+          type: "template_start",
+          index,
+          total: templates.length,
+          id: template.id,
+        });
+
+        // Find and read source file
+        const sourceFiles = await readdir(sourceDir);
+        const sourceFile = sourceFiles.find(
+          (f) => basename(f, extname(f)) === template.id
+        );
+
+        if (!sourceFile) {
+          results[index] = { id: template.id, success: false, error: "Source file not found" };
+          continue;
+        }
+
+        const sourceFilePath = join(sourceDir, sourceFile);
+        const sourceStat = await stat(sourceFilePath);
+        const ext = extname(sourceFile).toLowerCase();
+
+        // Extract text
+        let extractedText: string;
+        let extractedStyles: DocxStyles | null = null;
+
+        if (ext === ".pdf") {
+          extractedText = await extractTextFromPdf(sourceFilePath);
+        } else if (ext === ".docx") {
+          extractedText = await extractTextFromDocx(sourceFilePath);
+          try {
+            extractedStyles = await extractStylesFromDocx(sourceFilePath);
+          } catch {
+            // Non-fatal
+          }
+        } else {
+          results[index] = { id: template.id, success: false, error: "Unsupported format" };
+          continue;
+        }
+
+        // Analyze with AI (Haiku)
+        const templateName = formatTemplateName(template.id);
+        const analysis = await analyzeTemplateWithAI(extractedText, templateName);
+
+        // Save parsed file
+        const parsedFilename = `${template.id}.md`;
+        const parsedFilePath = join(parsedDir, parsedFilename);
+        await writeFile(parsedFilePath, analysis.markdown);
+
+        // Save styles if available
+        if (extractedStyles) {
+          const stylesData = {
+            sourceTemplate: sourceFile,
+            templateName,
+            extractedAt: new Date().toISOString(),
+            styles: extractedStyles,
+          };
+          const stylesPath = join(root, ".pi_tool", "template-styles.json");
+          await writeFile(stylesPath, JSON.stringify(stylesData, null, 2));
+        }
+
+        // Update index
+        let indexData: TemplatesIndex = { templates: [] };
+        try {
+          const indexContent = await readFile(indexPath, "utf-8");
+          indexData = JSON.parse(indexContent);
+        } catch {
+          // No index yet
+        }
+
+        const existingIdx = indexData.templates.findIndex((t) => t.id === template.id);
+        const existing = existingIdx >= 0 ? indexData.templates[existingIdx] : null;
+
+        // Only preserve description if user manually set it; regenerate AI descriptions
+        const isUserDescription = existing?.descriptionSource === "user";
+        const description = isUserDescription ? existing.description : analysis.description;
+
+        const entry: TemplateEntry = {
+          id: template.id,
+          sourceFile: `source/${sourceFile}`,
+          parsedFile: `parsed/${parsedFilename}`,
+          name: existing?.name || formatTemplateName(template.id),
+          description,
+          descriptionSource: isUserDescription ? "user" : "ai",
+          parsedAt: new Date().toISOString(),
+          sourceModified: sourceStat.mtime.toISOString(),
+        };
+
+        if (existingIdx >= 0) {
+          indexData.templates[existingIdx] = entry;
+        } else {
+          indexData.templates.push(entry);
+        }
+
+        await writeFile(indexPath, JSON.stringify(indexData, null, 2));
+
+        results[index] = { id: template.id, success: true, previewLength: analysis.markdown.length };
+
+        await onProgress({
+          type: "template_done",
+          index,
+          total: templates.length,
+          id: template.id,
+          previewLength: analysis.markdown.length,
+        });
+
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        console.error(`[Batch Parse] Error for ${template.id}:`, error);
+        results[index] = { id: template.id, success: false, error };
+
+        await onProgress({
+          type: "template_error",
+          index,
+          total: templates.length,
+          id: template.id,
+          error,
+        });
+      }
+    }
+  }
+
+  // Start workers up to the limit
+  const workers = Array(Math.min(limit, templates.length)).fill(null).map(() => worker());
+  await Promise.all(workers);
+  return results;
+}
+
+app.post("/doc-templates/parse-batch", async (c) => {
+  const root = c.req.query("root");
+  if (!root) return c.json({ error: "root query param required" }, 400);
+
+  const { templateIds, reparse } = await c.req.json();
+
+  const templatesDir = join(root, ".pi_tool", "templates");
+  const sourceDir = join(templatesDir, "source");
+  const indexPath = join(templatesDir, "templates.json");
+
+  // Get list of templates to parse
+  let templates: Array<{ id: string; sourceFile: string; status: string }> = [];
+
+  try {
+    // Ensure directories exist
+    await mkdir(sourceDir, { recursive: true });
+    await mkdir(join(templatesDir, "parsed"), { recursive: true });
+
+    // Load existing index
+    let index: TemplatesIndex = { templates: [] };
+    try {
+      const indexContent = await readFile(indexPath, "utf-8");
+      index = JSON.parse(indexContent);
+    } catch {
+      // No index yet
+    }
+
+    // Scan source directory
+    const sourceFiles = await readdir(sourceDir);
+    const validExtensions = [".pdf", ".docx"];
+    const templateFiles = sourceFiles.filter((f) =>
+      validExtensions.includes(extname(f).toLowerCase())
+    );
+
+    for (const filename of templateFiles) {
+      const id = basename(filename, extname(filename));
+
+      // Filter by templateIds if provided
+      if (templateIds && templateIds.length > 0 && !templateIds.includes(id)) {
+        continue;
+      }
+
+      const existing = index.templates.find((t) => t.id === id);
+      const sourceFilePath = join(sourceDir, filename);
+      const sourceStat = await stat(sourceFilePath);
+      const sourceModified = sourceStat.mtime.toISOString();
+
+      // Determine status
+      let status = "needs_parsing";
+      if (existing?.parsedFile) {
+        const isOutdated = existing.parsedAt
+          ? new Date(sourceModified) > new Date(existing.parsedAt)
+          : true;
+        status = isOutdated ? "outdated" : "parsed";
+      }
+
+      // Include if reparse=true or not already parsed
+      if (reparse || status !== "parsed") {
+        templates.push({ id, sourceFile: `source/${filename}`, status });
+      }
+    }
+
+    if (templates.length === 0) {
+      return c.json({ message: "No templates to parse", parsed: 0 });
+    }
+
+  } catch (error) {
+    return c.json({ error: "Failed to scan templates" }, 500);
+  }
+
+  // Stream progress via SSE
+  return streamSSE(c, async (stream) => {
+    try {
+      await stream.writeSSE({
+        data: JSON.stringify({
+          type: "start",
+          total: templates.length,
+          templates: templates.map((t) => ({ id: t.id, status: t.status })),
+        }),
+      });
+
+      const results = await processTemplatesWithLimit(
+        templates,
+        root,
+        TEMPLATE_CONCURRENCY,
+        async (event) => {
+          await stream.writeSSE({ data: JSON.stringify(event) });
+        }
+      );
+
+      const successCount = results.filter((r) => r.success).length;
+
+      await stream.writeSSE({
+        data: JSON.stringify({
+          type: "done",
+          success: successCount === templates.length,
+          successCount,
+          total: templates.length,
+          results,
+        }),
+      });
+    } catch (error) {
+      console.error("Batch parse error:", error);
+      await stream.writeSSE({
+        data: JSON.stringify({
+          type: "error",
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      });
+    }
+  });
 });
 
 // Update template metadata (name, description)
@@ -760,7 +1192,10 @@ app.put("/doc-templates/:id", async (c) => {
     }
 
     if (name !== undefined) existing.name = name;
-    if (description !== undefined) existing.description = description;
+    if (description !== undefined) {
+      existing.description = description;
+      existing.descriptionSource = "user";  // Mark as user-edited so reparse won't overwrite
+    }
 
     await writeFile(indexPath, JSON.stringify(index, null, 2));
 
@@ -945,7 +1380,12 @@ ${cleaned}
 }
 
 // Helper: Use Claude to intelligently analyze and structure template content
-async function analyzeTemplateWithAI(rawText: string, templateName: string): Promise<string> {
+interface TemplateAnalysis {
+  markdown: string;
+  description: string;
+}
+
+async function analyzeTemplateWithAI(rawText: string, templateName: string): Promise<TemplateAnalysis> {
   const prompt = `You are analyzing a legal document template to make it useful for an AI agent that will generate similar documents.
 
 TEMPLATE NAME: ${templateName}
@@ -955,7 +1395,21 @@ ${rawText}
 
 ---
 
-Please analyze this template and produce a well-structured markdown document that includes:
+Please analyze this template and produce TWO things:
+
+## PART 1: AGENT DESCRIPTION (output first, on its own line starting with "DESCRIPTION:")
+
+Write a concise description that tells an AI agent WHEN to use this template. Include all relevant details:
+- What type of document it creates
+- Key conditions or triggers (e.g., "when liability is clear", "for 3P carriers", "after treatment complete")
+- Any special features of this template (e.g., "includes loss of consortium", "with wage loss section", "premises liability specific")
+- What case types or situations it's designed for
+
+Keep it to 1-2 sentences but include all important details. The description helps the agent choose the right template.
+
+## PART 2: TEMPLATE ANALYSIS (output after the description)
+
+Produce a well-structured markdown document that includes:
 
 1. **TEMPLATE OVERVIEW** (at the top)
    - What type of document this is
@@ -974,10 +1428,19 @@ Please analyze this template and produce a well-structured markdown document tha
 
 4. **TEMPLATE CONTENT**
    - Reproduce the template with:
-     - Clear section headings (## for major sections)
      - Placeholders converted to \`{{PLACEHOLDER_NAME}}\` format
      - Preserved formatting and structure
      - Any boilerplate language clearly marked
+
+   **IMPORTANT FORMATTING RULES:**
+   - If this is a LETTER template (LOR, Bill HI, correspondence, client letter):
+     - Use **Bold Text** for section labels, NOT ## markdown headers
+     - Do NOT add --- horizontal rules between sections
+     - Preserve the continuous flowing letter format
+     - Keep the business letter style with natural paragraph breaks
+   - If this is a FORMAL DOCUMENT (demand letter, memo, legal brief):
+     - Use ## headers for major sections
+     - Horizontal rules are acceptable between major sections
 
 5. **USAGE NOTES**
    - Any special considerations
@@ -986,26 +1449,32 @@ Please analyze this template and produce a well-structured markdown document tha
 
 Format everything as clean markdown. The goal is to help an AI agent understand this template well enough to generate high-quality documents following the same structure and style.`;
 
-  try {
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 8000,
-      messages: [{ role: "user", content: prompt }],
-    });
+  const response = await anthropic.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 8000,
+    messages: [{ role: "user", content: prompt }],
+  });
 
-    // Extract text from response
-    const textBlock = response.content.find((block) => block.type === "text");
-    if (textBlock && textBlock.type === "text") {
-      return textBlock.text;
-    }
-
-    // Fallback to simple formatting
-    return formatAsMarkdown(rawText, templateName);
-  } catch (error) {
-    console.error("AI template analysis failed:", error);
-    // Fallback to simple formatting
-    return formatAsMarkdown(rawText, templateName);
+  // Extract text from response
+  const textBlock = response.content.find((block) => block.type === "text");
+  if (!textBlock || textBlock.type !== "text") {
+    throw new Error("AI analysis returned no text content");
   }
+
+  const fullText = textBlock.text;
+
+  // Parse out the description (first line starting with "DESCRIPTION:")
+  let description = "";
+  let markdown = fullText;
+
+  const descMatch = fullText.match(/^DESCRIPTION:\s*(.+?)(?:\n|$)/im);
+  if (descMatch) {
+    description = descMatch[1].trim();
+    // Remove the description line from the markdown
+    markdown = fullText.replace(/^DESCRIPTION:\s*.+?\n+/im, "").trim();
+  }
+
+  return { markdown, description };
 }
 
 /**

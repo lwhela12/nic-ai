@@ -5,6 +5,13 @@ description: Generate a demand letter from case documents
 
 # Draft Demand Letter
 
+## Path Requirements
+
+**All file paths must be absolute and within the case folder.**
+- Get your WORKING_DIRECTORY from the prompt context
+- Construct paths as: `{WORKING_DIRECTORY}/.pi_tool/drafts/{filename}.md`
+- The system will reject writes outside the case folder
+
 Generate a professional demand letter for the third-party insurance company.
 
 ## Step 1: Determine Demand Type (DO THIS FIRST)
@@ -263,18 +270,18 @@ Use the multiplier guidelines from `agent/practice-guide.md` Section IV (Valuati
 #### 6a. Create drafts folder if it doesn't exist
 
 ```bash
-mkdir -p ".pi_tool/drafts"
+mkdir -p "{WORKING_DIRECTORY}/.pi_tool/drafts"
 ```
 
 #### 6b. Save Demand Letter (Markdown format)
 
-Use the Write tool to save to: `.pi_tool/drafts/demand_letter.md`
+Use the Write tool to save to: `{WORKING_DIRECTORY}/.pi_tool/drafts/demand_letter.md`
 
 **DO NOT save as `.docx` — the Write tool cannot create valid Word documents.**
 
 #### 6c. Update Drafts Manifest
 
-Use the Write tool to update `.pi_tool/drafts/manifest.json` with this entry:
+Use the Write tool to update `{WORKING_DIRECTORY}/.pi_tool/drafts/manifest.json` with this entry:
 
 **Manifest Schema:**
 ```json
@@ -308,7 +315,7 @@ Sort exhibits chronologically by date within each category.
 #### 6d. Verify files were created
 
 ```bash
-ls -la ".pi_tool/drafts/demand_letter.md" ".pi_tool/drafts/manifest.json"
+ls -la "{WORKING_DIRECTORY}/.pi_tool/drafts/demand_letter.md" "{WORKING_DIRECTORY}/.pi_tool/drafts/manifest.json"
 ```
 
 If either file is missing, stop and report the error.

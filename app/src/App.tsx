@@ -23,6 +23,27 @@ interface FirmTodo {
 }
 const FIRM_ROOT_KEY = 'claude-pi-firm-root'
 
+// URL param helpers for persisting navigation state across refreshes
+const getUrlParam = (key: string): string | null => {
+  const params = new URLSearchParams(window.location.search)
+  return params.get(key)
+}
+
+const setUrlParam = (key: string, value: string | null, replace = false) => {
+  const params = new URLSearchParams(window.location.search)
+  if (value) {
+    params.set(key, value)
+  } else {
+    params.delete(key)
+  }
+  const newUrl = params.toString() ? `${window.location.pathname}?${params.toString()}` : window.location.pathname
+  if (replace) {
+    window.history.replaceState({}, '', newUrl)
+  } else {
+    window.history.pushState({}, '', newUrl)
+  }
+}
+
 // Dev mode - skip auth in Vite dev server
 const DEV_MODE = import.meta.env.DEV
 
@@ -186,7 +207,15 @@ function App() {
   const [firmRoot, setFirmRoot] = useState<string | null>(() => {
     return localStorage.getItem(FIRM_ROOT_KEY)
   })
-  const [caseFolder, setCaseFolder] = useState<string | null>(null)
+  const [caseFolder, setCaseFolderState] = useState<string | null>(() => {
+    return getUrlParam('case')
+  })
+
+  // Wrapper to sync caseFolder with URL
+  const setCaseFolder = (folder: string | null) => {
+    setCaseFolderState(folder)
+    setUrlParam('case', folder)
+  }
   const [documentIndex, setDocumentIndex] = useState<DocumentIndex | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [viewContent, setViewContent] = useState<string>('')
@@ -196,6 +225,7 @@ function App() {
   const [fileViewName, setFileViewName] = useState<string>('')
   const [reviewPrompt, setReviewPrompt] = useState<string>('')
   const [viewDocPath, setViewDocPath] = useState<string | null>(null)
+  const [refreshDraftsKey, setRefreshDraftsKey] = useState(0)
 
   // Contact card state
   const [isContactCardOpen, setIsContactCardOpen] = useState(false)
@@ -232,6 +262,63 @@ function App() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadTodos()
   }, [loadTodos])
+
+  // Handle browser back/forward navigation
+  useEffect(() => {
+    const handlePopState = () => {
+      const newCase = getUrlParam('case')
+      setCaseFolderState(newCase)
+      if (!newCase) {
+        // Going back to dashboard - clear case state
+        setDocumentIndex(null)
+        setViewContent('')
+        setFileViewUrl(null)
+        setIsLoading(false)
+      } else {
+        // Going to a different case - clear state so it reloads
+        setDocumentIndex(null)
+        setIsLoading(false)
+      }
+    }
+
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  // Load case data when caseFolder is set but documentIndex is not loaded
+  // This handles both: 1) initial load from URL, and 2) popstate navigation
+  useEffect(() => {
+    const loadCaseData = async () => {
+      if (!caseFolder || documentIndex || isLoading) return
+
+      // Try to load existing index
+      try {
+        const res = await fetch(`${API_URL}/api/files/index?case=${encodeURIComponent(caseFolder)}`)
+        if (res.ok) {
+          const index = await res.json()
+          setDocumentIndex(index)
+          // Load generated docs
+          try {
+            const docsRes = await fetch(`${API_URL}/api/docs/list?case=${encodeURIComponent(caseFolder)}`)
+            if (docsRes.ok) {
+              const data = await docsRes.json() as { docs?: GeneratedDoc[] }
+              setGeneratedDocs(data.docs || [])
+            }
+          } catch {
+            // Ignore
+          }
+          return
+        }
+      } catch {
+        // No index exists
+      }
+
+      // No index - need to initialize the case
+      setIsLoading(true)
+    }
+
+    loadCaseData()
+  }, [caseFolder, documentIndex, isLoading])
 
   const handleToggleTodo = async (id: string) => {
     const updatedTodos = todos.map(t =>
@@ -429,24 +516,9 @@ function App() {
     return <Login apiUrl={API_URL} onLoginSuccess={handleLoginSuccess} />
   }
 
-  const handleCaseSelect = async (folder: string) => {
+  const handleCaseSelect = (folder: string) => {
+    // Just set the folder - the useEffect will handle loading the case data
     setCaseFolder(folder)
-
-    // Try to load existing index first (before setting isLoading)
-    try {
-      const res = await fetch(`${API_URL}/api/files/index?case=${encodeURIComponent(folder)}`)
-      if (res.ok) {
-        const index = await res.json()
-        setDocumentIndex(index)
-        loadGeneratedDocs(folder)
-        return  // Don't set isLoading, we have the index
-      }
-    } catch {
-      // No index exists
-    }
-
-    // Only set isLoading if we need to init
-    setIsLoading(true)
   }
 
   const handleInitComplete = (index: DocumentIndex) => {
@@ -779,6 +851,7 @@ curl -X POST ${API_URL}/api/files/resolve -H "Content-Type: application/json" -d
             initialPrompt={reviewPrompt}
             onInitialPromptUsed={() => setReviewPrompt('')}
             onIndexMayHaveChanged={reloadDocumentIndex}
+            onDraftsMayHaveChanged={() => setRefreshDraftsKey(k => k + 1)}
             onShowFile={handleShowFile}
           />
         }
@@ -795,6 +868,7 @@ curl -X POST ${API_URL}/api/files/resolve -H "Content-Type: application/json" -d
             onCloseFile={() => setFileViewUrl(null)}
             onIndexUpdated={reloadDocumentIndex}
             onDraftsUpdated={() => loadGeneratedDocs(caseFolder)}
+            refreshDraftsKey={refreshDraftsKey}
           />
         }
       />

@@ -9,6 +9,7 @@ interface Props {
   initialPrompt?: string
   onInitialPromptUsed?: () => void
   onIndexMayHaveChanged?: () => void
+  onDraftsMayHaveChanged?: () => void
   onShowFile?: (filePath: string) => void
 }
 
@@ -233,7 +234,7 @@ const KEEP_RECENT = 2
 const CONTEXT_WARNING_PERCENT = 50  // Yellow warning
 const CONTEXT_DANGER_PERCENT = 55   // Red warning, trigger auto-summarize (lowered for earlier prevention)
 
-export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onShowFile }: Props) {
+export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onShowFile }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -623,6 +624,10 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                 // (Bash is used for curl commands that resolve review items)
                 if ((toolsUsed.includes('Edit') || toolsUsed.includes('Bash')) && onIndexMayHaveChanged) {
                   onIndexMayHaveChanged()
+                }
+                // If Write tool was used, drafts may have been created/updated
+                if (toolsUsed.includes('Write') && onDraftsMayHaveChanged) {
+                  onDraftsMayHaveChanged()
                 }
               }
 

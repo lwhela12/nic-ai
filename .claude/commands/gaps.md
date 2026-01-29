@@ -5,6 +5,13 @@ description: Identify missing documents and recommended next actions
 
 # Gap Analysis
 
+## Path Requirements
+
+**All file paths must be absolute and within the case folder.**
+- Get your WORKING_DIRECTORY from the prompt context
+- Construct paths as: `{WORKING_DIRECTORY}/.pi_tool/{filename}.md`
+- The system will reject writes outside the case folder
+
 Scan the case folder and identify missing documents, incomplete records, and recommended next actions.
 
 ## Gap Categories
@@ -106,7 +113,7 @@ Flag:
 
 ## Output Location
 
-Save to: `.pi_tool/gap_analysis.md`
+Save to: `{WORKING_DIRECTORY}/.pi_tool/gap_analysis.md`
 
 ## Priority Levels
 

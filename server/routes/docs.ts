@@ -181,28 +181,38 @@ app.post("/export", async (c) => {
 
     // Infer document type from path if not provided
     const inferredType = documentType || inferTypeFromPath(sourcePath);
+    console.log(`[Export] caseFolder=${caseFolder}, sourcePath=${sourcePath}, documentType=${inferredType}`);
 
     // Load firm info if firmRoot provided (or try parent of caseFolder)
     const firmInfoRoot = firmRoot || dirname(caseFolder);
+    console.log(`[Export] firmInfoRoot=${firmInfoRoot} (firmRoot param=${firmRoot})`);
     const firmInfo = await loadFirmInfo(firmInfoRoot);
 
     // Load template styles if available
     const templateStyles = await loadTemplateStyles(firmInfoRoot);
 
     // Build export options
+    // Show letterhead by default for demands and letters, or if explicitly requested
+    // Don't show for memos (internal documents)
+    const shouldShowLetterhead = showLetterhead ?? (inferredType === "demand" || inferredType === "letter");
     const exportOptions: ExportOptions = {
       documentType: inferredType,
       firmInfo: firmInfo || undefined,
       caseName,
-      showLetterhead: showLetterhead ?? inferredType === "demand",
+      showLetterhead: shouldShowLetterhead,
       showPageNumbers: showPageNumbers ?? inferredType !== "memo",
       templateStyles,
     };
+    console.log(`[Export] exportOptions: showLetterhead=${exportOptions.showLetterhead}, documentType=${inferredType}, hasFirmInfo=${!!exportOptions.firmInfo}`);
 
     const html = markdownToHtml(content, exportOptions);
 
     if (format === "docx") {
-      const docxBuffer = await htmlToDocx(html, nameWithoutExt);
+      const docxBuffer = await htmlToDocx(html, nameWithoutExt, {
+        documentType: inferredType,
+        firmInfo: firmInfo || undefined,
+        showLetterhead: shouldShowLetterhead,
+      });
       await writeFile(fullOutputPath, docxBuffer);
     } else {
       const pdfBuffer = await htmlToPdf(html, nameWithoutExt, exportOptions);
@@ -250,6 +260,10 @@ function inferTypeFromPath(path: string): ExportOptions["documentType"] {
   if (lower.includes("demand")) return "demand";
   if (lower.includes("settlement")) return "settlement";
   if (lower.includes("memo")) return "memo";
+  // Letter types: Bill HI, LOR, correspondence letters
+  if (lower.includes("bill_hi") || lower.includes("bill hi") ||
+      lower.includes("lor") || lower.includes("letter_of_representation") ||
+      lower.includes("letter")) return "letter";
   return "generic";
 }
 
@@ -282,11 +296,13 @@ app.get("/download", async (c) => {
     // Load template styles if available
     const templateStyles = await loadTemplateStyles(firmInfoRoot);
 
+    // Show letterhead for demands and letters by default
+    const shouldShowLetterhead = showLetterhead && (documentType === "demand" || documentType === "letter");
     const exportOptions: ExportOptions = {
       documentType,
       firmInfo: firmInfo || undefined,
       caseName: caseName || undefined,
-      showLetterhead: showLetterhead && documentType === "demand",
+      showLetterhead: shouldShowLetterhead,
       showPageNumbers: showPageNumbers && documentType !== "memo",
       templateStyles,
     };
@@ -294,7 +310,11 @@ app.get("/download", async (c) => {
     switch (format) {
       case "docx": {
         const html = markdownToHtml(content, exportOptions);
-        const docxBuffer = await htmlToDocx(html, nameWithoutExt);
+        const docxBuffer = await htmlToDocx(html, nameWithoutExt, {
+          documentType,
+          firmInfo: firmInfo || undefined,
+          showLetterhead: shouldShowLetterhead,
+        });
         c.header(
           "Content-Type",
           "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -388,6 +408,9 @@ function inferTypeFromFilename(id: string): string {
   if (id.includes("demand")) return "demand";
   if (id.includes("memo")) return "memo";
   if (id.includes("settlement")) return "settlement";
+  // Letter types: Bill HI, LOR, correspondence letters
+  if (id.includes("bill_hi") || id.includes("lor") ||
+      id.includes("letter_of_representation") || id.includes("letter")) return "letter";
   return "document";
 }
 
@@ -460,11 +483,13 @@ app.post("/approve", async (c) => {
     const templateStyles = await loadTemplateStyles(firmInfoRoot);
 
     // Build export options
+    // Show letterhead for demands and letters by default
+    const shouldShowLetterhead = showLetterhead ?? (documentType === "demand" || documentType === "letter");
     const exportOptions: ExportOptions = {
       documentType,
       firmInfo: firmInfo || undefined,
       caseName: clientName,
-      showLetterhead: showLetterhead ?? documentType === "demand",
+      showLetterhead: shouldShowLetterhead,
       showPageNumbers: showPageNumbers ?? documentType !== "memo",
       templateStyles,
     };
@@ -477,7 +502,11 @@ app.post("/approve", async (c) => {
     // 6. Convert and save
     if (format === "docx") {
       const nameWithoutExt = basename(outputPath).replace(/\.[^/.]+$/, "");
-      const docxBuffer = await htmlToDocx(html, nameWithoutExt);
+      const docxBuffer = await htmlToDocx(html, nameWithoutExt, {
+        documentType,
+        firmInfo: firmInfo || undefined,
+        showLetterhead: shouldShowLetterhead,
+      });
       await writeFile(fullOutputPath, docxBuffer);
     } else {
       const nameWithoutExt = basename(outputPath).replace(/\.[^/.]+$/, "");

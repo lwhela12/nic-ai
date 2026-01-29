@@ -5,6 +5,13 @@ description: Calculate settlement disbursement breakdown
 
 # Settlement Calculator
 
+## Path Requirements
+
+**All file paths must be absolute and within the case folder.**
+- Get your WORKING_DIRECTORY from the prompt context
+- Construct paths as: `{WORKING_DIRECTORY}/.pi_tool/drafts/{filename}.md`
+- The system will reject writes outside the case folder
+
 Calculate the complete settlement disbursement showing all deductions and client recovery.
 
 ## Required Information
@@ -112,16 +119,16 @@ Date                         [Client Name]
 ### Step 1: Create drafts folder if needed
 
 ```bash
-mkdir -p ".pi_tool/drafts"
+mkdir -p "{WORKING_DIRECTORY}/.pi_tool/drafts"
 ```
 
 ### Step 2: Save Settlement Memo
 
-Save to: `.pi_tool/drafts/settlement_memo.md`
+Save to: `{WORKING_DIRECTORY}/.pi_tool/drafts/settlement_memo.md`
 
 ### Step 3: Update Drafts Manifest
 
-Read `.pi_tool/drafts/manifest.json` if it exists, then merge:
+Read `{WORKING_DIRECTORY}/.pi_tool/drafts/manifest.json` if it exists, then merge:
 
 ```json
 {

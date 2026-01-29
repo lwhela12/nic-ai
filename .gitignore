@@ -50,6 +50,7 @@ Thumbs.db
 
 # Test case data (large PDFs)
 test-cases/
+test-cases-wc/
 
 # Claude local settings (keep commands, ignore local settings)
 .claude/settings.local.json

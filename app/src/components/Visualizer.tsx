@@ -24,6 +24,7 @@ interface Props {
   onCloseFile: () => void
   onIndexUpdated: () => void
   onDraftsUpdated?: () => void
+  refreshDraftsKey?: number  // Increment to trigger drafts reload
 }
 
 // Icons
@@ -94,7 +95,7 @@ const DocumentTextIcon = () => (
   </svg>
 )
 
-export default function Visualizer({ content, docPath, fileUrl, fileName, caseFolder, apiUrl, documentIndex, firmRoot, onCloseFile, onIndexUpdated, onDraftsUpdated }: Props) {
+export default function Visualizer({ content, docPath, fileUrl, fileName, caseFolder, apiUrl, documentIndex, firmRoot: _firmRoot, onCloseFile, onIndexUpdated, onDraftsUpdated, refreshDraftsKey }: Props) {
   const [activeTab, setActiveTab] = useState<'view' | 'review' | 'drafts'>('view')
   const [verifiedItems, setVerifiedItems] = useState<Set<string>>(new Set())
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
@@ -130,6 +131,13 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
       loadDrafts()
     }
   }, [activeTab, loadDrafts])
+
+  // Reload drafts when refreshDraftsKey changes (triggered by Write tool in Chat)
+  useEffect(() => {
+    if (refreshDraftsKey !== undefined && refreshDraftsKey > 0) {
+      loadDrafts()
+    }
+  }, [refreshDraftsKey, loadDrafts])
 
   // Load draft content when selected
   useEffect(() => {

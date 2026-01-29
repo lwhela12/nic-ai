@@ -6,6 +6,7 @@ import { join, dirname } from "path";
 import { getSession, saveSession } from "../sessions";
 import { indexCase } from "./firm";
 import { buildPhasePrompt } from "../shared/phase-rules";
+import { isPathWithinBounds, extractPathsFromBash } from "../lib/path-validator";
 
 // Types for chat history
 interface ChatMessage {
@@ -173,7 +174,18 @@ ${sections.join("\n\n---\n\n")}
       // No knowledge base - that's fine
     }
 
+    // Get current date for document generation
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-US', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+
     caseContext = `
+TODAY'S DATE: ${dateStr}
+
 CASE INDEX (use this to answer questions):
 ${indexJson}
 ${templatesContext}${knowledgeContext}
@@ -181,7 +193,18 @@ WORKING DIRECTORY: ${caseFolder}
 
 USER REQUEST: `;
   } catch {
+    // Get current date for document generation
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-US', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+
     caseContext = `
+TODAY'S DATE: ${dateStr}
+
 CASE CONTEXT:
 - Working Directory: ${caseFolder}
 - No document index found. You may need to read documents directly or run indexing first.
@@ -218,6 +241,42 @@ USER REQUEST: `;
           allowedTools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "Task"],
           permissionMode: "acceptEdits",
           maxTurns: 15, // Allow more turns for Task spawning
+
+          // Path boundary enforcement - reject file operations outside the case folder
+          canUseTool: async (toolName: string, input: unknown) => {
+            // Validate Write and Edit tool paths
+            if (toolName === "Write" || toolName === "Edit") {
+              const filePath = (input as { file_path?: string }).file_path;
+              if (filePath) {
+                const isAllowed = await isPathWithinBounds(filePath, caseFolder, caseFolder);
+                if (!isAllowed) {
+                  return {
+                    behavior: "deny" as const,
+                    message: `Path "${filePath}" is outside the case folder. Use absolute paths within: ${caseFolder}`,
+                  };
+                }
+              }
+            }
+
+            // Validate Bash commands that write files
+            if (toolName === "Bash") {
+              const command = (input as { command?: string }).command;
+              if (command) {
+                const paths = extractPathsFromBash(command);
+                for (const path of paths) {
+                  const isAllowed = await isPathWithinBounds(path, caseFolder, caseFolder);
+                  if (!isAllowed) {
+                    return {
+                      behavior: "deny" as const,
+                      message: `Bash command targets path "${path}" outside case folder. Stay within: ${caseFolder}`,
+                    };
+                  }
+                }
+              }
+            }
+
+            return { behavior: "allow" as const };
+          },
         },
       })) {
         // Capture session ID

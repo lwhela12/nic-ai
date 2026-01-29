@@ -11,6 +11,7 @@ import {
   BorderStyle,
   HeadingLevel,
   AlignmentType,
+  ImageRun,
 } from "docx";
 import puppeteer from "puppeteer";
 import { readFile } from "fs/promises";
@@ -19,7 +20,7 @@ import type { DocxStyles } from "./extract";
 
 // Export options interface for customization
 export interface ExportOptions {
-  documentType?: "demand" | "settlement" | "memo" | "generic";
+  documentType?: "demand" | "settlement" | "memo" | "letter" | "generic";
   firmInfo?: FirmInfo;
   caseName?: string;
   showPageNumbers?: boolean;
@@ -38,83 +39,122 @@ export interface FirmInfo {
   logoBase64?: string;
 }
 
-// Parse firm info from the 12-firm-preferences.md file
-export async function loadFirmInfo(firmRoot: string): Promise<FirmInfo | null> {
-  try {
-    // Try to read firm preferences from knowledge folder
-    const prefsPath = join(firmRoot, ".pi_tool", "knowledge", "12-firm-preferences.md");
-    const content = await readFile(prefsPath, "utf-8");
-
-    // Parse the firm information block (between triple backticks)
-    const firmBlockMatch = content.match(/### Firm Information\s*```([\s\S]*?)```/);
-    if (!firmBlockMatch) return null;
-
-    const firmBlock = firmBlockMatch[1].trim();
-    const lines = firmBlock.split("\n").map((l) => l.trim()).filter(Boolean);
-
-    // Parse the structured format
-    const firmInfo: FirmInfo = {
-      name: "",
-      address: "",
-      phone: "",
-    };
-
-    // First line is firm name
-    if (lines[0]) firmInfo.name = lines[0];
-
-    // Second line is street address
-    if (lines[1]) firmInfo.address = lines[1];
-
-    // Third line is city, state, zip
-    if (lines[2]) firmInfo.cityStateZip = lines[2];
-
-    // Parse phone/fax/website from the contact line
-    const contactLine = lines.find((l) => l.includes("Phone:"));
-    if (contactLine) {
-      const phoneMatch = contactLine.match(/Phone:\s*([\d.-]+)/);
-      const faxMatch = contactLine.match(/Fax:\s*([\d.-]+)/);
-      if (phoneMatch) firmInfo.phone = phoneMatch[1];
-      if (faxMatch) firmInfo.fax = faxMatch[1];
-
-      // Website might be on the same line or next line
-      const websiteMatch = contactLine.match(/www\.[^\s]+/);
-      if (websiteMatch) firmInfo.website = websiteMatch[0];
-    }
-
-    // Check for website on separate line
-    const websiteLine = lines.find((l) => l.startsWith("www.") || l.includes("http"));
-    if (websiteLine && !firmInfo.website) {
-      firmInfo.website = websiteLine.replace(/^https?:\/\//, "");
-    }
-
-    // Parse attorney name
-    const attorneyLine = lines.find((l) => l.includes("Attorney:"));
-    if (attorneyLine) {
-      firmInfo.attorney = attorneyLine.replace("Attorney:", "").trim();
-    }
-
-    // Try to load logo
+// Load firm logo as base64
+async function loadFirmLogo(firmRoot: string): Promise<string | undefined> {
+  const logoExtensions = ["png", "jpg", "jpeg"];
+  for (const ext of logoExtensions) {
     try {
-      const logoExtensions = ["png", "jpg", "jpeg"];
-      for (const ext of logoExtensions) {
-        try {
-          const logoPath = join(firmRoot, ".pi_tool", `firm-logo.${ext}`);
-          const logoBuffer = await readFile(logoPath);
-          const mimeType = ext === "png" ? "image/png" : "image/jpeg";
-          firmInfo.logoBase64 = `data:${mimeType};base64,${logoBuffer.toString("base64")}`;
-          break;
-        } catch {
-          // Try next extension
+      const logoPath = join(firmRoot, ".pi_tool", `firm-logo.${ext}`);
+      console.log(`[Logo] Trying to load logo from: ${logoPath}`);
+      const logoBuffer = await readFile(logoPath);
+      const mimeType = ext === "png" ? "image/png" : "image/jpeg";
+      console.log(`[Logo] Successfully loaded logo (${logoBuffer.length} bytes)`);
+      return `data:${mimeType};base64,${logoBuffer.toString("base64")}`;
+    } catch (err) {
+      // Try next extension
+    }
+  }
+  console.log(`[Logo] No logo found in ${firmRoot}/.pi_tool/`);
+  return undefined;
+}
+
+// Parse firm info from firm-config.json or 12-firm-preferences.md file
+export async function loadFirmInfo(firmRoot: string): Promise<FirmInfo | null> {
+  console.log(`[FirmInfo] Loading firm info from: ${firmRoot}`);
+
+  const firmInfo: FirmInfo = {
+    name: "",
+    address: "",
+    phone: "",
+  };
+
+  let hasAnyInfo = false;
+
+  // First try firm-config.json (from Firm Settings UI)
+  try {
+    const configPath = join(firmRoot, ".pi_tool", "firm-config.json");
+    const configContent = await readFile(configPath, "utf-8");
+    const config = JSON.parse(configContent);
+
+    if (config.firmName) {
+      firmInfo.name = config.firmName;
+      hasAnyInfo = true;
+    }
+    if (config.address) {
+      firmInfo.address = config.address;
+      hasAnyInfo = true;
+    }
+    if (config.phone) {
+      firmInfo.phone = config.phone;
+      hasAnyInfo = true;
+    }
+  } catch {
+    // No firm-config.json, try legacy format
+  }
+
+  // Fall back to 12-firm-preferences.md if no config found
+  if (!hasAnyInfo) {
+    try {
+      const prefsPath = join(firmRoot, ".pi_tool", "knowledge", "12-firm-preferences.md");
+      const content = await readFile(prefsPath, "utf-8");
+
+      // Parse the firm information block (between triple backticks)
+      const firmBlockMatch = content.match(/### Firm Information\s*```([\s\S]*?)```/);
+      if (firmBlockMatch) {
+        const firmBlock = firmBlockMatch[1].trim();
+        const lines = firmBlock.split("\n").map((l) => l.trim()).filter(Boolean);
+
+        // First line is firm name
+        if (lines[0]) {
+          firmInfo.name = lines[0];
+          hasAnyInfo = true;
+        }
+
+        // Second line is street address
+        if (lines[1]) firmInfo.address = lines[1];
+
+        // Third line is city, state, zip
+        if (lines[2]) firmInfo.cityStateZip = lines[2];
+
+        // Parse phone/fax/website from the contact line
+        const contactLine = lines.find((l) => l.includes("Phone:"));
+        if (contactLine) {
+          const phoneMatch = contactLine.match(/Phone:\s*([\d.-]+)/);
+          const faxMatch = contactLine.match(/Fax:\s*([\d.-]+)/);
+          if (phoneMatch) firmInfo.phone = phoneMatch[1];
+          if (faxMatch) firmInfo.fax = faxMatch[1];
+
+          // Website might be on the same line or next line
+          const websiteMatch = contactLine.match(/www\.[^\s]+/);
+          if (websiteMatch) firmInfo.website = websiteMatch[0];
+        }
+
+        // Check for website on separate line
+        const websiteLine = lines.find((l) => l.startsWith("www.") || l.includes("http"));
+        if (websiteLine && !firmInfo.website) {
+          firmInfo.website = websiteLine.replace(/^https?:\/\//, "");
+        }
+
+        // Parse attorney name
+        const attorneyLine = lines.find((l) => l.includes("Attorney:"));
+        if (attorneyLine) {
+          firmInfo.attorney = attorneyLine.replace("Attorney:", "").trim();
         }
       }
     } catch {
-      // No logo found, that's fine
+      // No preferences file either
     }
-
-    return firmInfo;
-  } catch {
-    return null;
   }
+
+  // Always try to load logo, regardless of whether other firm info exists
+  const logo = await loadFirmLogo(firmRoot);
+  if (logo) {
+    firmInfo.logoBase64 = logo;
+    hasAnyInfo = true;
+  }
+
+  console.log(`[FirmInfo] Result: hasAnyInfo=${hasAnyInfo}, hasLogo=${!!firmInfo.logoBase64}, name="${firmInfo.name}"`);
+  return hasAnyInfo ? firmInfo : null;
 }
 
 // Generate letterhead HTML block
@@ -123,19 +163,21 @@ function generateLetterheadHtml(firmInfo: FirmInfo): string {
     ? `<img src="${firmInfo.logoBase64}" class="firm-logo" alt="Firm Logo">`
     : "";
 
-  const contactParts = [`Phone: ${firmInfo.phone}`];
+  const contactParts: string[] = [];
+  if (firmInfo.phone) contactParts.push(`Phone: ${firmInfo.phone}`);
   if (firmInfo.fax) contactParts.push(`Fax: ${firmInfo.fax}`);
   if (firmInfo.website) contactParts.push(firmInfo.website);
 
-  return `
+  // Use markers so DOCX converter can easily strip this section
+  return `<!-- LETTERHEAD_START -->
     <div class="letterhead">
       ${logo}
-      <div class="firm-name">${firmInfo.name.toUpperCase()}</div>
-      <div class="firm-address">${firmInfo.address}${firmInfo.cityStateZip ? ` | ${firmInfo.cityStateZip}` : ""}</div>
+      <div class="firm-name">${firmInfo.name ? firmInfo.name.toUpperCase() : ""}</div>
+      <div class="firm-address">${firmInfo.address || ""}${firmInfo.cityStateZip ? ` | ${firmInfo.cityStateZip}` : ""}</div>
       <div class="firm-contact">${contactParts.join(" | ")}</div>
     </div>
     <hr class="letterhead-divider">
-  `;
+<!-- LETTERHEAD_END -->`;
 }
 
 // Convert markdown to HTML with legal document styling
@@ -144,6 +186,10 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
   const styles = options.templateStyles;
 
   const showLetterhead = options.showLetterhead && options.firmInfo;
+  console.log(`[Export] markdownToHtml: showLetterhead option=${options.showLetterhead}, hasFirmInfo=${!!options.firmInfo}, result=${showLetterhead}`);
+  if (options.firmInfo) {
+    console.log(`[Export] firmInfo: name="${options.firmInfo.name}", hasLogo=${!!options.firmInfo.logoBase64}`);
+  }
   const letterheadHtml = showLetterhead ? generateLetterheadHtml(options.firmInfo!) : "";
 
   // Apply extracted template styles or use defaults
@@ -200,6 +246,43 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
       border: none;
       border-top: 2px solid #000;
       margin: 12pt 0 24pt;
+    }
+    `
+    : "";
+
+  // Letter-specific CSS - converts headers to bold inline text, hides horizontal rules
+  const isLetter = options.documentType === "letter";
+  const letterCss = isLetter
+    ? `
+    /* Letter-specific overrides: no formal headers, no dividers */
+    h1 {
+      font-size: ${fontSize}pt;
+      font-weight: bold;
+      text-align: left;
+      margin-top: 12pt;
+      margin-bottom: 6pt;
+    }
+    h2 {
+      font-size: ${fontSize}pt;
+      font-weight: bold;
+      font-variant: normal;
+      border-bottom: none;
+      padding-bottom: 0;
+      margin-top: 12pt;
+      margin-bottom: 6pt;
+    }
+    h3 {
+      font-size: ${fontSize}pt;
+      font-weight: bold;
+      margin-top: 12pt;
+      margin-bottom: 6pt;
+    }
+    hr {
+      display: none;
+    }
+    p {
+      text-indent: 0;
+      margin: 6pt 0;
     }
     `
     : "";
@@ -304,6 +387,7 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
       font-style: italic;
     }
     ${letterheadCss}
+    ${letterCss}
     @page {
       size: letter;
       margin: ${margins.top}in ${margins.right}in ${margins.bottom}in ${margins.left}in;
@@ -322,16 +406,206 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
 </html>`;
 }
 
+// Options for DOCX conversion
+export interface DocxConvertOptions {
+  documentType?: "demand" | "settlement" | "memo" | "letter" | "generic";
+  firmInfo?: FirmInfo;
+  showLetterhead?: boolean;
+}
+
+// Get image dimensions from buffer
+function getImageDimensions(buffer: Buffer, type: string): { width: number; height: number } | null {
+  try {
+    if (type === "png") {
+      // PNG: width at bytes 16-19, height at bytes 20-23 (big-endian)
+      if (buffer.length >= 24 && buffer.toString("ascii", 1, 4) === "PNG") {
+        const width = buffer.readUInt32BE(16);
+        const height = buffer.readUInt32BE(20);
+        return { width, height };
+      }
+    } else if (type === "jpg" || type === "jpeg") {
+      // JPEG: find SOF0 marker (0xFF 0xC0) or SOF2 (0xFF 0xC2)
+      let offset = 2; // Skip SOI marker
+      while (offset < buffer.length - 8) {
+        if (buffer[offset] !== 0xff) {
+          offset++;
+          continue;
+        }
+        const marker = buffer[offset + 1];
+        // SOF0, SOF1, SOF2 markers contain dimensions
+        if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+          const height = buffer.readUInt16BE(offset + 5);
+          const width = buffer.readUInt16BE(offset + 7);
+          return { width, height };
+        }
+        // Skip to next marker
+        const segmentLength = buffer.readUInt16BE(offset + 2);
+        offset += 2 + segmentLength;
+      }
+    }
+  } catch (err) {
+    console.error("[Image] Failed to get dimensions:", err);
+  }
+  return null;
+}
+
+// Generate DOCX letterhead elements
+function generateDocxLetterhead(firmInfo: FirmInfo): (Paragraph | Table)[] {
+  const elements: Paragraph[] = [];
+
+  // Logo (if available)
+  if (firmInfo.logoBase64) {
+    try {
+      // Extract base64 data from data URL
+      const base64Match = firmInfo.logoBase64.match(/^data:image\/(png|jpe?g);base64,(.+)$/i);
+      if (base64Match) {
+        const imageBuffer = Buffer.from(base64Match[2], "base64");
+        const imageType = base64Match[1].toLowerCase() === "png" ? "png" : "jpg";
+
+        // Get actual dimensions and scale to fit max size while preserving aspect ratio
+        const dims = getImageDimensions(imageBuffer, imageType);
+        const maxWidth = 192;  // ~2 inches at 96 DPI
+        const maxHeight = 96;  // ~1 inch at 96 DPI
+
+        let width = maxWidth;
+        let height = maxHeight;
+
+        if (dims) {
+          const aspectRatio = dims.width / dims.height;
+          // Scale to fit within max bounds while preserving aspect ratio
+          if (dims.width > dims.height) {
+            // Wider than tall - constrain by width
+            width = Math.min(dims.width, maxWidth);
+            height = width / aspectRatio;
+          } else {
+            // Taller than wide - constrain by height
+            height = Math.min(dims.height, maxHeight);
+            width = height * aspectRatio;
+          }
+          // Ensure we don't exceed either max
+          if (height > maxHeight) {
+            height = maxHeight;
+            width = height * aspectRatio;
+          }
+          if (width > maxWidth) {
+            width = maxWidth;
+            height = width / aspectRatio;
+          }
+        }
+
+        elements.push(
+          new Paragraph({
+            children: [
+              new ImageRun({
+                data: imageBuffer,
+                type: imageType as "png" | "jpg",
+                transformation: {
+                  width: Math.round(width),
+                  height: Math.round(height),
+                },
+              }),
+            ],
+            alignment: AlignmentType.CENTER,
+            spacing: { after: 100 },
+          })
+        );
+      }
+    } catch (err) {
+      console.error("[DOCX] Failed to add logo:", err);
+    }
+  }
+
+  // Firm name
+  if (firmInfo.name) {
+    elements.push(
+      new Paragraph({
+        children: [
+          new TextRun({
+            text: firmInfo.name.toUpperCase(),
+            bold: true,
+            size: 28, // 14pt
+          }),
+        ],
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 60 },
+      })
+    );
+  }
+
+  // Address
+  const addressParts: string[] = [];
+  if (firmInfo.address) addressParts.push(firmInfo.address);
+  if (firmInfo.cityStateZip) addressParts.push(firmInfo.cityStateZip);
+  if (addressParts.length > 0) {
+    elements.push(
+      new Paragraph({
+        children: [
+          new TextRun({
+            text: addressParts.join(" | "),
+            size: 20, // 10pt
+          }),
+        ],
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 40 },
+      })
+    );
+  }
+
+  // Contact info
+  const contactParts: string[] = [];
+  if (firmInfo.phone) contactParts.push(`Phone: ${firmInfo.phone}`);
+  if (firmInfo.fax) contactParts.push(`Fax: ${firmInfo.fax}`);
+  if (firmInfo.website) contactParts.push(firmInfo.website);
+  if (contactParts.length > 0) {
+    elements.push(
+      new Paragraph({
+        children: [
+          new TextRun({
+            text: contactParts.join(" | "),
+            size: 20, // 10pt
+            color: "444444",
+          }),
+        ],
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 200 },
+      })
+    );
+  }
+
+  // Divider line
+  elements.push(
+    new Paragraph({
+      border: {
+        bottom: { style: BorderStyle.SINGLE, size: 12, color: "000000" },
+      },
+      spacing: { after: 300 },
+    })
+  );
+
+  return elements;
+}
+
 // Parse HTML and convert to DOCX elements
 export async function htmlToDocx(
   html: string,
-  title: string
+  title: string,
+  options?: DocxConvertOptions
 ): Promise<Buffer> {
+  const isLetter = options?.documentType === "letter";
   // Parse the HTML body content
   const bodyMatch = html.match(/<body[^>]*>([\s\S]*)<\/body>/i);
-  const bodyContent = bodyMatch ? bodyMatch[1] : html;
+  let bodyContent = bodyMatch ? bodyMatch[1] : html;
+
+  // Remove letterhead HTML if present (we'll generate it natively in DOCX)
+  bodyContent = bodyContent.replace(/<!-- LETTERHEAD_START -->[\s\S]*?<!-- LETTERHEAD_END -->/gi, "");
 
   const children: (Paragraph | Table)[] = [];
+
+  // Add DOCX-native letterhead if requested
+  if (options?.showLetterhead && options?.firmInfo) {
+    const letterheadElements = generateDocxLetterhead(options.firmInfo);
+    children.push(...letterheadElements);
+  }
 
   // Simple HTML to DOCX parsing
   const lines = bodyContent.split(/(<[^>]+>)/g).filter(Boolean);
@@ -372,31 +646,33 @@ export async function htmlToDocx(
   };
 
   for (const part of lines) {
-    const trimmed = part.trim();
-    if (!trimmed) continue;
+    if (!part.trim()) continue;
 
     // Handle tags
-    if (trimmed.startsWith("<")) {
-      const tagMatch = trimmed.match(/<\/?(\w+)[^>]*>/i);
+    if (part.trim().startsWith("<")) {
+      const tagMatch = part.trim().match(/<\/?(\w+)[^>]*>/i);
       if (!tagMatch) continue;
 
       const tag = tagMatch[1].toLowerCase();
-      const isClosing = trimmed.startsWith("</");
+      const isClosing = part.trim().startsWith("</");
 
       switch (tag) {
         case "h1":
           if (isClosing) {
-            flushText(HeadingLevel.HEADING_1, AlignmentType.CENTER);
+            // For letters: render as bold paragraph, not styled heading
+            flushText(isLetter ? undefined : HeadingLevel.HEADING_1, isLetter ? undefined : AlignmentType.CENTER);
           }
           break;
         case "h2":
           if (isClosing) {
-            flushText(HeadingLevel.HEADING_2);
+            // For letters: render as bold paragraph, not styled heading
+            flushText(isLetter ? undefined : HeadingLevel.HEADING_2);
           }
           break;
         case "h3":
           if (isClosing) {
-            flushText(HeadingLevel.HEADING_3);
+            // For letters: render as bold paragraph, not styled heading
+            flushText(isLetter ? undefined : HeadingLevel.HEADING_3);
           }
           break;
         case "p":
@@ -498,22 +774,32 @@ export async function htmlToDocx(
           break;
         case "hr":
           flushText();
-          children.push(
-            new Paragraph({
-              border: {
-                bottom: { style: BorderStyle.SINGLE, size: 6 },
-              },
-              spacing: { after: 200 },
-            })
-          );
+          if (isLetter) {
+            // For letters: add blank paragraph spacing instead of visible line
+            children.push(
+              new Paragraph({
+                children: [],
+                spacing: { after: 200 },
+              })
+            );
+          } else {
+            children.push(
+              new Paragraph({
+                border: {
+                  bottom: { style: BorderStyle.SINGLE, size: 6 },
+                },
+                spacing: { after: 200 },
+              })
+            );
+          }
           break;
         case "br":
           currentText.push(new TextRun({ break: 1 }));
           break;
       }
     } else {
-      // Text content - decode HTML entities
-      const decoded = trimmed
+      // Text content - decode HTML entities, preserve all whitespace for inline formatting
+      const decoded = part
         .replace(/&amp;/g, "&")
         .replace(/&lt;/g, "<")
         .replace(/&gt;/g, ">")
@@ -601,8 +887,9 @@ function getPdfHeaderFooterConfig(options: ExportOptions = {}): PdfHeaderFooterC
     marginBottom: "1in",
   };
 
-  // Don't show headers/footers for memos or if disabled
-  if (documentType === "memo" || !showPageNumbers) {
+  // Don't show headers/footers for memos, letters, or if disabled
+  // Letters should have clean formatting with no automatic page headers/footers
+  if (documentType === "memo" || documentType === "letter" || !showPageNumbers) {
     return noHeaderFooter;
   }
 
