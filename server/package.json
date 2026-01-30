@@ -17,5 +17,8 @@
     "marked": "^17.0.1",
     "pdf-parse": "^1.1.1",
     "puppeteer": "^24.35.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
   }
 }

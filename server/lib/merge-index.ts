@@ -261,29 +261,31 @@ function buildClaimNumbers(hypergraph: Record<string, HypergraphField>): Record<
 
 /**
  * Build policy_limits object from hypergraph.
+ * Processes ALL values even when consensus is UNCERTAIN, categorizing each by source folder.
  */
 function buildPolicyLimits(hypergraph: Record<string, HypergraphField>): Record<string, string> {
   const limits: Record<string, string> = {};
 
   const limitsField = hypergraph["policy_limits"];
-  if (!limitsField || limitsField.consensus === "UNCERTAIN") {
+  if (!limitsField || limitsField.values.length === 0) {
     return limits;
   }
 
-  // For now, assume all policy limits are 3P BI unless source indicates otherwise
+  // Process ALL values, not just consensus - categorize by source folder/filename
   for (const valueEntry of limitsField.values) {
     const sources = valueEntry.sources.join(" ").toLowerCase();
 
-    if (sources.includes("1p")) {
+    // Categorize by source folder/filename patterns
+    if (sources.includes("1p") || sources.includes("travelers") || sources.includes("medpay") || sources.includes("mp")) {
       limits["1P"] = valueEntry.value;
-    } else {
+    } else if (sources.includes("3p") || sources.includes("geico") || sources.includes("pure") || sources.includes("adverse")) {
       limits["3P"] = valueEntry.value;
+    } else {
+      // Fallback - if only one value and can't categorize, assume 3P (most common case)
+      if (limitsField.values.length === 1) {
+        limits["3P"] = valueEntry.value;
+      }
     }
-  }
-
-  // If we only found one value and couldn't categorize, default to 3P
-  if (Object.keys(limits).length === 0 && limitsField.consensus) {
-    limits["3P"] = limitsField.consensus;
   }
 
   return limits;

@@ -2,21 +2,7 @@ import mammoth from "mammoth";
 import { readFile } from "fs/promises";
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
-import { exec } from "child_process";
-import { promisify } from "util";
-
-const execAsync = promisify(exec);
-
-/**
- * Escape a string for safe use in shell commands.
- * Uses single quotes and escapes any single quotes within the string.
- */
-function shellEscape(str: string): string {
-  // Single quotes prevent all shell expansion, but we need to handle
-  // single quotes within the string by ending the quote, adding an escaped
-  // single quote, and starting a new quoted section
-  return "'" + str.replace(/'/g, "'\\''") + "'";
-}
+import pdfParse from "pdf-parse";
 
 /**
  * Extracted style information from a DOCX file.
@@ -52,27 +38,25 @@ export interface DocxStyles {
 }
 
 /**
- * Extract text content from a PDF file using pdftotext.
+ * Extract text content from a PDF file using pdf-parse.
  * For scanned/image PDFs, returns empty string to trigger agent fallback
  * (which uses Claude's vision for better accuracy than OCR).
  */
 export async function extractTextFromPdf(filePath: string): Promise<string> {
-  const escapedPath = shellEscape(filePath);
-
   try {
-    const { stdout } = await execAsync(`pdftotext ${escapedPath} -`, {
-      maxBuffer: 10 * 1024 * 1024, // 10MB buffer for large PDFs
-    });
-    const text = stdout.trim();
+    const dataBuffer = await readFile(filePath);
+    const data = await pdfParse(dataBuffer);
+    const text = data.text.trim();
+
     if (text.length > 50) {
       return text;
     }
     // Text too short - likely a scanned PDF, return empty to trigger agent fallback
-    console.log(`[Extract] pdftotext returned only ${text.length} chars, deferring to agent`);
+    console.log(`[Extract] pdf-parse returned only ${text.length} chars, deferring to agent`);
     return '';
   } catch (e) {
-    // pdftotext failed, return empty to trigger agent fallback
-    console.log(`[Extract] pdftotext failed for ${filePath}, deferring to agent`);
+    // pdf-parse failed, return empty to trigger agent fallback
+    console.log(`[Extract] pdf-parse failed for ${filePath}, deferring to agent`);
     return '';
   }
 }
