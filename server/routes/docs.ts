@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { readdir, readFile, writeFile, mkdir, stat, unlink } from "fs/promises";
+import { readdir, readFile, writeFile, mkdir, stat } from "fs/promises";
 import { join, dirname, basename } from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
@@ -515,16 +515,20 @@ app.post("/approve", async (c) => {
       await writeFile(fullOutputPath, pdfBuffer);
     }
 
-    // 7. Delete the draft file
-    await unlink(fullDraftPath);
+    // 7. Keep the draft file for reference (don't delete)
+    // The markdown source is preserved for future edits or reference
 
-    // 8. Update manifest to remove this draft entry
+    // 8. Update manifest to mark this draft as approved
     const manifestPath = join(caseFolder, ".pi_tool", "drafts", "manifest.json");
     try {
       const manifestContent = await readFile(manifestPath, "utf-8");
       const manifest = JSON.parse(manifestContent);
       const draftId = basename(draftPath).replace(/\.md$/, "");
-      delete manifest[draftId];
+      if (manifest[draftId]) {
+        manifest[draftId].status = "approved";
+        manifest[draftId].approvedAt = new Date().toISOString();
+        manifest[draftId].exportedTo = outputPath;
+      }
       await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
     } catch {
       // No manifest or couldn't update - that's fine

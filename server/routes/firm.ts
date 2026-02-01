@@ -3,7 +3,9 @@ import { streamSSE } from "hono/streaming";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import Anthropic from "@anthropic-ai/sdk";
 import { readdir, readFile, stat, writeFile, mkdir } from "fs/promises";
+import { readFileSync, existsSync } from "fs";
 import { join, relative, dirname } from "path";
+import { homedir } from "os";
 import { getFirmSession, saveFirmSession } from "../sessions";
 import { PHASE_RULES } from "../shared/phase-rules";
 import { loadPracticeGuide, loadSectionsByIds, clearKnowledgeCache } from "./knowledge";
@@ -11,6 +13,58 @@ import { extractTextFromFile } from "../lib/extract";
 import { generateCaseSummary } from "../lib/case-summary";
 import { mergeToIndex, type HypergraphResult } from "../lib/merge-index";
 import { directFirmChat } from "../lib/firm-chat";
+
+// ============================================================================
+// Usage Reporting
+// ============================================================================
+
+const DEV_MODE = process.env.DEV_MODE === "true" || process.env.NODE_ENV !== "production";
+const SUBSCRIPTION_SERVER = process.env.CLAUDE_PI_SERVER || "https://api.claude-pi.com";
+const CONFIG_DIR = process.env.CLAUDE_PI_CONFIG_DIR || join(homedir(), ".claude-pi");
+const CONFIG_FILE = join(CONFIG_DIR, "config.json");
+
+interface AuthConfig {
+  authToken?: string;
+}
+
+function loadAuthConfig(): AuthConfig | null {
+  if (process.env.CLAUDE_PI_CONFIG) {
+    try {
+      return JSON.parse(process.env.CLAUDE_PI_CONFIG);
+    } catch {
+      // Fall through
+    }
+  }
+  if (!existsSync(CONFIG_FILE)) return null;
+  try {
+    return JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Report token usage to the subscription server.
+ * This is fire-and-forget - errors are logged but don't affect the main request.
+ */
+async function reportUsage(tokensUsed: number, requestType: string): Promise<void> {
+  if (DEV_MODE) return;
+  const config = loadAuthConfig();
+  if (!config?.authToken) return;
+
+  try {
+    await fetch(`${SUBSCRIPTION_SERVER}/v1/usage/log`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.authToken}`,
+      },
+      body: JSON.stringify({ tokensUsed, requestType }),
+    });
+  } catch (err) {
+    console.warn("[usage] Failed to report usage:", err);
+  }
+}
 
 // Lazy client creation - API key is set by auth middleware before requests
 let _anthropic: Anthropic | null = null;
@@ -1340,6 +1394,12 @@ async function indexCase(
     console.log(`        ${usageReport.totalOutputTokens.toLocaleString()} output tokens`);
     console.log(`=============================================\n`);
 
+    // Report usage to subscription server (fire-and-forget)
+    const totalTokensUsed = usageReport.totalInputTokens + usageReport.totalOutputTokens;
+    if (totalTokensUsed > 0) {
+      reportUsage(totalTokensUsed, "indexing").catch(() => {});
+    }
+
     onProgress({ type: "case_done", caseName, success: true });
     return { success: true };
 
@@ -2016,6 +2076,13 @@ app.post("/direct-chat", async (c) => {
   return streamSSE(c, async (stream) => {
     try {
       for await (const event of directFirmChat(root, message, history)) {
+        // Report usage when done
+        if (event.type === "done" && event.usage) {
+          const totalTokens = (event.usage.inputTokens || 0) + (event.usage.outputTokens || 0);
+          if (totalTokens > 0) {
+            reportUsage(totalTokens, "firm_chat").catch(() => {});
+          }
+        }
         await stream.writeSSE({
           data: JSON.stringify(event)
         });

@@ -1,13 +1,68 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { readFile, appendFile, writeFile, mkdir } from "fs/promises";
+import { readFile, appendFile, writeFile, mkdir, readFileSync, existsSync } from "fs/promises";
+import { readFileSync as readFileSyncFs, existsSync as existsSyncFs } from "fs";
 import { join, dirname } from "path";
+import { homedir } from "os";
 import { getSession, saveSession } from "../sessions";
 import { indexCase } from "./firm";
 import { buildPhasePrompt } from "../shared/phase-rules";
 import { isPathWithinBounds, extractPathsFromBash } from "../lib/path-validator";
 import { directChat, type ChatMessage as DirectChatMessage } from "../lib/direct-chat";
+
+// ============================================================================
+// Usage Reporting
+// ============================================================================
+
+const DEV_MODE = process.env.DEV_MODE === "true" || process.env.NODE_ENV !== "production";
+const SUBSCRIPTION_SERVER = process.env.CLAUDE_PI_SERVER || "https://api.claude-pi.com";
+const CONFIG_DIR = process.env.CLAUDE_PI_CONFIG_DIR || join(homedir(), ".claude-pi");
+const CONFIG_FILE = join(CONFIG_DIR, "config.json");
+
+interface Config {
+  authToken?: string;
+}
+
+function loadConfig(): Config | null {
+  if (process.env.CLAUDE_PI_CONFIG) {
+    try {
+      return JSON.parse(process.env.CLAUDE_PI_CONFIG);
+    } catch {
+      // Fall through
+    }
+  }
+  if (!existsSyncFs(CONFIG_FILE)) return null;
+  try {
+    return JSON.parse(readFileSyncFs(CONFIG_FILE, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Report token usage to the subscription server.
+ * This is fire-and-forget - errors are logged but don't affect the main request.
+ */
+async function reportUsage(tokensUsed: number, requestType: string): Promise<void> {
+  if (DEV_MODE) return;
+  const config = loadConfig();
+  if (!config?.authToken) return;
+
+  try {
+    await fetch(`${SUBSCRIPTION_SERVER}/v1/usage/log`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.authToken}`,
+      },
+      body: JSON.stringify({ tokensUsed, requestType }),
+    });
+  } catch (err) {
+    // Log but don't fail the request
+    console.warn("[usage] Failed to report usage:", err);
+  }
+}
 
 // Types for chat history
 interface ChatMessage {
@@ -377,6 +432,11 @@ USER REQUEST: `;
       if (currentSessionId) {
         await saveSession(caseFolder, currentSessionId);
       }
+
+      // Report usage to subscription server (fire-and-forget)
+      if (totalInputTokens + totalOutputTokens > 0) {
+        reportUsage(totalInputTokens + totalOutputTokens, "chat").catch(() => {});
+      }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       const errorLower = errorMsg.toLowerCase();
@@ -496,6 +556,13 @@ app.post("/chat-v2", async (c) => {
             data: JSON.stringify({ type: "status", message: event.content }),
           });
         } else if (event.type === "done") {
+          // Report usage to subscription server
+          if (event.usage) {
+            const totalTokens = (event.usage.inputTokens || 0) + (event.usage.outputTokens || 0);
+            if (totalTokens > 0) {
+              reportUsage(totalTokens, "direct_chat").catch(() => {});
+            }
+          }
           await stream.writeSSE({
             data: JSON.stringify({
               type: "done",

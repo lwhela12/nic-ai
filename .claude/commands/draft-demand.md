@@ -5,6 +5,19 @@ description: Generate a demand letter from case documents
 
 # Draft Demand Letter
 
+## CRITICAL OUTPUT REQUIREMENTS
+
+**You MUST save files to EXACTLY these paths (no variations):**
+
+1. **Demand Letter:** `.pi_tool/drafts/demand_letter.md`
+   - NOT `3P_Demand_Letter.md` or `demand-letter.md` or anything else
+   - EXACTLY `demand_letter.md`
+
+2. **Manifest:** `.pi_tool/drafts/manifest.json`
+   - MUST contain a `"demand_letter"` key with exhibits array
+
+**If you save to any other filename or location, bundling will fail.**
+
 ## Path Requirements
 
 **All file paths must be absolute and within the case folder.**
@@ -12,53 +25,113 @@ description: Generate a demand letter from case documents
 - Construct paths as: `{WORKING_DIRECTORY}/.pi_tool/drafts/{filename}.md`
 - The system will reject writes outside the case folder
 
-Generate a professional demand letter for the third-party insurance company.
+Generate a professional demand letter for the appropriate insurance company.
 
-## Step 1: Determine Demand Type (DO THIS FIRST)
+## Step 1: Determine Demand Category and Type (DO THIS FIRST)
 
-Before reading any documents or writing anything, you MUST determine whether this is a Policy Limits demand or a Specific Amount demand.
+Read `.pi_tool/document_index.json` and determine:
 
-1. Read `.pi_tool/document_index.json`
-2. Check for `summary.policy_limits.3P`:
-   - If `policy_limits.3P.bodily_injury` is missing or empty → **STOP**. Flag: "Cannot draft demand: Missing 3P policy limits. Need adverse party's dec page."
-3. Extract these values:
-   - **Total Medical Specials** = `summary.total_charges`
-   - **3P Per-Person BI Limit** = first number from `policy_limits.3P.bodily_injury` (e.g., "$50,000/$100,000" → $50,000)
-4. **DECISION:**
-   - IF Total Specials > 40% of 3P Per-Person Limit → **POLICY LIMITS DEMAND**
-   - IF Total Specials × 2.5 > 3P Per-Person Limit → **POLICY LIMITS DEMAND**
-   - ELSE → **SPECIFIC AMOUNT DEMAND**
+### A. Which insurance carrier to demand from?
 
-**State your determination before proceeding:** "This is a POLICY LIMITS demand because [specials of $X exceed 40% of the $Y limit]" or "This is a SPECIFIC AMOUNT demand because [specials of $X are well within the $Y limit]."
+1. **3P (Third-Party) Demand** - Demand against the at-fault party's liability insurer
+   - Use when: Liability is clear and 3P policy limits are known
+   - Check: `summary.policy_limits.3P.bodily_injury`
 
-**You CANNOT demand more than 3P policy limits. The insurer cannot pay more than their policy allows.**
+2. **1P UM (Uninsured Motorist) Demand** - Demand against client's own UM coverage
+   - Use when: At-fault driver has NO insurance
+   - Check: `summary.policy_limits.1P.um` or `summary.policy_limits.1P.uninsured_motorist`
 
-## Step 1b: Check for Firm Templates
+3. **1P UIM (Underinsured Motorist) Demand** - Demand against client's own UIM coverage
+   - Use when: 3P limits are exhausted/insufficient AND client has UIM coverage
+   - Check: `summary.policy_limits.1P.uim` or `summary.policy_limits.1P.underinsured_motorist`
 
-Before using the default templates below, check if the firm has custom templates:
+### B. Policy Limits vs. Specific Amount?
 
-1. **Check for templates.json** (templates are at firm root, one level up from case folder):
-   ```bash
-   cat "../.pi_tool/templates/templates.json" 2>/dev/null
-   ```
+Extract these values:
+- **Total Medical Specials** = `summary.total_charges`
+- **Applicable Per-Person BI Limit** = first number from the relevant policy limits
 
-2. **Look for a demand letter template:**
-   - Check each template's `name` for "demand", "3P", "third party", etc.
-   - Match to your Step 1 determination (policy limits vs specific amount)
+**DECISION:**
+- IF Total Specials > 40% of Per-Person Limit → **POLICY LIMITS DEMAND**
+- IF Total Specials × 2.5 > Per-Person Limit → **POLICY LIMITS DEMAND**
+- ELSE → **SPECIFIC AMOUNT DEMAND**
 
-3. **If a matching template exists:**
-   - Read the full template: `../.pi_tool/templates/parsed/{template-id}.md`
-   - Use that template's structure, language, and sections instead of Template A/B below
-   - Fill placeholders with case data
+**State your determination:** "This is a [3P/1P UM/1P UIM] [POLICY LIMITS/SPECIFIC AMOUNT] demand because [reason]."
 
-4. **If no matching template or templates.json doesn't exist:**
-   - Continue with Template A or B below (the defaults)
+**You CANNOT demand more than the applicable policy limits.**
+
+## Step 1b: Use the Firm Template (CRITICAL - READ CAREFULLY)
+
+**Firm templates are pre-loaded in your system prompt.** Look for a template matching your demand type:
+
+| Demand Type | Look for template containing |
+|-------------|------------------------------|
+| 3P Policy Limits | "3rd Party Standard Demand Letter" |
+| 3P Specific Amount | Use 3P template, modify demand language |
+| 1P UM | "1st Party UM Demand" |
+| 1P UIM | "1st Party UIM Demand" |
+
+### UNDERSTANDING TEMPLATE STRUCTURE
+
+Each template file contains ANALYSIS sections and TEMPLATE CONTENT. You should:
+
+- **IGNORE sections 1-3** (Template Overview, Structure Analysis, Placeholders) - these are documentation
+- **USE ONLY section 4 "TEMPLATE CONTENT"** - this is the actual letter to copy
+- **IGNORE section 5** (Usage Notes) - this is documentation
+
+The actual letter template is SHORT (usually 60-80 lines). It looks like:
+
+```
+{{DATE}}
+Sent via Insurer
+{{INSURER_NAME}}
+Re:
+- My Client: {{CLAIMANT}}
+...
+## Damages
+[table]
+...
+## DEMAND
+[boilerplate]
+...
+Sincerely,
+```
+
+### TEMPLATE USAGE RULES (MANDATORY - STRICT COMPLIANCE REQUIRED)
+
+1. **Find "## 4. TEMPLATE CONTENT"** in the template - this is where the actual letter starts
+2. **Copy ONLY that section** - from after "TEMPLATE CONTENT" to before "## 5. USAGE NOTES"
+3. **Replace placeholders with actual values** - `{{CLAIMANT_FULL_NAME}}` → "Brenda Boerdam-Madrid"
+4. **Fill the damages table** with actual provider data from the index
+5. **OUTPUT LENGTH: 60-90 lines MAXIMUM** - if your output exceeds 100 lines, you are NOT following the template
+
+### WHAT TO NEVER ADD (even if it seems helpful)
+
+❌ **NO "LIABILITY" section** - the template doesn't have one, so don't add one
+❌ **NO "INJURIES AND MEDICAL TREATMENT" section** - just the damages table
+❌ **NO detailed medical narratives** - no describing procedures, diagnoses, or treatment
+❌ **NO ICD codes** - just provider names, dates, and amounts
+❌ **NO "VALUATION" section** - the template doesn't calculate multipliers
+❌ **NO "NON-ECONOMIC DAMAGES" section** - the template just says "pain and suffering"
+❌ **NO AFFIDAVIT section at the end** - the template ends at "Enclosures"
+
+### WHAT YOU SHOULD OUTPUT
+
+A letter that is essentially a find-and-replace on the template:
+- Same structure as template section 4
+- Same boilerplate paragraphs copied verbatim
+- Same length (~70 lines)
+- Placeholders replaced with actual case data
+
+### Only if NO matching template exists in your context:
+- Use Template A or B below as a fallback (these are more verbose than typical firm templates)
 
 ## Step 2: Verify Prerequisites
 
 Confirm these exist in the index or case folder:
 - Intake form (client info, accident narrative)
-- 3P insurance dec page (policy limits, claim number)
+- **For 3P demands:** 3P insurance dec page (adverse party's policy limits, claim number)
+- **For 1P UM/UIM demands:** 1P insurance dec page (client's own policy limits)
 - Medical records and bills from all providers
 - Photos of vehicle damage (optional but helpful)
 
@@ -253,10 +326,14 @@ Use the multiplier guidelines from `agent/practice-guide.md` Section IV (Valuati
 ## Step 5: Verify Before Saving
 
 **REQUIRED CHECKS:**
+- [ ] **LINE COUNT: Is the letter under 100 lines?** If over 100 lines, you added sections that aren't in the template. DELETE them and try again.
+- [ ] **NO EXTRA SECTIONS:** Does the letter have only the sections from the template? (No "Liability", no "Injuries", no "Valuation", no "Affidavit")
 - [ ] If this is a policy limits demand, the demand section says "POLICY LIMITS" (NOT a dollar amount)
 - [ ] If this is a specific amount demand, the amount is LESS than the 3P per-person BI limit
 - [ ] My Step 1 determination matches what I wrote in the demand section
 - [ ] Total medical specials in the letter match the actual provider charges
+
+**⚠️ STOP AND FIX if your output exceeds 100 lines.** The firm template is concise. A 300+ line letter means you ignored the template.
 
 ## Output
 

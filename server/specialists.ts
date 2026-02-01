@@ -7,7 +7,7 @@
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFile } from "fs/promises";
-import { join } from "path";
+import { join, dirname } from "path";
 
 // Load specialist prompts from command files
 async function loadPrompt(name: string): Promise<string> {
@@ -31,6 +31,57 @@ async function loadFullSystemPrompt(): Promise<string> {
   const content = await readFile(path, "utf-8");
   fullSystemPromptCache = content;
   return content;
+}
+
+/**
+ * Load all firm templates from the firm root (parent of case folder).
+ * Returns a formatted string with all templates for inclusion in the system prompt.
+ */
+async function loadFirmTemplates(caseFolder: string): Promise<string> {
+  const firmRoot = dirname(caseFolder);
+  const templatesDir = join(firmRoot, ".pi_tool", "templates");
+  const indexPath = join(templatesDir, "templates.json");
+
+  try {
+    const indexContent = await readFile(indexPath, "utf-8");
+    const index = JSON.parse(indexContent);
+
+    const parts: string[] = [];
+
+    for (const template of index.templates) {
+      if (!template.parsedFile) continue;
+
+      try {
+        const content = await readFile(join(templatesDir, template.parsedFile), "utf-8");
+        parts.push(`## TEMPLATE: ${template.name} (${template.id})
+
+**Description:** ${template.description || "No description"}
+
+---
+
+${content}
+
+---
+`);
+      } catch {
+        // Skip unreadable templates
+      }
+    }
+
+    if (parts.length === 0) {
+      return "";
+    }
+
+    return `
+# FIRM TEMPLATES
+
+The following templates are available for use. When generating documents, you MUST use the appropriate template exactly as provided - matching its structure, length, and language. Only fill in the placeholders with case-specific data.
+
+${parts.join("\n\n")}
+`;
+  } catch {
+    return "";
+  }
 }
 
 export interface SpecialistResult {
@@ -57,7 +108,13 @@ export async function draftDemand(
   onProgress?: ProgressCallback
 ): Promise<SpecialistResult> {
   const taskPrompt = await loadPrompt("draft-demand");
-  const systemPrompt = await loadFullSystemPrompt();
+  const baseSystemPrompt = await loadFullSystemPrompt();
+  const templates = await loadFirmTemplates(caseFolder);
+
+  // Combine system prompt with templates so the agent has them in context
+  const systemPrompt = templates
+    ? `${baseSystemPrompt}\n\n${templates}`
+    : baseSystemPrompt;
 
   await onProgress?.({ type: "specialist_start", name: "draft_demand", message: "Starting demand letter generation..." });
 

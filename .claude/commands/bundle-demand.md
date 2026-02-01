@@ -1,5 +1,5 @@
 ---
-allowed-tools: Read, Bash, Write, Glob
+allowed-tools: Read, Bash
 description: Bundle demand letter with exhibits into PDF package
 ---
 
@@ -9,85 +9,51 @@ Combine the finalized demand letter with all supporting exhibits into a single P
 
 ## Prerequisites
 
-- Demand letter exists at `3P/3P Demand - DRAFT.md` (or finalized version)
-- Manifest exists at `.pi_tool/demand_manifest.json`
+Before bundling, verify:
+1. Demand letter markdown exists at `.pi_tool/drafts/demand_letter.md`
+2. Manifest exists at `.pi_tool/drafts/manifest.json` with a `demand_letter` entry
+3. The `demand_letter` entry has an `exhibits` array
 
-If either is missing, inform the user they need to run `/draft-demand` first.
+If these are missing, inform the user they need to run `/draft-demand` first.
 
-## Steps
+## Step 1: Check Prerequisites
 
-### 1. Read the Manifest
+Read `.pi_tool/drafts/manifest.json` and verify:
+- The `demand_letter` key exists
+- It has an `exhibits` array with at least one entry
+- Each exhibit has a `path` property
 
-Read `.pi_tool/demand_manifest.json` to get the list of exhibits and their order.
+Also check that `.pi_tool/drafts/demand_letter.md` exists.
 
-### 2. Convert Demand Letter to PDF
+## Step 2: Call the Bundle API
 
-```bash
-pandoc "3P/3P Demand - DRAFT.md" -o ".pi_tool/demand_letter.pdf" \
-  --pdf-engine=wkhtmltopdf \
-  --css=.pi_tool/demand.css \
-  -V margin-top=1in \
-  -V margin-bottom=1in \
-  -V margin-left=1in \
-  -V margin-right=1in
-```
-
-If wkhtmltopdf is not installed, fall back to using macOS Preview via AppleScript:
-```bash
-# Convert markdown to HTML first
-pandoc "3P/3P Demand - DRAFT.md" -o ".pi_tool/demand_letter.html" -s
-
-# Use macOS to convert HTML to PDF
-/usr/bin/textutil -convert rtf ".pi_tool/demand_letter.html" -output ".pi_tool/demand_letter.rtf"
-/usr/sbin/cupsfilter ".pi_tool/demand_letter.rtf" > ".pi_tool/demand_letter.pdf" 2>/dev/null
-```
-
-### 3. Create Separator Page
-
-Create a blank separator page to insert between sections:
+The server has a bundle endpoint that handles PDF conversion and merging. Call it:
 
 ```bash
-echo '<html><body style="text-align:center;padding-top:4in;font-family:Times New Roman">This Page Left Blank Intentionally</body></html>' > .pi_tool/separator.html
-/usr/bin/textutil -convert rtf ".pi_tool/separator.html" -output ".pi_tool/separator.rtf"
-/usr/sbin/cupsfilter ".pi_tool/separator.rtf" > ".pi_tool/separator.pdf" 2>/dev/null
+curl -X POST http://localhost:3001/api/docs/bundle-demand \
+  -H "Content-Type: application/json" \
+  -d '{"caseFolder": "'"$(pwd)"'"}' \
+  -o "3P/3P Demand Package.pdf"
 ```
 
-### 4. Combine All PDFs
+This endpoint:
+1. Reads the demand letter markdown
+2. Converts it to PDF using firm letterhead/styling
+3. Creates an "EXHIBITS" separator page
+4. Appends all exhibit PDFs from the manifest
+5. Returns the merged PDF
 
-Use pdfunite to merge everything in order:
+## Step 3: Verify Output
+
+After the API call, check if the file was created:
 
 ```bash
-pdfunite \
-  ".pi_tool/demand_letter.pdf" \
-  ".pi_tool/separator.pdf" \
-  ".pi_tool/separator.pdf" \
-  [exhibits in chronological order from manifest...] \
-  "3P/3P Demand Package.pdf"
+ls -la "3P/3P Demand Package.pdf"
 ```
 
-**Order of documents:**
-1. Demand letter
-2. Two separator pages (intentionally blank)
-3. Exhibits in the order specified by the manifest (chronological)
-
-### 5. Report Results
-
-After bundling, report:
-```bash
-pdfinfo "3P/3P Demand Package.pdf"
-```
-
-Show the user:
-- Total page count
+Report to the user:
 - File size
-- List of included exhibits
-
-### 6. Clean Up
-
-Remove temporary files:
-```bash
-rm -f ".pi_tool/demand_letter.pdf" ".pi_tool/separator.pdf"
-```
+- Location: `3P/3P Demand Package.pdf`
 
 ## Output
 
@@ -95,25 +61,15 @@ rm -f ".pi_tool/demand_letter.pdf" ".pi_tool/separator.pdf"
 
 ## Error Handling
 
-**If pandoc not installed:**
-```
-Pandoc is required for PDF conversion. Install with:
-  brew install pandoc
-```
-
-**If pdfunite not installed:**
-```
-pdfunite is required for combining PDFs. Install with:
-  brew install poppler
-```
-
-**If exhibit file missing:**
-- Warn the user which file(s) are missing
-- Ask if they want to continue without missing exhibits
-- If yes, proceed with available files
-
 **If demand letter missing:**
 - Stop and instruct user to run `/draft-demand` first
 
-**If manifest missing:**
+**If manifest missing or no exhibits:**
 - Stop and instruct user to run `/draft-demand` first (it generates the manifest)
+
+**If API call fails:**
+- Check if server is running on port 3001
+- Check server logs for detailed error message
+
+**If exhibit files are missing:**
+- The API will warn about missing exhibits but still create the package with available files

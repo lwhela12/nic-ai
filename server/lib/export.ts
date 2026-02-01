@@ -287,6 +287,46 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
     `
     : "";
 
+  // Demand letter CSS - clean professional styling without decorative elements
+  const isDemand = options.documentType === "demand";
+  const demandCss = isDemand
+    ? `
+    /* Demand letter overrides: clean formal look, no decorative lines */
+    h1 {
+      font-size: 14pt;
+      font-weight: bold;
+      text-align: center;
+      margin-top: 18pt;
+      margin-bottom: 12pt;
+      text-transform: uppercase;
+    }
+    h2 {
+      font-size: 12pt;
+      font-weight: bold;
+      font-variant: normal;
+      border-bottom: none;
+      padding-bottom: 0;
+      margin-top: 18pt;
+      margin-bottom: 10pt;
+      text-transform: uppercase;
+    }
+    h3 {
+      font-size: 12pt;
+      font-weight: bold;
+      margin-top: 14pt;
+      margin-bottom: 8pt;
+    }
+    hr {
+      display: none;
+    }
+    p {
+      text-indent: 0;
+      margin: 10pt 0;
+      text-align: left;
+    }
+    `
+    : "";
+
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -388,6 +428,7 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
     }
     ${letterheadCss}
     ${letterCss}
+    ${demandCss}
     @page {
       size: letter;
       margin: ${margins.top}in ${margins.right}in ${margins.bottom}in ${margins.left}in;
@@ -592,6 +633,8 @@ export async function htmlToDocx(
   options?: DocxConvertOptions
 ): Promise<Buffer> {
   const isLetter = options?.documentType === "letter";
+  const isDemand = options?.documentType === "demand";
+  const isCleanFormat = isLetter || isDemand; // Both use clean formatting without decorative styles
   // Parse the HTML body content
   const bodyMatch = html.match(/<body[^>]*>([\s\S]*)<\/body>/i);
   let bodyContent = bodyMatch ? bodyMatch[1] : html;
@@ -659,20 +702,20 @@ export async function htmlToDocx(
       switch (tag) {
         case "h1":
           if (isClosing) {
-            // For letters: render as bold paragraph, not styled heading
-            flushText(isLetter ? undefined : HeadingLevel.HEADING_1, isLetter ? undefined : AlignmentType.CENTER);
+            // For letters and demands: render as bold paragraph, not styled heading
+            flushText(isCleanFormat ? undefined : HeadingLevel.HEADING_1, isCleanFormat ? undefined : AlignmentType.CENTER);
           }
           break;
         case "h2":
           if (isClosing) {
-            // For letters: render as bold paragraph, not styled heading
-            flushText(isLetter ? undefined : HeadingLevel.HEADING_2);
+            // For letters and demands: render as bold paragraph, not styled heading
+            flushText(isCleanFormat ? undefined : HeadingLevel.HEADING_2);
           }
           break;
         case "h3":
           if (isClosing) {
-            // For letters: render as bold paragraph, not styled heading
-            flushText(isLetter ? undefined : HeadingLevel.HEADING_3);
+            // For letters and demands: render as bold paragraph, not styled heading
+            flushText(isCleanFormat ? undefined : HeadingLevel.HEADING_3);
           }
           break;
         case "p":
@@ -774,8 +817,8 @@ export async function htmlToDocx(
           break;
         case "hr":
           flushText();
-          if (isLetter) {
-            // For letters: add blank paragraph spacing instead of visible line
+          if (isCleanFormat) {
+            // For letters and demands: add blank paragraph spacing instead of visible line
             children.push(
               new Paragraph({
                 children: [],
