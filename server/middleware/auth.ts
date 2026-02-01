@@ -7,6 +7,10 @@ import { homedir } from "os";
 const DEV_MODE =
   process.env.DEV_MODE === "true" || process.env.NODE_ENV !== "production";
 
+// Log auth mode at startup
+console.log(`[auth] Mode: ${DEV_MODE ? "DEV (auth bypassed)" : "PRODUCTION"}`);
+console.log(`[auth] DEV_MODE env: ${process.env.DEV_MODE}, NODE_ENV: ${process.env.NODE_ENV}`);
+
 // Config file location
 const CONFIG_DIR = process.env.CLAUDE_PI_CONFIG_DIR || join(homedir(), ".claude-pi");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
@@ -179,6 +183,17 @@ export async function authMiddleware(c: Context, next: Next) {
   // Ensure API key is set
   if (config.anthropicApiKey && !process.env.ANTHROPIC_API_KEY) {
     process.env.ANTHROPIC_API_KEY = config.anthropicApiKey;
+  }
+
+  // Final check - if no API key is available, fail the request
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return c.json(
+      {
+        error: "api_key_missing",
+        message: "No API key available. Please log in again to refresh your session.",
+      },
+      503
+    );
   }
 
   return next();

@@ -14,7 +14,14 @@ import { readFile, writeFile } from "fs/promises";
 import { join, dirname } from "path";
 import { generateDocument, type DocumentType } from "./doc-agent";
 
-const anthropic = new Anthropic();
+// Lazy client creation - API key is set by auth middleware before requests
+let _anthropic: Anthropic | null = null;
+function getClient(): Anthropic {
+  if (!_anthropic) {
+    _anthropic = new Anthropic();
+  }
+  return _anthropic;
+}
 
 // Message format for conversation history
 export interface ChatMessage {
@@ -727,7 +734,7 @@ export async function* directChat(
   });
 
   // Initial API call - context is in system prompt, available on every turn
-  let response = await anthropic.messages.create({
+  let response = await getClient().messages.create({
     model: "claude-haiku-4-5-20251001",
     max_tokens: 4096,
     system: systemPrompt,
@@ -852,7 +859,7 @@ export async function* directChat(
 
     // Make follow-up call with streaming to show response incrementally
     try {
-      const followUp = await anthropic.messages.create({
+      const followUp = await getClient().messages.create({
         model: "claude-haiku-4-5-20251001",
         max_tokens: 4096,
         system: systemPrompt,
@@ -938,7 +945,7 @@ export async function* directChat(
         });
 
         // Final call (non-streaming, no more tools)
-        const finalResponse = await anthropic.messages.create({
+        const finalResponse = await getClient().messages.create({
           model: "claude-haiku-4-5-20251001",
           max_tokens: 4096,
           system: systemPrompt,

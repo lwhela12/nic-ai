@@ -45,7 +45,8 @@ const setUrlParam = (key: string, value: string | null, replace = false) => {
 }
 
 // Dev mode - skip auth in Vite dev server
-const DEV_MODE = import.meta.env.DEV
+// Set VITE_AUTH_ENABLED=true to force auth even in dev mode
+const DEV_MODE = import.meta.env.DEV && import.meta.env.VITE_AUTH_ENABLED !== 'true'
 
 interface AuthState {
   authenticated: boolean

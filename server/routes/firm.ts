@@ -12,8 +12,14 @@ import { generateCaseSummary } from "../lib/case-summary";
 import { mergeToIndex, type HypergraphResult } from "../lib/merge-index";
 import { directFirmChat } from "../lib/firm-chat";
 
-// Initialize Anthropic client for direct API calls (used in single-turn synthesis)
-const anthropic = new Anthropic();
+// Lazy client creation - API key is set by auth middleware before requests
+let _anthropic: Anthropic | null = null;
+function getClient(): Anthropic {
+  if (!_anthropic) {
+    _anthropic = new Anthropic();
+  }
+  return _anthropic;
+}
 
 const app = new Hono();
 
@@ -874,7 +880,7 @@ async function synthesizeCaseSummary(
     const synthesisSystemPrompt = await buildSynthesisSystemPrompt(firmRoot);
 
     // Step 3: Make single API call with tool use for structured output
-    const response = await anthropic.messages.create({
+    const response = await getClient().messages.create({
       model: "claude-sonnet-4-5-20250929",
       max_tokens: 16000,
       system: synthesisSystemPrompt,

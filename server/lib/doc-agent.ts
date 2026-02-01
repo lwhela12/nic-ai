@@ -12,7 +12,14 @@ import { join, dirname } from "path";
 import { execSync } from "child_process";
 import { loadSectionsByIds } from "../routes/knowledge";
 
-const anthropic = new Anthropic();
+// Lazy client creation - API key is set by auth middleware before requests
+let _anthropic: Anthropic | null = null;
+function getClient(): Anthropic {
+  if (!_anthropic) {
+    _anthropic = new Anthropic();
+  }
+  return _anthropic;
+}
 
 // Document types we can generate
 export type DocumentType = "demand_letter" | "case_memo" | "settlement" | "general_letter";
@@ -471,8 +478,8 @@ Please generate the requested document. Start by reviewing the case information 
   while (iterations < maxIterations) {
     iterations++;
 
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+    const response = await getClient().messages.create({
+      model: "claude-sonnet-4-5-20250929",
       max_tokens: 8192,
       system: systemPrompt,
       messages,

@@ -10,7 +10,14 @@ import Anthropic from "@anthropic-ai/sdk";
 import { readFile, writeFile, readdir, mkdir } from "fs/promises";
 import { join } from "path";
 
-const anthropic = new Anthropic();
+// Lazy client creation - API key is set by auth middleware before requests
+let _anthropic: Anthropic | null = null;
+function getClient(): Anthropic {
+  if (!_anthropic) {
+    _anthropic = new Anthropic();
+  }
+  return _anthropic;
+}
 
 // Message format for conversation history
 export interface ChatMessage {
@@ -659,7 +666,7 @@ export async function* directFirmChat(
   });
 
   // Initial API call - context is in system prompt, available on every turn
-  let response = await anthropic.messages.create({
+  let response = await getClient().messages.create({
     model: "claude-haiku-4-5-20251001",
     max_tokens: 4096,
     system: systemPrompt,
@@ -752,7 +759,7 @@ export async function* directFirmChat(
     });
 
     // Make follow-up call (non-streaming for simplicity after tool use)
-    const followUp = await anthropic.messages.create({
+    const followUp = await getClient().messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 4096,
       system: systemPrompt,

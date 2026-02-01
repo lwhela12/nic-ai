@@ -6,8 +6,14 @@ import { readdir, readFile, writeFile, mkdir, copyFile, unlink, stat } from "fs/
 import { join, dirname, basename, extname } from "path";
 import { extractTextFromPdf, extractTextFromDocx, extractStylesFromDocx, DocxStyles } from "../lib/extract";
 
-// Initialize Anthropic client for template analysis
-const anthropic = new Anthropic();
+// Lazy client creation - API key is set by auth middleware before requests
+let _anthropic: Anthropic | null = null;
+function getClient(): Anthropic {
+  if (!_anthropic) {
+    _anthropic = new Anthropic();
+  }
+  return _anthropic;
+}
 
 const app = new Hono();
 
@@ -1449,7 +1455,7 @@ Produce a well-structured markdown document that includes:
 
 Format everything as clean markdown. The goal is to help an AI agent understand this template well enough to generate high-quality documents following the same structure and style.`;
 
-  const response = await anthropic.messages.create({
+  const response = await getClient().messages.create({
     model: "claude-haiku-4-5-20251001",
     max_tokens: 8000,
     messages: [{ role: "user", content: prompt }],

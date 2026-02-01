@@ -8,7 +8,14 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { loadSectionsByIds } from "../routes/knowledge";
 
-const anthropic = new Anthropic();
+// Lazy client creation - API key is set by auth middleware before requests
+let _anthropic: Anthropic | null = null;
+function getClient(): Anthropic {
+  if (!_anthropic) {
+    _anthropic = new Anthropic();
+  }
+  return _anthropic;
+}
 
 // Knowledge sections relevant for case summary
 const SUMMARY_SECTION_IDS = [
@@ -162,7 +169,7 @@ Initial phase inference (you may adjust): ${inferredPhase}
 Analyze the case and use the case_summary tool to return your summary and phase determination.`;
 
   try {
-    const response = await anthropic.messages.create({
+    const response = await getClient().messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 1000,
       system: systemPrompt,
