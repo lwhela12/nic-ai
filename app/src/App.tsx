@@ -706,40 +706,9 @@ function App() {
                     // Ignore clear errors
                   }
 
-                  // Fetch enriched needs_review data with resolved file paths
-                  try {
-                    const resp = await fetch(`${API_URL}/api/files/needs-review?case=${encodeURIComponent(caseFolder)}`)
-                    const data = await resp.json()
-
-                    if (data.items && data.items.length > 0) {
-                      // Build a pre-formatted prompt with all the details
-                      const itemSummaries = data.items.map((item: any, i: number) => {
-                        const sources = item.resolved_sources
-                          ?.filter((s: any) => s.path)
-                          .map((s: any) => `[[SHOW_FILE: ${s.path}]]`)
-                          .join(' ') || 'No files found'
-                        return `${i + 1}. **${item.field}**
-   - Values: ${item.conflicting_values?.join(' vs ') || 'Unknown'}
-   - Reason: ${item.reason || 'No reason provided'}
-   - Documents: ${sources}`
-                      }).join('\n\n')
-
-                      const prompt = `Here are ${data.count} item(s) needing resolution:
-
-${itemSummaries}
-
-Please help me review each conflict. For each one, show the relevant documents and ask which value is correct. When I provide a resolution, use this curl command to update the index:
-\`\`\`
-curl -X POST ${API_URL}/api/files/resolve -H "Content-Type: application/json" -d '{"caseFolder": "${caseFolder}", "field": "<field>", "resolvedValue": "<value>", "evidence": "<reason>"}'
-\`\`\``
-                      setReviewPrompt(prompt)
-                    }
-                  } catch {
-                    // Fallback to old behavior
-                    const items = documentIndex.needs_review || []
-                    const prompt = `There are ${items.length} item(s) in needs_review. Please read .pi_tool/document_index.json and help me review them.`
-                    setReviewPrompt(prompt)
-                  }
+                  // Prompt that triggers batch conflict review
+                  const count = documentIndex.needs_review?.length || 0
+                  setReviewPrompt(`Review the ${count} document conflicts. Analyze them, make recommendations for the easy ones, and present them in batches for my approval.`)
                 }}
                 className="flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-lg
                            bg-amber-500 text-white hover:bg-amber-600 transition-colors

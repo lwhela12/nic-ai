@@ -98,12 +98,35 @@ const TOOLS: Anthropic.Tool[] = [
     }
   },
   {
-    name: "start_document_review",
-    description: "Start reviewing document conflicts (needs_review items). Use when the user wants to review conflicts, resolve discrepancies, or go through items that need attention. Returns the list of pending conflicts for you to walk through one by one.",
+    name: "get_conflicts",
+    description: "Get all document conflicts that need review. Returns all needs_review items with their conflicting values and sources. Use this when the user wants to review conflicts. After reviewing, present your recommendations in batches - group easy ones together, flag complex ones for individual review.",
     input_schema: {
       type: "object" as const,
       properties: {},
       required: []
+    }
+  },
+  {
+    name: "batch_resolve_conflicts",
+    description: "Resolve multiple conflicts at once. Use after presenting recommendations and getting user approval. Pass an array of resolutions.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        resolutions: {
+          type: "array",
+          description: "Array of conflict resolutions",
+          items: {
+            type: "object",
+            properties: {
+              field: { type: "string", description: "The field name from needs_review" },
+              resolved_value: { type: "string", description: "The correct value" },
+              evidence: { type: "string", description: "Brief explanation" }
+            },
+            required: ["field", "resolved_value"]
+          }
+        }
+      },
+      required: ["resolutions"]
     }
   },
   {
@@ -207,7 +230,7 @@ async function executeTool(
         return `Updated ${toolInput.field_path} from "${oldValue}" to "${toolInput.value}"`;
       }
 
-      case "start_document_review": {
+      case "get_conflicts": {
         const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const index = JSON.parse(indexContent);
@@ -216,9 +239,10 @@ async function executeTool(
 
         if (needsReview.length === 0) {
           return JSON.stringify({
-            status: "no_items",
-            message: "No conflicts to review. All items have been resolved.",
-            count: 0
+            status: "all_done",
+            message: "All conflicts have been resolved! No more items to review.",
+            count: 0,
+            items: []
           });
         }
 
@@ -235,10 +259,9 @@ async function executeTool(
           }
         }
 
-        // Enrich items with resolved file paths
-        const enrichedItems = needsReview.map((item, idx) => {
+        // Return ALL items with resolved sources
+        const items = needsReview.map((item, idx) => {
           const resolvedSources = (item.sources || []).map((source: string) => {
-            // Source might be "filename.pdf ($1,234)" - extract just the filename
             const match = source.match(/^([^(]+)/);
             const filename = match ? match[1].trim() : source.trim();
             return {
@@ -259,10 +282,109 @@ async function executeTool(
         });
 
         return JSON.stringify({
-          status: "review_started",
-          message: `Found ${needsReview.length} conflict(s) to review.`,
+          status: "conflicts_found",
           count: needsReview.length,
-          items: enrichedItems
+          items
+        });
+      }
+
+      case "batch_resolve_conflicts": {
+        const { resolutions } = toolInput;
+        if (!Array.isArray(resolutions) || resolutions.length === 0) {
+          return JSON.stringify({ success: false, error: "No resolutions provided" });
+        }
+
+        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexContent = await readFile(indexPath, "utf-8");
+        const index = JSON.parse(indexContent);
+
+        let needsReview: any[] = index.needs_review || [];
+        const errata: any[] = index.errata || [];
+        let caseNotes: any[] = Array.isArray(index.case_notes) ? index.case_notes : [];
+
+        const resolved: string[] = [];
+        const failed: string[] = [];
+
+        for (const resolution of resolutions) {
+          const { field, resolved_value, evidence } = resolution;
+          const itemIndex = needsReview.findIndex((item: any) => item.field === field);
+
+          if (itemIndex === -1) {
+            failed.push(field);
+            continue;
+          }
+
+          const resolvedItem = needsReview[itemIndex];
+          const rejectedValues = resolvedItem.conflicting_values?.filter(
+            (v: any) => String(v) !== String(resolved_value)
+          ) || [];
+
+          // Remove from needs_review
+          needsReview.splice(itemIndex, 1);
+
+          // Add to errata
+          errata.push({
+            field,
+            decision: resolved_value,
+            rejected_values: rejectedValues,
+            evidence: evidence || "Batch resolution",
+            resolution_type: "batch_review",
+            resolved_at: new Date().toISOString()
+          });
+
+          // Add to case_notes
+          caseNotes.push({
+            id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            content: `Resolved ${field}: ${resolved_value}. ${evidence || ""}`.trim(),
+            field_updated: field,
+            previous_value: rejectedValues,
+            source: "batch_review",
+            createdAt: new Date().toISOString()
+          });
+
+          resolved.push(field);
+
+          // Update summary fields if applicable
+          if (field.startsWith("charges:") && index.summary?.providers) {
+            const providerName = field.replace("charges:", "");
+            const numericValue = parseFloat(String(resolved_value).replace(/[$,]/g, ""));
+            for (const prov of index.summary.providers) {
+              if (typeof prov === "object" && prov.name &&
+                  (prov.name.toLowerCase().includes(providerName.toLowerCase()) ||
+                   providerName.toLowerCase().includes(prov.name.toLowerCase()))) {
+                const oldCharges = prov.charges;
+                prov.charges = numericValue;
+                if (!isNaN(numericValue) && index.summary.total_charges !== undefined) {
+                  const delta = numericValue - (parseFloat(String(oldCharges).replace(/[$,]/g, "")) || 0);
+                  index.summary.total_charges = index.summary.total_charges + delta;
+                }
+                break;
+              }
+            }
+          }
+          if (field === "date_of_loss" && index.summary) {
+            index.summary.dol = resolved_value;
+          }
+          if (field.startsWith("claim_numbers:") && index.summary) {
+            const claimKey = field.replace("claim_numbers:", "");
+            if (!index.summary.claim_numbers) index.summary.claim_numbers = {};
+            index.summary.claim_numbers[claimKey] = resolved_value;
+          }
+        }
+
+        index.needs_review = needsReview;
+        index.errata = errata;
+        index.case_notes = caseNotes;
+
+        await writeFile(indexPath, JSON.stringify(index, null, 2));
+
+        return JSON.stringify({
+          success: true,
+          resolved: resolved.length,
+          failed: failed.length,
+          remaining: needsReview.length,
+          resolved_fields: resolved,
+          failed_fields: failed
         });
       }
 
@@ -510,63 +632,64 @@ Do NOT use it for:
 - Reviewing existing documents
 - Simple notes or quick responses
 
-5. **Review Document Conflicts**: When the user wants to review conflicts or needs_review items, use start_document_review to get the list, then walk through each conflict one at a time, asking the user which value is correct, and use resolve_conflict to record their decision.
+5. **Review Document Conflicts**: When the user wants to review conflicts, use get_conflicts to get all items, analyze them, make recommendations, and present them in batches for approval.
 
 ## DOCUMENT REVIEW MODE
 
 Use this when the user says things like:
 - "Let's review the conflicts"
 - "Go through the needs_review items"
-- "There are discrepancies to resolve"
 - "Review document issues"
 
-### How to conduct a review:
+### How to conduct a batch review:
 
-1. **Start the review** - Call start_document_review to get all pending conflicts
+1. **Get all conflicts** - Call get_conflicts to retrieve everything
 
-2. **Present one conflict at a time** - For each item:
-   - State the field name clearly (e.g., "Charges for Desert Radiology")
-   - List ALL conflicting values with their sources
-   - If the source is a file, tell the user they can check it at the path provided
-   - Ask which value is correct, or if they want to check the document first
+2. **Analyze and categorize** - Group conflicts by:
+   - **Auto-resolve** (high confidence): OCR errors, formatting differences, clear typos
+   - **Recommend** (medium confidence): One source more authoritative than another
+   - **Needs discussion** (low confidence): Genuinely ambiguous, need user input
 
-3. **Wait for user decision** - Let them:
-   - Pick one of the values
-   - Provide a different value if none are correct
-   - Ask to see the source document (use read_file)
-   - Skip to decide later
+3. **Present in batches** - Show your recommendations grouped like:
 
-4. **Record the resolution** - Call resolve_conflict with:
-   - The exact field name from needs_review
-   - The resolved_value the user confirmed
-   - Brief evidence explaining the decision
+   **Quick Fixes (I recommend these)**
+   1. Date of Loss: "06/25/2023" (typo in one document shows 05/25)
+   2. Claim Number format: "03-52P5-85B" (just formatting difference)
+   Approve these? (yes/no/edit)
 
-5. **Continue to the next conflict** - Repeat until all are resolved
+   **Need Your Input**
+   3. Charges for Spinal Rehab: $6,558 vs $10,558 - which invoice is correct?
 
-### Example review flow:
+4. **Batch resolve** - When user approves, call batch_resolve_conflicts with all approved resolutions at once
+
+5. **Handle remaining** - For items needing discussion, work through them with the user
+
+### Example flow:
 
 User: "Let's review the conflicts"
 
-You: [call start_document_review]
+You: [call get_conflicts]
 
-You: "I found 3 conflicts to review. Let's start with the first one.
+You: "I found 26 conflicts. After analyzing them, here's my breakdown:
 
-**Conflict 1: Charges for Desert Radiology**
+**Ready to Auto-Resolve (15 items):**
+These are formatting differences, OCR errors, or clear typos where I'm confident about the correct value:
+- Date of Loss: 06/25/2023 (not 05/25 - typo in radiology doc)
+- DOB: 06/27/1984 (not 1949 or 1964 - HIPAA form errors)
+- Client name: Brenda Boerdam-Madrid (with hyphen)
+[... etc]
 
-I'm seeing two different amounts:
-- $1,234 (from Records & Bills/Desert Radiology Invoice.pdf)
-- $1,432 (from Records & Bills/Desert Radiology Statement.pdf)
+**Need Your Review (11 items):**
+- Spinal Rehab charges: $6,558 vs $10,558 - genuinely different amounts
+- Balance fields: Several show $0 vs original amount (may depend on payment timing)
 
-Which amount is correct? You can say 'show me the invoice' if you want to check the documents."
+Want me to apply the 15 auto-resolutions? Then we can discuss the remaining 11."
 
-User: "$1,234 is correct, that's from the itemized invoice"
+User: "Yes, apply them"
 
-You: [call resolve_conflict with field="charges:Desert Radiology", resolved_value="$1,234", evidence="Per itemized invoice"]
+You: [call batch_resolve_conflicts with the 15 resolutions]
 
-You: "Got it, I've recorded $1,234 as the correct amount. 2 conflicts remaining.
-
-**Conflict 2: Date of Loss**
-..."
+You: "Done! 15 resolved. Now let's look at the remaining 11..."
 
 ## GUIDELINES
 
@@ -639,13 +762,17 @@ export async function* directChat(
     } else if (event.type === "content_block_stop") {
       if (currentToolUse) {
         try {
+          // Handle empty input (tools with no parameters)
+          const parsedInput = currentToolUse.input.trim() === ""
+            ? {}
+            : JSON.parse(currentToolUse.input);
           toolUseBlocks.push({
             id: currentToolUse.id,
             name: currentToolUse.name,
-            input: JSON.parse(currentToolUse.input)
+            input: parsedInput
           });
-        } catch {
-          // Invalid JSON, skip
+        } catch (e) {
+          console.error(`Failed to parse tool input for ${currentToolUse.name}:`, e, currentToolUse.input);
         }
         currentToolUse = null;
       }
@@ -723,32 +850,118 @@ export async function* directChat(
       content: toolResults
     });
 
-    // Make follow-up call (non-streaming for simplicity after tool use)
-    const followUp = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 4096,
-      system: systemPrompt,  // Use same system prompt with context
-      messages,
-      tools: TOOLS
-    });
+    // Make follow-up call with streaming to show response incrementally
+    try {
+      const followUp = await anthropic.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages,
+        tools: TOOLS,
+        stream: true
+      });
 
-    // Extract text from follow-up
-    for (const block of followUp.content) {
-      if (block.type === "text") {
-        yield { type: "text", content: block.text };
-        fullText += block.text;
+      let followUpToolUseBlocks: Array<{ id: string; name: string; input: any }> = [];
+      let followUpCurrentToolUse: { id: string; name: string; input: string } | null = null;
+      let followUpStopReason: string | null = null;
+
+      // Stream follow-up response
+      for await (const event of followUp) {
+        if (event.type === "content_block_start") {
+          if (event.content_block.type === "tool_use") {
+            followUpCurrentToolUse = {
+              id: event.content_block.id,
+              name: event.content_block.name,
+              input: ""
+            };
+            yield { type: "tool", tool: event.content_block.name };
+          }
+        } else if (event.type === "content_block_delta") {
+          if (event.delta.type === "text_delta") {
+            fullText += event.delta.text;
+            yield { type: "text", content: event.delta.text };
+          } else if (event.delta.type === "input_json_delta" && followUpCurrentToolUse) {
+            followUpCurrentToolUse.input += event.delta.partial_json;
+          }
+        } else if (event.type === "content_block_stop") {
+          if (followUpCurrentToolUse) {
+            try {
+              // Handle empty input (tools with no parameters)
+              const parsedInput = followUpCurrentToolUse.input.trim() === ""
+                ? {}
+                : JSON.parse(followUpCurrentToolUse.input);
+              followUpToolUseBlocks.push({
+                id: followUpCurrentToolUse.id,
+                name: followUpCurrentToolUse.name,
+                input: parsedInput
+              });
+            } catch (e) {
+              console.error(`Failed to parse follow-up tool input for ${followUpCurrentToolUse.name}:`, e);
+            }
+            followUpCurrentToolUse = null;
+          }
+        } else if (event.type === "message_delta") {
+          followUpStopReason = event.delta.stop_reason;
+        }
       }
+
+      // If follow-up also wants to use tools, execute them (one more level)
+      if (followUpStopReason === "tool_use" && followUpToolUseBlocks.length > 0) {
+        const followUpToolResults: Anthropic.ToolResultBlockParam[] = [];
+
+        for (const toolUse of followUpToolUseBlocks) {
+          yield { type: "tool_executing", tool: toolUse.name };
+          const result = await executeTool(toolUse.name, toolUse.input, caseFolder);
+          followUpToolResults.push({
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: result
+          });
+        }
+
+        // Add to messages and make final call
+        messages.push({
+          role: "assistant",
+          content: [
+            ...(fullText ? [{ type: "text" as const, text: fullText }] : []),
+            ...followUpToolUseBlocks.map(t => ({
+              type: "tool_use" as const,
+              id: t.id,
+              name: t.name,
+              input: t.input
+            }))
+          ]
+        });
+        messages.push({
+          role: "user",
+          content: followUpToolResults
+        });
+
+        // Final call (non-streaming, no more tools)
+        const finalResponse = await anthropic.messages.create({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 4096,
+          system: systemPrompt,
+          messages
+        });
+
+        for (const block of finalResponse.content) {
+          if (block.type === "text") {
+            yield { type: "text", content: block.text };
+          }
+        }
+      }
+
+      yield {
+        type: "done",
+        done: true,
+        filePath: generatedFilePath
+      };
+    } catch (err) {
+      console.error("Follow-up API call failed:", err);
+      yield { type: "text", content: `\n\nError processing response: ${err}` };
+      yield { type: "done", done: true };
     }
-
-    yield {
-      type: "done",
-      done: true,
-      filePath: generatedFilePath,
-      usage: {
-        inputTokens: followUp.usage.input_tokens,
-        outputTokens: followUp.usage.output_tokens
-      }
-    };
   } else {
     yield {
       type: "done",
