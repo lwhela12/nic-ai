@@ -96,6 +96,37 @@ const TOOLS: Anthropic.Tool[] = [
       },
       required: ["document_type", "instructions"]
     }
+  },
+  {
+    name: "start_document_review",
+    description: "Start reviewing document conflicts (needs_review items). Use when the user wants to review conflicts, resolve discrepancies, or go through items that need attention. Returns the list of pending conflicts for you to walk through one by one.",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: "resolve_conflict",
+    description: "Resolve a specific conflict from needs_review. Use this after the user has reviewed a conflict and told you which value is correct. This removes the item from needs_review, adds it to errata for audit trail, and updates summary fields if applicable.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        field: {
+          type: "string",
+          description: "The field name from needs_review (e.g., 'charges:Provider Name', 'date_of_loss', 'claim_numbers:3P')"
+        },
+        resolved_value: {
+          type: "string",
+          description: "The correct value the user confirmed"
+        },
+        evidence: {
+          type: "string",
+          description: "Brief explanation of why this value is correct (e.g., 'Per original invoice', 'User confirmed from police report')"
+        }
+      },
+      required: ["field", "resolved_value"]
+    }
   }
 ];
 
@@ -174,6 +205,175 @@ async function executeTool(
 
         await writeFile(indexPath, JSON.stringify(index, null, 2));
         return `Updated ${toolInput.field_path} from "${oldValue}" to "${toolInput.value}"`;
+      }
+
+      case "start_document_review": {
+        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexContent = await readFile(indexPath, "utf-8");
+        const index = JSON.parse(indexContent);
+
+        const needsReview: any[] = index.needs_review || [];
+
+        if (needsReview.length === 0) {
+          return JSON.stringify({
+            status: "no_items",
+            message: "No conflicts to review. All items have been resolved.",
+            count: 0
+          });
+        }
+
+        // Build filename -> path lookup from folders
+        const filePathMap: Record<string, string> = {};
+        if (index.folders) {
+          for (const [folderName, folderData] of Object.entries(index.folders)) {
+            const files: any[] = Array.isArray(folderData) ? folderData : (folderData as any)?.files || [];
+            for (const file of files) {
+              if (file.filename) {
+                filePathMap[file.filename] = `${folderName}/${file.filename}`;
+              }
+            }
+          }
+        }
+
+        // Enrich items with resolved file paths
+        const enrichedItems = needsReview.map((item, idx) => {
+          const resolvedSources = (item.sources || []).map((source: string) => {
+            // Source might be "filename.pdf ($1,234)" - extract just the filename
+            const match = source.match(/^([^(]+)/);
+            const filename = match ? match[1].trim() : source.trim();
+            return {
+              original: source,
+              filename,
+              path: filePathMap[filename] || null
+            };
+          });
+
+          return {
+            index: idx + 1,
+            field: item.field,
+            conflicting_values: item.conflicting_values,
+            sources: item.sources,
+            resolved_sources: resolvedSources,
+            reason: item.reason
+          };
+        });
+
+        return JSON.stringify({
+          status: "review_started",
+          message: `Found ${needsReview.length} conflict(s) to review.`,
+          count: needsReview.length,
+          items: enrichedItems
+        });
+      }
+
+      case "resolve_conflict": {
+        const { field, resolved_value, evidence } = toolInput;
+        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexContent = await readFile(indexPath, "utf-8");
+        const index = JSON.parse(indexContent);
+
+        // Find the item in needs_review
+        const needsReview: any[] = index.needs_review || [];
+        const itemIndex = needsReview.findIndex((item: any) => item.field === field);
+
+        if (itemIndex === -1) {
+          return JSON.stringify({
+            success: false,
+            error: `Field "${field}" not found in needs_review`
+          });
+        }
+
+        const resolvedItem = needsReview[itemIndex];
+        const rejectedValues = resolvedItem.conflicting_values?.filter(
+          (v: any) => String(v) !== String(resolved_value)
+        ) || [];
+
+        // Remove from needs_review
+        needsReview.splice(itemIndex, 1);
+        index.needs_review = needsReview;
+
+        // Add to errata
+        const errata: any[] = index.errata || [];
+        const errataEntry = {
+          field,
+          decision: resolved_value,
+          rejected_values: rejectedValues,
+          evidence: evidence || "User confirmed correct value",
+          resolution_type: "user_decision",
+          resolved_at: new Date().toISOString()
+        };
+        errata.push(errataEntry);
+        index.errata = errata;
+
+        // Add to case_notes
+        let caseNotes: any[] = Array.isArray(index.case_notes) ? index.case_notes : [];
+        caseNotes.push({
+          id: `note-${Date.now()}`,
+          content: `Resolved ${field}: ${resolved_value} (was conflicting: ${rejectedValues.join(", ")}). ${evidence || ""}`.trim(),
+          field_updated: field,
+          previous_value: rejectedValues,
+          source: "chat_review",
+          createdAt: new Date().toISOString()
+        });
+        index.case_notes = caseNotes;
+
+        // Update summary fields if applicable
+        let summaryUpdated = false;
+
+        // For charges fields, update provider and total
+        if (field.startsWith("charges:") && index.summary?.providers) {
+          const providerName = field.replace("charges:", "");
+          const numericValue = parseFloat(String(resolved_value).replace(/[$,]/g, ""));
+
+          const providers = index.summary.providers;
+          if (Array.isArray(providers)) {
+            for (const prov of providers) {
+              if (typeof prov === "object" && prov.name) {
+                if (prov.name.toLowerCase().includes(providerName.toLowerCase()) ||
+                    providerName.toLowerCase().includes(prov.name.toLowerCase())) {
+                  const oldCharges = prov.charges;
+                  prov.charges = numericValue;
+
+                  if (!isNaN(numericValue) && index.summary.total_charges !== undefined) {
+                    const delta = numericValue - (parseFloat(String(oldCharges).replace(/[$,]/g, "")) || 0);
+                    index.summary.total_charges = index.summary.total_charges + delta;
+                  }
+                  summaryUpdated = true;
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        // For date_of_loss, update summary.dol
+        if (field === "date_of_loss" && index.summary) {
+          index.summary.dol = resolved_value;
+          summaryUpdated = true;
+        }
+
+        // For claim_numbers, update summary
+        if (field.startsWith("claim_numbers:") && index.summary) {
+          const claimKey = field.replace("claim_numbers:", "");
+          if (!index.summary.claim_numbers) {
+            index.summary.claim_numbers = {};
+          }
+          index.summary.claim_numbers[claimKey] = resolved_value;
+          summaryUpdated = true;
+        }
+
+        // Write updated index
+        await writeFile(indexPath, JSON.stringify(index, null, 2));
+
+        return JSON.stringify({
+          success: true,
+          field,
+          resolved_value,
+          rejected_values: rejectedValues,
+          remaining_conflicts: needsReview.length,
+          summary_updated: summaryUpdated,
+          message: `Resolved "${field}" to "${resolved_value}". ${needsReview.length} conflict(s) remaining.`
+        });
       }
 
       default:
@@ -309,6 +509,64 @@ Do NOT use it for:
 - Questions about what should go in a document
 - Reviewing existing documents
 - Simple notes or quick responses
+
+5. **Review Document Conflicts**: When the user wants to review conflicts or needs_review items, use start_document_review to get the list, then walk through each conflict one at a time, asking the user which value is correct, and use resolve_conflict to record their decision.
+
+## DOCUMENT REVIEW MODE
+
+Use this when the user says things like:
+- "Let's review the conflicts"
+- "Go through the needs_review items"
+- "There are discrepancies to resolve"
+- "Review document issues"
+
+### How to conduct a review:
+
+1. **Start the review** - Call start_document_review to get all pending conflicts
+
+2. **Present one conflict at a time** - For each item:
+   - State the field name clearly (e.g., "Charges for Desert Radiology")
+   - List ALL conflicting values with their sources
+   - If the source is a file, tell the user they can check it at the path provided
+   - Ask which value is correct, or if they want to check the document first
+
+3. **Wait for user decision** - Let them:
+   - Pick one of the values
+   - Provide a different value if none are correct
+   - Ask to see the source document (use read_file)
+   - Skip to decide later
+
+4. **Record the resolution** - Call resolve_conflict with:
+   - The exact field name from needs_review
+   - The resolved_value the user confirmed
+   - Brief evidence explaining the decision
+
+5. **Continue to the next conflict** - Repeat until all are resolved
+
+### Example review flow:
+
+User: "Let's review the conflicts"
+
+You: [call start_document_review]
+
+You: "I found 3 conflicts to review. Let's start with the first one.
+
+**Conflict 1: Charges for Desert Radiology**
+
+I'm seeing two different amounts:
+- $1,234 (from Records & Bills/Desert Radiology Invoice.pdf)
+- $1,432 (from Records & Bills/Desert Radiology Statement.pdf)
+
+Which amount is correct? You can say 'show me the invoice' if you want to check the documents."
+
+User: "$1,234 is correct, that's from the itemized invoice"
+
+You: [call resolve_conflict with field="charges:Desert Radiology", resolved_value="$1,234", evidence="Per itemized invoice"]
+
+You: "Got it, I've recorded $1,234 as the correct amount. 2 conflicts remaining.
+
+**Conflict 2: Date of Loss**
+..."
 
 ## GUIDELINES
 

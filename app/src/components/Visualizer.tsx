@@ -109,6 +109,11 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
   const [isApprovingDraft, setIsApprovingDraft] = useState(false)
   const [draftExportMenuOpen, setDraftExportMenuOpen] = useState(false)
 
+  // Bundle state
+  const [canBundle, setCanBundle] = useState(false)
+  const [isBundling, setIsBundling] = useState(false)
+  const [bundleError, setBundleError] = useState<string | null>(null)
+
   const errata: ErrataItem[] = Array.isArray(documentIndex?.errata) ? documentIndex.errata : []
   const needsReview: NeedsReviewItem[] = Array.isArray(documentIndex?.needs_review) ? documentIndex.needs_review : []
 
@@ -160,6 +165,73 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
 
     loadDraftContent()
   }, [selectedDraft, caseFolder, apiUrl])
+
+  // Check bundle status when a demand letter draft is selected
+  useEffect(() => {
+    if (!selectedDraft || !caseFolder || selectedDraft.type !== 'demand') {
+      setCanBundle(false)
+      setBundleError(null)
+      return
+    }
+
+    const checkBundleStatus = async () => {
+      try {
+        const res = await fetch(`${apiUrl}/api/docs/bundle-status?case=${encodeURIComponent(caseFolder)}`)
+        if (res.ok) {
+          const data = await res.json()
+          setCanBundle(data.canBundle)
+          if (!data.canBundle) {
+            if (!data.hasExhibits) {
+              setBundleError('No exhibits listed in manifest')
+            } else if (data.missingExhibits?.length > 0) {
+              setBundleError(`${data.missingExhibits.length} exhibit(s) missing`)
+            }
+          } else {
+            setBundleError(null)
+          }
+        }
+      } catch (err) {
+        console.error('Failed to check bundle status:', err)
+        setCanBundle(false)
+      }
+    }
+
+    checkBundleStatus()
+  }, [selectedDraft, caseFolder, apiUrl])
+
+  // Handle bundle generation
+  const handleGeneratePackage = async () => {
+    if (!caseFolder) return
+    setIsBundling(true)
+    setBundleError(null)
+
+    try {
+      const res = await fetch(`${apiUrl}/api/docs/bundle-demand`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ caseFolder }),
+      })
+
+      if (res.ok) {
+        // Download the PDF
+        const blob = await res.blob()
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = '3P Demand Package.pdf'
+        link.click()
+        URL.revokeObjectURL(url)
+      } else {
+        const error = await res.json()
+        setBundleError(error.error || 'Failed to generate package')
+      }
+    } catch (err) {
+      console.error('Failed to generate package:', err)
+      setBundleError('Failed to generate package')
+    } finally {
+      setIsBundling(false)
+    }
+  }
 
   const handleApproveDraft = async (draft: Draft, format: 'pdf' | 'docx' = 'pdf') => {
     if (!caseFolder) return
@@ -462,6 +534,28 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
                 </div>
 
                 <div className="flex-1" />
+
+                {/* Generate Package button - only for demand letter drafts */}
+                {selectedDraft.type === 'demand' && (
+                  <div className="flex flex-col items-end gap-1">
+                    <button
+                      onClick={handleGeneratePackage}
+                      disabled={isBundling || !canBundle}
+                      title={!canBundle ? (bundleError || 'Cannot bundle - no exhibits') : 'Bundle demand letter with exhibits'}
+                      className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium
+                                 bg-indigo-600 text-white hover:bg-indigo-700
+                                 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 8.25l3 3m0 0l3-3m-3 3V7.5M6.75 21h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v12a2.25 2.25 0 002.25 2.25z" />
+                      </svg>
+                      {isBundling ? 'Bundling...' : 'Generate Package'}
+                    </button>
+                    {bundleError && (
+                      <span className="text-xs text-amber-600">{bundleError}</span>
+                    )}
+                  </div>
+                )}
 
                 {/* Approve button */}
                 <button

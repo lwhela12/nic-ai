@@ -99,8 +99,68 @@ const TOOLS: Anthropic.Tool[] = [
       },
       required: ["report_type", "instructions"]
     }
+  },
+  {
+    name: "start_review",
+    description: "Start reviewing pending tasks with the user. Enters an interactive review mode where you walk through each pending todo item one by one, asking the user what action to take (complete, skip, modify, or delete).",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: "update_todo_item",
+    description: "Update a specific todo item during review mode. Use this to mark items as completed, modify their text, or delete them.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        todo_id: {
+          type: "string",
+          description: "The ID of the todo item to update"
+        },
+        action: {
+          type: "string",
+          enum: ["complete", "modify", "delete"],
+          description: "The action to take on the todo item"
+        },
+        new_text: {
+          type: "string",
+          description: "New text for the todo (only used with 'modify' action)"
+        },
+        new_priority: {
+          type: "string",
+          enum: ["high", "medium", "low"],
+          description: "New priority for the todo (optional, only used with 'modify' action)"
+        }
+      },
+      required: ["todo_id", "action"]
+    }
   }
 ];
+
+// Helper to load current todos from file
+async function loadTodos(firmRoot: string): Promise<{ updated_at: string; todos: FirmTodo[] }> {
+  const todosPath = join(firmRoot, ".pi_tool", "todos.json");
+  try {
+    const content = await readFile(todosPath, "utf-8");
+    return JSON.parse(content);
+  } catch {
+    return { updated_at: new Date().toISOString(), todos: [] };
+  }
+}
+
+// Helper to save todos to file
+async function saveTodos(firmRoot: string, todos: FirmTodo[]): Promise<void> {
+  const todosDir = join(firmRoot, ".pi_tool");
+  const todosPath = join(todosDir, "todos.json");
+  await mkdir(todosDir, { recursive: true });
+  const data = {
+    updated_at: new Date().toISOString(),
+    todos,
+  };
+  await writeFile(todosPath, JSON.stringify(data, null, 2));
+}
 
 // Execute a tool and return result
 async function executeTool(
@@ -182,6 +242,88 @@ async function executeTool(
         const instructions = toolInput.instructions;
 
         return `Report generation for "${reportType}" would be delegated to a specialized agent. Instructions: ${instructions}. (Note: Full report delegation not yet implemented - please provide the analysis directly based on the portfolio data.)`;
+      }
+
+      case "start_review": {
+        // Load current todos and return pending items for review
+        const todosData = await loadTodos(firmRoot);
+        const pendingTodos = todosData.todos.filter(t => t.status === "pending");
+
+        if (pendingTodos.length === 0) {
+          return JSON.stringify({
+            status: "no_items",
+            message: "There are no pending tasks to review.",
+            pending_count: 0
+          });
+        }
+
+        // Return the pending todos for the agent to walk through
+        return JSON.stringify({
+          status: "review_started",
+          message: `Found ${pendingTodos.length} pending task(s) to review.`,
+          pending_count: pendingTodos.length,
+          items: pendingTodos.map((t, index) => ({
+            index: index + 1,
+            id: t.id,
+            text: t.text,
+            caseRef: t.caseRef || null,
+            priority: t.priority,
+            createdAt: t.createdAt
+          }))
+        });
+      }
+
+      case "update_todo_item": {
+        const { todo_id, action, new_text, new_priority } = toolInput;
+        const todosData = await loadTodos(firmRoot);
+        const todoIndex = todosData.todos.findIndex(t => t.id === todo_id);
+
+        if (todoIndex === -1) {
+          return JSON.stringify({
+            success: false,
+            error: `Todo item with ID "${todo_id}" not found.`
+          });
+        }
+
+        const todo = todosData.todos[todoIndex];
+        let resultMessage = "";
+
+        switch (action) {
+          case "complete":
+            todosData.todos[todoIndex].status = "completed";
+            resultMessage = `Marked "${todo.text}" as completed.`;
+            break;
+          case "modify":
+            if (new_text) {
+              todosData.todos[todoIndex].text = new_text;
+            }
+            if (new_priority) {
+              todosData.todos[todoIndex].priority = new_priority as "high" | "medium" | "low";
+            }
+            resultMessage = `Updated "${todo.text}"${new_text ? ` to "${new_text}"` : ""}${new_priority ? ` with priority ${new_priority}` : ""}.`;
+            break;
+          case "delete":
+            todosData.todos.splice(todoIndex, 1);
+            resultMessage = `Deleted "${todo.text}".`;
+            break;
+          default:
+            return JSON.stringify({
+              success: false,
+              error: `Unknown action: ${action}`
+            });
+        }
+
+        // Save updated todos
+        await saveTodos(firmRoot, todosData.todos);
+
+        // Count remaining pending items
+        const remainingPending = todosData.todos.filter(t => t.status === "pending").length;
+
+        return JSON.stringify({
+          success: true,
+          message: resultMessage,
+          remaining_pending: remainingPending
+        });
       }
 
       default:
@@ -410,6 +552,8 @@ const BASE_SYSTEM_PROMPT = `You are a helpful legal assistant for a Personal Inj
 
 5. **Generate Reports**: Use generate_report to delegate formal report generation to a specialized agent.
 
+6. **Review Tasks**: Use start_review when the user wants to review their pending tasks interactively.
+
 ## WHEN TO USE get_case_details
 
 Use this tool when:
@@ -436,13 +580,55 @@ Always use high/medium/low priorities based on:
 - **Medium**: SOL 30-90 days, follow-ups needed, pending items
 - **Low**: Routine tasks, early stage cases, no urgency
 
+## REVIEW MODE
+
+When the user asks to "review tasks", "review my todos", "go through tasks", or similar, use the start_review tool to enter review mode.
+
+**In review mode:**
+1. Call start_review to get all pending tasks
+2. Present the FIRST pending item to the user with context:
+   - Show the task text and priority
+   - If it has a caseRef, mention which case it's related to
+   - Ask: "What would you like to do? (complete / skip / modify / delete)"
+3. Wait for the user's response
+4. Based on their response:
+   - **complete**: Use update_todo_item with action "complete"
+   - **skip**: Move to the next item without changes
+   - **modify**: Ask what they want to change, then use update_todo_item with action "modify"
+   - **delete**: Use update_todo_item with action "delete"
+   - **done**: Exit review mode and provide a summary
+5. After processing, present the NEXT pending item
+6. Continue until all items are reviewed or user says "done"
+7. When finished, provide a summary of changes made
+
+**Example review interaction:**
+User: "Let's review my tasks"
+Assistant: [calls start_review]
+Assistant: "Let's review your 3 pending tasks.
+
+**Task 1 of 3** [HIGH]
+Request medical records for Garcia case
+Related to: Garcia, Maria
+
+What would you like to do? (complete / skip / modify / delete)"
+
+User: "complete"
+Assistant: [calls update_todo_item with action "complete"]
+Assistant: "Done! Marked as completed.
+
+**Task 2 of 3** [MEDIUM]
+Follow up on Smith settlement offer
+
+What would you like to do? (complete / skip / modify / delete)"
+
 ## GUIDELINES
 
 - Be concise but thorough
 - Answer from the portfolio data when possible - no need for tools on simple lookups
 - Use specific case names when relevant
 - Keep responses professional and actionable
-- When generating tasks, also include the JSON in your response for display`;
+- When generating tasks, also include the JSON in your response for display
+- In review mode, present one item at a time and wait for user input before proceeding`;
 
 // Main chat function with streaming
 export async function* directFirmChat(

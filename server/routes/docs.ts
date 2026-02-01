@@ -3,6 +3,7 @@ import { readdir, readFile, writeFile, mkdir, stat, unlink } from "fs/promises";
 import { join, dirname, basename } from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import {
   markdownToHtml,
   htmlToDocx,
@@ -538,6 +539,242 @@ app.post("/approve", async (c) => {
   } catch (err) {
     console.error("Approve error:", err);
     return c.json({ error: `Approve failed: ${err}` }, 500);
+  }
+});
+
+// Exhibit interface for demand manifest
+interface Exhibit {
+  path: string;
+  date?: string;
+  description?: string;
+}
+
+// Bundle demand letter with exhibits into a single PDF package
+app.post("/bundle-demand", async (c) => {
+  const { caseFolder, firmRoot } = await c.req.json();
+
+  if (!caseFolder) {
+    return c.json({ error: "caseFolder required" }, 400);
+  }
+
+  const warnings: string[] = [];
+
+  try {
+    // 1. Read the manifest from .pi_tool/drafts/manifest.json
+    const manifestPath = join(caseFolder, ".pi_tool", "drafts", "manifest.json");
+    let manifest: Record<string, any>;
+    try {
+      const manifestContent = await readFile(manifestPath, "utf-8");
+      manifest = JSON.parse(manifestContent);
+    } catch (err) {
+      return c.json({
+        error: "Demand manifest not found. Please run /draft-demand first to generate the manifest.",
+      }, 404);
+    }
+
+    // 2. Find the demand letter entry in the manifest
+    const demandEntry = manifest["demand_letter"];
+    if (!demandEntry) {
+      return c.json({
+        error: "No demand letter found in manifest. Please run /draft-demand first.",
+      }, 404);
+    }
+
+    // 3. Read the demand letter markdown
+    const demandLetterPath = join(caseFolder, ".pi_tool", "drafts", "demand_letter.md");
+    let demandContent: string;
+    try {
+      demandContent = await readFile(demandLetterPath, "utf-8");
+    } catch (err) {
+      return c.json({
+        error: "Demand letter markdown not found at .pi_tool/drafts/demand_letter.md",
+      }, 404);
+    }
+
+    // 4. Convert demand letter to PDF using existing export logic
+    const firmInfoRoot = firmRoot || dirname(caseFolder);
+    const firmInfo = await loadFirmInfo(firmInfoRoot);
+    const templateStyles = await loadTemplateStyles(firmInfoRoot);
+
+    // Try to get client name from document index
+    let clientName: string | undefined;
+    try {
+      const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+      const indexContent = await readFile(indexPath, "utf-8");
+      const documentIndex = JSON.parse(indexContent);
+      clientName = documentIndex?.summary?.client;
+    } catch {
+      // No index, that's fine
+    }
+
+    const exportOptions: ExportOptions = {
+      documentType: "demand",
+      firmInfo: firmInfo || undefined,
+      caseName: clientName,
+      showLetterhead: true,
+      showPageNumbers: true,
+      templateStyles,
+    };
+
+    const demandHtml = markdownToHtml(demandContent, exportOptions);
+    const demandPdfBuffer = await htmlToPdf(demandHtml, "demand_letter", exportOptions);
+
+    // 5. Create the merged PDF document
+    const mergedPdf = await PDFDocument.create();
+
+    // 6. Add demand letter pages
+    const demandPdf = await PDFDocument.load(demandPdfBuffer);
+    const demandPages = await mergedPdf.copyPages(demandPdf, demandPdf.getPageIndices());
+    for (const page of demandPages) {
+      mergedPdf.addPage(page);
+    }
+
+    // 7. Create separator page with "EXHIBITS" header
+    const separatorPage = mergedPdf.addPage([612, 792]); // Letter size
+    const font = await mergedPdf.embedFont(StandardFonts.TimesRomanBold);
+    const fontSize = 24;
+    const text = "EXHIBITS";
+    const textWidth = font.widthOfTextAtSize(text, fontSize);
+    separatorPage.drawText(text, {
+      x: (612 - textWidth) / 2,
+      y: 792 / 2 + 50,
+      size: fontSize,
+      font,
+      color: rgb(0, 0, 0),
+    });
+
+    // Add a line below the header
+    separatorPage.drawLine({
+      start: { x: 156, y: 792 / 2 + 30 },
+      end: { x: 456, y: 792 / 2 + 30 },
+      thickness: 1,
+      color: rgb(0, 0, 0),
+    });
+
+    // 8. Load and append each exhibit PDF
+    const exhibits: Exhibit[] = demandEntry.exhibits || [];
+    const loadedExhibits: string[] = [];
+    const missingExhibits: string[] = [];
+
+    for (const exhibit of exhibits) {
+      const exhibitPath = join(caseFolder, exhibit.path);
+      try {
+        const exhibitBuffer = await readFile(exhibitPath);
+
+        // Only process PDF files
+        if (!exhibit.path.toLowerCase().endsWith(".pdf")) {
+          warnings.push(`Skipping non-PDF exhibit: ${exhibit.path}`);
+          continue;
+        }
+
+        const exhibitPdf = await PDFDocument.load(exhibitBuffer);
+        const exhibitPages = await mergedPdf.copyPages(exhibitPdf, exhibitPdf.getPageIndices());
+        for (const page of exhibitPages) {
+          mergedPdf.addPage(page);
+        }
+        loadedExhibits.push(exhibit.description || exhibit.path);
+      } catch (err) {
+        missingExhibits.push(exhibit.path);
+        warnings.push(`Missing exhibit file: ${exhibit.path}`);
+      }
+    }
+
+    // 9. Save the merged PDF
+    const outputPath = "3P/3P Demand Package.pdf";
+    const fullOutputPath = join(caseFolder, outputPath);
+    await mkdir(dirname(fullOutputPath), { recursive: true });
+
+    const mergedPdfBytes = await mergedPdf.save();
+    await writeFile(fullOutputPath, mergedPdfBytes);
+
+    // 10. Return the PDF for download
+    const finalPdfBuffer = Buffer.from(mergedPdfBytes);
+
+    c.header("Content-Type", "application/pdf");
+    c.header(
+      "Content-Disposition",
+      `attachment; filename="3P Demand Package.pdf"`
+    );
+
+    // Log summary
+    console.log(`[Bundle] Created demand package at ${fullOutputPath}`);
+    console.log(`[Bundle] Total pages: ${mergedPdf.getPageCount()}`);
+    console.log(`[Bundle] Exhibits included: ${loadedExhibits.length}`);
+    if (missingExhibits.length > 0) {
+      console.log(`[Bundle] Missing exhibits: ${missingExhibits.join(", ")}`);
+    }
+
+    return c.body(finalPdfBuffer);
+  } catch (err) {
+    console.error("Bundle demand error:", err);
+    return c.json({ error: `Bundle failed: ${err}` }, 500);
+  }
+});
+
+// Get bundle status - check if manifest and demand letter exist
+app.get("/bundle-status", async (c) => {
+  const caseFolder = c.req.query("case");
+
+  if (!caseFolder) {
+    return c.json({ error: "case query param required" }, 400);
+  }
+
+  try {
+    // Check for manifest
+    const manifestPath = join(caseFolder, ".pi_tool", "drafts", "manifest.json");
+    let manifest: Record<string, any> | null = null;
+    let hasManifest = false;
+    try {
+      const manifestContent = await readFile(manifestPath, "utf-8");
+      manifest = JSON.parse(manifestContent);
+      hasManifest = true;
+    } catch {
+      // No manifest
+    }
+
+    // Check for demand letter entry with exhibits
+    const demandEntry = manifest?.["demand_letter"];
+    const hasDemandLetter = !!demandEntry;
+    const hasExhibits = Array.isArray(demandEntry?.exhibits) && demandEntry.exhibits.length > 0;
+
+    // Check for demand letter markdown file
+    const demandLetterPath = join(caseFolder, ".pi_tool", "drafts", "demand_letter.md");
+    let hasDemandFile = false;
+    try {
+      await stat(demandLetterPath);
+      hasDemandFile = true;
+    } catch {
+      // File doesn't exist
+    }
+
+    // Check which exhibit files exist
+    const exhibits: Exhibit[] = demandEntry?.exhibits || [];
+    const existingExhibits: string[] = [];
+    const missingExhibits: string[] = [];
+
+    for (const exhibit of exhibits) {
+      const exhibitPath = join(caseFolder, exhibit.path);
+      try {
+        await stat(exhibitPath);
+        existingExhibits.push(exhibit.path);
+      } catch {
+        missingExhibits.push(exhibit.path);
+      }
+    }
+
+    return c.json({
+      canBundle: hasManifest && hasDemandLetter && hasDemandFile && hasExhibits,
+      hasManifest,
+      hasDemandLetter,
+      hasDemandFile,
+      hasExhibits,
+      exhibitCount: exhibits.length,
+      existingExhibitCount: existingExhibits.length,
+      missingExhibits,
+    });
+  } catch (err) {
+    console.error("Bundle status error:", err);
+    return c.json({ error: `Status check failed: ${err}` }, 500);
   }
 });
 
