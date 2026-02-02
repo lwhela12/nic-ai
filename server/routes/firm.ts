@@ -16,6 +16,12 @@ import { extractTextFromFile } from "../lib/extract";
 import { generateCaseSummary } from "../lib/case-summary";
 import { mergeToIndex, type HypergraphResult } from "../lib/merge-index";
 import { directFirmChat } from "../lib/firm-chat";
+import {
+  normalizeIndex,
+  validateIndex,
+  FILE_EXTRACTION_TOOL_SCHEMA,
+  type DocumentIndex,
+} from "../lib/index-schema";
 
 // ============================================================================
 // Usage Reporting
@@ -415,16 +421,15 @@ app.get("/cases", async (c) => {
 // FILE EXTRACTION SYSTEM - One agent per file, server-side orchestration
 // ============================================================================
 
-// System prompt for file extraction agents (Haiku)
-// Note: Text is pre-extracted server-side, so agent just analyzes provided content
+// System prompt for structured extraction (used with tool_use for schema enforcement)
 const fileExtractionSystemPrompt = `You are a document extraction agent for a Personal Injury law firm in Nevada (Muslusky Law).
 
-YOUR TASK: Analyze the provided document text and extract key information.
+YOUR TASK: Analyze the provided document text and extract key information using the extract_document tool.
 
-DOCUMENT TYPES:
+DOCUMENT TYPES (use for the "type" field):
 - intake_form: Client intake, accident details, contact info
 - lor: Letter of Representation to insurance companies
-- declaration: Insurance policy declarations page (coverage limits)
+- declaration: Insurance policy declarations page (coverage limits) - EXTRACT FULL COVERAGE DETAILS
 - medical_record: Medical treatment records, doctor notes
 - medical_bill: Bills from medical providers (charges, dates)
 - correspondence: Letters, emails with adjusters
@@ -439,43 +444,22 @@ DOCUMENT TYPES:
 - property_damage: Vehicle repair estimates, rental receipts
 - other: Anything that doesn't fit above
 
-EXTRACTION FOCUS:
-- Client name, DOB, contact info (phone, email, address)
-- Date of loss (accident date)
-- Insurance policy numbers and limits
-- Medical provider names
-- Treatment dates and charges (dollar amounts)
-- Claim numbers
-- Health insurance details (carrier, group number, member ID)
-- Any issues or gaps noted in the document
+EXTRACTION PRIORITIES:
+1. Client name, DOB, contact info (phone, email, address with street/city/state/zip)
+2. Date of loss (accident date) in MM/DD/YYYY format
+3. Insurance details - USE THE STRUCTURED FIELDS:
+   - For client's own policy (1P): use insurance_1p with carrier, policy_number, claim_number, bodily_injury, medical_payments, um_uim
+   - For at-fault party's policy (3P): use insurance_3p with carrier, policy_number, claim_number, bodily_injury, insured_name
+4. Medical provider name and charges (as numbers, not strings)
+5. Health insurance carrier, group_no, member_no
+6. Settlement/demand amounts as numbers
 
-OUTPUT FORMAT - Return ONLY valid JSON:
-{
-  "filename": "<exact filename>",
-  "folder": "<folder name>",
-  "type": "<document_type from list above>",
-  "key_info": "<2-3 sentence summary of most important information>",
-  "extracted_data": {
-    // Include any specific data points found, such as:
-    // "client_name": "...",
-    // "dob": "MM/DD/YYYY",
-    // "dol": "MM/DD/YYYY",
-    // "phone": "702-555-1234",
-    // "email": "client@email.com",
-    // "address": { "street": "123 Main St", "city": "Las Vegas", "state": "NV", "zip": "89101" },
-    // "charges": 1234.56,
-    // "provider": "...",
-    // "policy_limits": "...",
-    // "health_insurance_carrier": "...",
-    // "health_insurance_group": "...",
-    // "health_insurance_member": "...",
-    // etc.
-  }
-}
+CRITICAL FOR DECLARATION PAGES:
+- Identify if this is the client's policy (1P) or adverse party's policy (3P) based on folder name or document content
+- Extract carrier name, ALL coverage limits (BI, Med Pay, UM/UIM, PD)
+- Format limits as "$X/$Y" (per person/per accident)
 
-IMPORTANT:
-- Return ONLY the JSON object, no markdown, no explanation
-- If the text is empty or unreadable, still return the JSON with key_info explaining the issue`;
+Always call the extract_document tool with your findings.`;
 
 // System prompt for fallback when pre-extraction fails (agent reads file with tools)
 const fileExtractionSystemPromptWithTools = `You are a document extraction agent for a Personal Injury law firm in Nevada (Muslusky Law).
@@ -747,9 +731,18 @@ async function extractFile(
       model: 'haiku'
     };
 
-    // Choose prompt and options based on whether we have pre-extracted text
-    const prompt = usePreExtracted
-      ? `Extract information from this document.
+    // ========================================================================
+    // PATH 1: Pre-extracted text → Direct API with structured tool_use
+    // ========================================================================
+    if (usePreExtracted) {
+      try {
+        const response = await getClient().messages.create({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 2000,
+          system: fileExtractionSystemPrompt,
+          messages: [{
+            role: "user",
+            content: `Extract information from this document.
 
 FILENAME: ${filename}
 FOLDER: ${folder}
@@ -757,32 +750,82 @@ FOLDER: ${folder}
 DOCUMENT TEXT:
 ${extractedText}
 
-Return the JSON extraction.`
-      : `Extract information from this file: ${fullPath}
+Use the extract_document tool to return your findings.`
+          }],
+          tools: [FILE_EXTRACTION_TOOL_SCHEMA],
+          tool_choice: { type: "tool", name: "extract_document" }
+        });
 
-Use the Read tool to read the file. Then return the JSON extraction.`;
+        // Capture usage
+        usage.inputTokensNew = response.usage.input_tokens || 0;
+        usage.inputTokensCacheWrite = (response.usage as any).cache_creation_input_tokens || 0;
+        usage.inputTokensCacheRead = (response.usage as any).cache_read_input_tokens || 0;
+        usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
+        usage.outputTokens = response.usage.output_tokens || 0;
+        usage.apiCalls = 1;
 
-    const queryOptions = usePreExtracted
-      ? {
-          cwd: caseFolder,
-          systemPrompt: fileExtractionSystemPrompt,
-          model: "haiku" as const,
-          allowedTools: [] as string[],  // No tools needed - text already provided
-          permissionMode: "acceptEdits" as const,
-          maxTurns: 1,  // Single turn - just return JSON
+        // Extract tool use result
+        const toolBlock = response.content.find(block => block.type === 'tool_use');
+        if (toolBlock && toolBlock.type === 'tool_use') {
+          const extracted = toolBlock.input as {
+            type: string;
+            key_info: string;
+            extracted_data: Record<string, unknown>;
+          };
+
+          result = {
+            filename,
+            folder,
+            type: extracted.type || 'other',
+            key_info: extracted.key_info || '',
+            extracted_data: extracted.extracted_data,
+          };
         }
-      : {
-          cwd: caseFolder,
-          systemPrompt: fileExtractionSystemPromptWithTools,
-          model: "haiku" as const,
-          allowedTools: ["Bash", "Read"],
-          permissionMode: "acceptEdits" as const,
-          maxTurns: 5,  // Allow multiple turns to read file
-        };
+      } catch (apiErr) {
+        console.error(`[${fileIndex + 1}/${totalFiles}] Direct API error for ${filename}:`, apiErr);
+        result.key_info = `Extraction failed: ${apiErr instanceof Error ? apiErr.message : String(apiErr)}`;
+        result.error = apiErr instanceof Error ? apiErr.message : String(apiErr);
+      }
 
-    if (!usePreExtracted) {
-      console.log(`[${fileIndex + 1}/${totalFiles}] Using agent fallback with tools`);
+      result.usage = usage;
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(`[${fileIndex + 1}/${totalFiles}] ✓ Done: ${filename} (${elapsed}s) - ${result.type} [structured-extraction]`);
+      onProgress?.({
+        type: "file_done",
+        fileIndex,
+        totalFiles,
+        filename,
+        folder,
+        docType: result.type,
+        extractionMethod: 'structured',
+        elapsed: parseFloat(elapsed)
+      });
+      return result;
     }
+
+    // ========================================================================
+    // PATH 2: Agent fallback → SDK query() with tools for file reading
+    // ========================================================================
+    console.log(`[${fileIndex + 1}/${totalFiles}] Using agent fallback with tools`);
+
+    const prompt = `Extract information from this file: ${fullPath}
+
+Use the Read tool to read the file. Then return the JSON extraction with these fields:
+- type: document type (intake_form, lor, declaration, medical_record, medical_bill, correspondence, authorization, identification, police_report, demand, settlement, lien, balance_request, balance_confirmation, property_damage, other)
+- key_info: 2-3 sentence summary
+- extracted_data: object with any data found (client_name, dob, dol, phone, email, address, charges, provider_name, policy_limits, etc.)
+
+Return ONLY valid JSON, no markdown.`;
+
+    const queryOptions = {
+      cwd: caseFolder,
+      systemPrompt: fileExtractionSystemPromptWithTools,
+      model: "haiku" as const,
+      allowedTools: ["Bash", "Read"],
+      permissionMode: "acceptEdits" as const,
+      maxTurns: 5,
+      persistSession: false, // Prevent race condition when running concurrent extractions
+    };
 
     for await (const msg of query({
       prompt,
@@ -1324,9 +1367,18 @@ async function indexCase(
       }
     );
 
-    // Write final merged index
-    await writeFile(indexPath, JSON.stringify(mergedIndex, null, 2));
-    console.log(`[Index] Wrote merged document_index.json`);
+    // Normalize to canonical schema before writing
+    const normalizedIndex = normalizeIndex(mergedIndex);
+
+    // Validate and log any issues (non-blocking)
+    const validation = validateIndex(normalizedIndex);
+    if (!validation.valid) {
+      console.warn(`[Schema] Validation issues in ${caseName}:`, validation.issues.slice(0, 5));
+    }
+
+    // Write final normalized index
+    await writeFile(indexPath, JSON.stringify(normalizedIndex, null, 2));
+    console.log(`[Index] Wrote normalized document_index.json`);
 
     // ========== SONNET SYNTHESIS (COMMENTED OUT - replaced by parallel Haiku + programmatic merge) ==========
     // // Step 6: Sonnet reconciles and writes case summary (skip for simple incremental updates)
@@ -1556,20 +1608,25 @@ HYPERGRAPH STRUCTURE:
 - Inconsistencies = nodes in same hyperedge with different values
 
 FIELDS TO TRACK:
-1. date_of_loss - The accident date (critical - appears in many docs)
-2. date_of_birth - Client DOB
+1. date_of_loss / dol - The accident date (critical - appears in many docs)
+2. date_of_birth / dob - Client DOB
 3. client_name - Client's full name
-4. client_phone - Client phone number (primarily in intake forms)
-5. client_email - Client email address (primarily in intake forms)
-6. client_address - Client mailing address (primarily in intake forms)
-7. insurance_claim_numbers - Claim numbers (1P and 3P)
-8. policy_limits - Coverage amounts
-9. provider_charges - Group by provider name (e.g., "charges:Spinal Rehab Center")
-10. provider_balances - Outstanding balances by provider
-11. total_medical - Total medical specials
-12. health_insurance_carrier - Health insurance company name
-13. health_insurance_group - Health insurance group number
-14. health_insurance_member - Health insurance member ID
+4. client_phone / phone - Client phone number (primarily in intake forms)
+5. client_email / email - Client email address (primarily in intake forms)
+6. client_address / address - Client mailing address (primarily in intake forms)
+7. claim_number_1p - First party claim number (from insurance_1p.claim_number)
+8. claim_number_3p - Third party claim number (from insurance_3p.claim_number)
+9. policy_limits_1p - Client's own policy limits. Look for insurance_1p object with:
+   - carrier, bodily_injury, medical_payments, um_uim, property_damage
+   - Output as JSON object: {"carrier": "X", "bodily_injury": "Y", ...}
+10. policy_limits_3p - At-fault party's policy limits. Look for insurance_3p object with:
+    - carrier, bodily_injury, property_damage, insured_name
+    - Output as JSON object: {"carrier": "X", "bodily_injury": "Y", ...}
+11. provider_charges - Group by provider name (e.g., "charges:Spinal Rehab Center")
+12. provider_balances - Outstanding balances by provider
+13. total_medical - Total medical specials
+14. health_insurance - Look for health_insurance object with carrier, group_no, member_no
+    - Output as JSON object: {"carrier": "X", "group_no": "Y", "member_no": "Z"}
 
 ANALYSIS RULES:
 1. Normalize values for comparison:
@@ -1690,6 +1747,7 @@ Return ONLY the JSON hypergraph. No explanation, no planning - just the JSON obj
       allowedTools: [],
       permissionMode: "acceptEdits",
       maxTurns: 4,
+      persistSession: false, // Prevent race condition when running concurrent extractions
       ...getSDKCliOptions(),
     },
   })) {

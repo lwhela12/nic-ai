@@ -54,6 +54,15 @@ export interface ErrataItem {
   confidence: "high" | "medium" | "low";
 }
 
+// Policy limit detail structure (matches canonical schema)
+export interface PolicyLimitDetail {
+  carrier: string;
+  bodily_injury?: string;
+  medical_payments?: string;
+  um_uim?: string;
+  property_damage?: string;
+}
+
 // Final summary structure
 export interface CaseSummary {
   client: string;
@@ -61,7 +70,7 @@ export interface CaseSummary {
   dob?: string;
   providers: string[];
   total_charges: number;
-  policy_limits?: Record<string, string>;
+  policy_limits?: Record<string, PolicyLimitDetail>;
   contact?: {
     phone?: string;
     email?: string;
@@ -231,28 +240,39 @@ function buildErrata(hypergraphResult: HypergraphResult): ErrataItem[] {
 
 /**
  * Build claim_numbers object from hypergraph.
- * Attempts to identify 1P vs 3P claims.
+ * Uses new field names: claim_number_1p, claim_number_3p
+ * Falls back to legacy insurance_claim_numbers field if new fields not present.
  */
 function buildClaimNumbers(hypergraph: Record<string, HypergraphField>): Record<string, string> {
   const claims: Record<string, string> = {};
 
-  const claimField = hypergraph["insurance_claim_numbers"];
-  if (!claimField || claimField.consensus === "UNCERTAIN") {
-    return claims;
+  // Try new structured fields first
+  const claim1p = hypergraph["claim_number_1p"];
+  if (claim1p?.consensus && claim1p.consensus !== "UNCERTAIN") {
+    claims["1P"] = claim1p.consensus;
   }
 
-  // Try to categorize claims by source document names
-  for (const valueEntry of claimField.values) {
-    const value = valueEntry.value;
-    const sources = valueEntry.sources.join(" ").toLowerCase();
+  const claim3p = hypergraph["claim_number_3p"];
+  if (claim3p?.consensus && claim3p.consensus !== "UNCERTAIN") {
+    claims["3P"] = claim3p.consensus;
+  }
 
-    if (sources.includes("1p") || sources.includes("travelers") || sources.includes("medpay")) {
-      claims["1P"] = value;
-    } else if (sources.includes("3p") || sources.includes("geico")) {
-      claims["3P"] = value;
-    } else {
-      // Unknown party - just store with generic key
-      claims[`claim_${Object.keys(claims).length + 1}`] = value;
+  // Fallback to legacy field if no new fields
+  if (Object.keys(claims).length === 0) {
+    const legacyField = hypergraph["insurance_claim_numbers"];
+    if (legacyField && legacyField.consensus !== "UNCERTAIN") {
+      for (const valueEntry of legacyField.values) {
+        const value = valueEntry.value;
+        const sources = valueEntry.sources.join(" ").toLowerCase();
+
+        if (sources.includes("1p") || sources.includes("medpay")) {
+          claims["1P"] = value;
+        } else if (sources.includes("3p") || sources.includes("geico")) {
+          claims["3P"] = value;
+        } else {
+          claims[`claim_${Object.keys(claims).length + 1}`] = value;
+        }
+      }
     }
   }
 
@@ -260,35 +280,142 @@ function buildClaimNumbers(hypergraph: Record<string, HypergraphField>): Record<
 }
 
 /**
- * Build policy_limits object from hypergraph.
- * Processes ALL values even when consensus is UNCERTAIN, categorizing each by source folder.
+ * Parse a policy limits object from hypergraph consensus.
+ * Handles both JSON object strings and simple limit strings.
  */
-function buildPolicyLimits(hypergraph: Record<string, HypergraphField>): Record<string, string> {
-  const limits: Record<string, string> = {};
+function parsePolicyLimitObject(value: string): {
+  carrier?: string;
+  bodily_injury?: string;
+  medical_payments?: string;
+  um_uim?: string;
+  property_damage?: string;
+} | null {
+  if (!value || value === "UNCERTAIN") return null;
 
-  const limitsField = hypergraph["policy_limits"];
-  if (!limitsField || limitsField.values.length === 0) {
-    return limits;
+  // Try to parse as JSON object
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed === "object" && parsed !== null) {
+      return {
+        carrier: typeof parsed.carrier === "string" ? parsed.carrier : undefined,
+        bodily_injury: typeof parsed.bodily_injury === "string" ? parsed.bodily_injury : undefined,
+        medical_payments: typeof parsed.medical_payments === "string" ? parsed.medical_payments : undefined,
+        um_uim: typeof parsed.um_uim === "string" ? parsed.um_uim : undefined,
+        property_damage: typeof parsed.property_damage === "string" ? parsed.property_damage : undefined,
+      };
+    }
+  } catch {
+    // Not JSON - treat as simple limits string
   }
 
-  // Process ALL values, not just consensus - categorize by source folder/filename
-  for (const valueEntry of limitsField.values) {
-    const sources = valueEntry.sources.join(" ").toLowerCase();
+  // Simple string like "$25,000/$50,000" - put in bodily_injury
+  return {
+    carrier: "Unknown",
+    bodily_injury: value,
+  };
+}
 
-    // Categorize by source folder/filename patterns
-    if (sources.includes("1p") || sources.includes("travelers") || sources.includes("medpay") || sources.includes("mp")) {
-      limits["1P"] = valueEntry.value;
-    } else if (sources.includes("3p") || sources.includes("geico") || sources.includes("pure") || sources.includes("adverse")) {
-      limits["3P"] = valueEntry.value;
-    } else {
-      // Fallback - if only one value and can't categorize, assume 3P (most common case)
-      if (limitsField.values.length === 1) {
-        limits["3P"] = valueEntry.value;
+/**
+ * Build policy_limits object from hypergraph.
+ * Uses new field names: policy_limits_1p, policy_limits_3p
+ * Falls back to legacy policy_limits field if new fields not present.
+ */
+function buildPolicyLimits(hypergraph: Record<string, HypergraphField>): Record<string, {
+  carrier: string;
+  bodily_injury?: string;
+  medical_payments?: string;
+  um_uim?: string;
+  property_damage?: string;
+}> {
+  const limits: Record<string, {
+    carrier: string;
+    bodily_injury?: string;
+    medical_payments?: string;
+    um_uim?: string;
+    property_damage?: string;
+  }> = {};
+
+  // Try new structured fields first
+  const limits1p = hypergraph["policy_limits_1p"];
+  if (limits1p?.consensus && limits1p.consensus !== "UNCERTAIN") {
+    const parsed = parsePolicyLimitObject(limits1p.consensus);
+    if (parsed) {
+      limits["1P"] = { carrier: parsed.carrier || "Unknown", ...parsed };
+    }
+  }
+
+  const limits3p = hypergraph["policy_limits_3p"];
+  if (limits3p?.consensus && limits3p.consensus !== "UNCERTAIN") {
+    const parsed = parsePolicyLimitObject(limits3p.consensus);
+    if (parsed) {
+      limits["3P"] = { carrier: parsed.carrier || "Unknown", ...parsed };
+    }
+  }
+
+  // Fallback to legacy policy_limits field if no new fields
+  if (Object.keys(limits).length === 0) {
+    const legacyField = hypergraph["policy_limits"];
+    if (legacyField && legacyField.values.length > 0) {
+      for (const valueEntry of legacyField.values) {
+        const sources = valueEntry.sources.join(" ").toLowerCase();
+        const parsed = parsePolicyLimitObject(valueEntry.value);
+        if (!parsed) continue;
+
+        if (sources.includes("1p") || sources.includes("medpay") || sources.includes("mp")) {
+          limits["1P"] = { carrier: parsed.carrier || "Unknown", ...parsed };
+        } else if (sources.includes("3p") || sources.includes("geico") || sources.includes("adverse")) {
+          limits["3P"] = { carrier: parsed.carrier || "Unknown", ...parsed };
+        } else if (legacyField.values.length === 1) {
+          limits["3P"] = { carrier: parsed.carrier || "Unknown", ...parsed };
+        }
       }
     }
   }
 
   return limits;
+}
+
+/**
+ * Build health_insurance object from hypergraph.
+ * Uses new structured health_insurance field or falls back to individual fields.
+ */
+function buildHealthInsurance(hypergraph: Record<string, HypergraphField>): {
+  carrier?: string;
+  group_no?: string;
+  member_no?: string;
+} | undefined {
+  // Try new structured field first
+  const hiField = hypergraph["health_insurance"];
+  if (hiField?.consensus && hiField.consensus !== "UNCERTAIN") {
+    try {
+      const parsed = JSON.parse(hiField.consensus);
+      if (typeof parsed === "object" && parsed !== null) {
+        const result: { carrier?: string; group_no?: string; member_no?: string } = {};
+        if (typeof parsed.carrier === "string") result.carrier = parsed.carrier;
+        if (typeof parsed.group_no === "string") result.group_no = parsed.group_no;
+        if (typeof parsed.member_no === "string") result.member_no = parsed.member_no;
+        if (Object.keys(result).length > 0) return result;
+      }
+    } catch {
+      // Not JSON - treat as carrier name only
+      return { carrier: hiField.consensus };
+    }
+  }
+
+  // Fallback to legacy individual fields
+  const getConsensus = (field: string): string | undefined => {
+    const f = hypergraph[field];
+    if (!f || f.consensus === "UNCERTAIN") return undefined;
+    return f.consensus;
+  };
+
+  const carrier = getConsensus("health_insurance_carrier");
+  const group_no = getConsensus("health_insurance_group");
+  const member_no = getConsensus("health_insurance_member");
+
+  if (!carrier && !group_no && !member_no) return undefined;
+
+  return { carrier, group_no, member_no };
 }
 
 /**
@@ -328,21 +455,17 @@ export function mergeToIndex(
   // Build summary object
   const summary: CaseSummary = {
     client: getConsensus("client_name", "Unknown"),
-    dol: getConsensus("date_of_loss", "Unknown"),
-    dob: getConsensus("date_of_birth") || undefined,
+    dol: getConsensus("date_of_loss") || getConsensus("dol", "Unknown"),
+    dob: getConsensus("date_of_birth") || getConsensus("dob") || undefined,
     providers: extractProviders(hg),
     total_charges: calculateTotalCharges(hg),
     policy_limits: buildPolicyLimits(hg),
     contact: {
-      phone: getConsensus("client_phone") || undefined,
-      email: getConsensus("client_email") || undefined,
-      address: parseAddress(getConsensus("client_address"))
+      phone: getConsensus("client_phone") || getConsensus("phone") || undefined,
+      email: getConsensus("client_email") || getConsensus("email") || undefined,
+      address: parseAddress(getConsensus("client_address") || getConsensus("address"))
     },
-    health_insurance: {
-      carrier: getConsensus("health_insurance_carrier") || undefined,
-      group_no: getConsensus("health_insurance_group") || undefined,
-      member_no: getConsensus("health_insurance_member") || undefined
-    },
+    health_insurance: buildHealthInsurance(hg),
     claim_numbers: buildClaimNumbers(hg),
     case_summary: caseSummaryResult.case_summary
   };
@@ -351,7 +474,7 @@ export function mergeToIndex(
   if (!summary.contact?.phone && !summary.contact?.email && !summary.contact?.address?.street) {
     delete summary.contact;
   }
-  if (!summary.health_insurance?.carrier && !summary.health_insurance?.group_no && !summary.health_insurance?.member_no) {
+  if (!summary.health_insurance) {
     delete summary.health_insurance;
   }
   if (Object.keys(summary.claim_numbers || {}).length === 0) {

@@ -481,6 +481,7 @@ USER REQUEST: `;
                 allowedTools: [],
                 permissionMode: "acceptEdits",
                 maxTurns: 1,
+                persistSession: false, // No need to persist one-shot recovery queries
                 ...getSDKCliOptions(),
               },
             })) {
@@ -886,6 +887,7 @@ SUMMARY:`;
         allowedTools: [],
         permissionMode: "acceptEdits",
         maxTurns: 1,
+        persistSession: false, // No need to persist one-shot summarization queries
         ...getSDKCliOptions(),
       },
     })) {
@@ -1050,6 +1052,7 @@ app.post("/history/archive", async (c) => {
           allowedTools: [],
           permissionMode: "acceptEdits",
           maxTurns: 1,
+          persistSession: false, // No need to persist one-shot archive queries
           ...getSDKCliOptions(),
         },
       })) {
