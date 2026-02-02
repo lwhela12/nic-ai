@@ -70,7 +70,8 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
     if (!documentIndex?.needs_review) return reviewMap
 
     for (const item of documentIndex.needs_review) {
-      for (const source of item.sources) {
+      const sources = Array.isArray(item.sources) ? item.sources : []
+      for (const source of sources) {
         // Extract filename from source string like "MRB Spinal Rehab Center.PDF (itemized bill)"
         const filename = source.replace(/\s*\([^)]*\)\s*$/, '').trim()
         reviewMap.set(filename.toLowerCase(), item)
