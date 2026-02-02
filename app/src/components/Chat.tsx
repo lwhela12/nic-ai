@@ -647,7 +647,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                   return updated
                 })
                 // Check if index-modifying tools were used
-                const indexTools = ['Edit', 'Bash', 'update_index', 'write_file']
+                const indexTools = ['Edit', 'Bash', 'update_index', 'write_file', 'resolve_conflict', 'batch_resolve_conflicts']
                 if (toolsUsed.some(t => indexTools.some(it => t.includes(it))) && onIndexMayHaveChanged) {
                   onIndexMayHaveChanged()
                 }

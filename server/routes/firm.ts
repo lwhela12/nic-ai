@@ -3,8 +3,8 @@ import { streamSSE } from "hono/streaming";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import Anthropic from "@anthropic-ai/sdk";
 
-// CLI path for Claude Agent SDK (set by Electron in production)
-const claudeCodeCliPath = process.env.CLAUDE_CODE_CLI_PATH;
+// SDK CLI options helper - handles both direct and npx modes
+import { getSDKCliOptions } from "../lib/sdk-cli-options";
 import { readdir, readFile, stat, writeFile, mkdir } from "fs/promises";
 import { readFileSync, existsSync } from "fs";
 import { join, relative, dirname } from "path";
@@ -788,7 +788,7 @@ Use the Read tool to read the file. Then return the JSON extraction.`;
       prompt,
       options: {
         ...queryOptions,
-        pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
+        ...getSDKCliOptions(),
       },
     })) {
       // Log all message types for debugging
@@ -1690,7 +1690,7 @@ Return ONLY the JSON hypergraph. No explanation, no planning - just the JSON obj
       allowedTools: [],
       permissionMode: "acceptEdits",
       maxTurns: 4,
-      pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
+      ...getSDKCliOptions(),
     },
   })) {
     console.log(`[Hypergraph] Message type: ${msg.type}`);
@@ -2011,7 +2011,7 @@ USER QUESTION: `;
           allowedTools: [], // Read-only - no tools needed
           permissionMode: "acceptEdits",
           maxTurns: 5,
-          pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
+          ...getSDKCliOptions(),
         },
       })) {
         // Capture session ID

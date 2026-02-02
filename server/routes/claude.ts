@@ -4,8 +4,8 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFile, appendFile, writeFile, mkdir } from "fs/promises";
 import { readFileSync as readFileSyncFs, existsSync as existsSyncFs } from "fs";
 
-// CLI path for Claude Agent SDK (set by Electron in production)
-const claudeCodeCliPath = process.env.CLAUDE_CODE_CLI_PATH;
+// SDK CLI options helper - handles both direct and npx modes
+import { getSDKCliOptions } from "../lib/sdk-cli-options";
 
 import { join, dirname } from "path";
 import { homedir } from "os";
@@ -301,7 +301,7 @@ USER REQUEST: `;
           allowedTools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "Task"],
           permissionMode: "acceptEdits",
           maxTurns: 15, // Allow more turns for Task spawning
-          pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
+          ...getSDKCliOptions(),
 
           // Path boundary enforcement - reject file operations outside the case folder
           canUseTool: async (toolName: string, input: unknown) => {
@@ -481,7 +481,7 @@ USER REQUEST: `;
                 allowedTools: [],
                 permissionMode: "acceptEdits",
                 maxTurns: 1,
-                pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
+                ...getSDKCliOptions(),
               },
             })) {
               if (msg.type === "assistant") {
@@ -671,7 +671,7 @@ app.post("/determine-phase", async (c) => {
           allowedTools: ["Read", "Write"],
           permissionMode: "acceptEdits",
           maxTurns: 3,
-          pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
+          ...getSDKCliOptions(),
         },
       })) {
         if (msg.type === "assistant") {
@@ -800,7 +800,7 @@ Be precise and follow the user's corrections.`;
           allowedTools: ["Read", "Write", "Bash"],
           permissionMode: "acceptEdits",
           maxTurns: 5,
-          pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
+          ...getSDKCliOptions(),
         },
       })) {
         if (msg.type === "assistant") {
@@ -886,7 +886,7 @@ SUMMARY:`;
         allowedTools: [],
         permissionMode: "acceptEdits",
         maxTurns: 1,
-        pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
+        ...getSDKCliOptions(),
       },
     })) {
       if (msg.type === "assistant") {
@@ -1050,7 +1050,7 @@ app.post("/history/archive", async (c) => {
           allowedTools: [],
           permissionMode: "acceptEdits",
           maxTurns: 1,
-          pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
+          ...getSDKCliOptions(),
         },
       })) {
         if (msg.type === "assistant") {

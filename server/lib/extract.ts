@@ -2,7 +2,30 @@ import mammoth from "mammoth";
 import { readFile } from "fs/promises";
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
-import pdfParse from "pdf-parse";
+import { exec } from "child_process";
+import { promisify } from "util";
+import { existsSync } from "fs";
+import { join } from "path";
+
+const execAsync = promisify(exec);
+
+/**
+ * Get the path to pdftotext executable.
+ * In production (Electron), uses bundled version from resources.
+ * In dev, uses system pdftotext from PATH.
+ */
+function getPdftotextPath(): string {
+  // Check for bundled version (Electron production)
+  const resourcesPath = process.env.RESOURCES_PATH;
+  if (resourcesPath) {
+    const bundledPath = join(resourcesPath, "tools", "pdftotext", "pdftotext.exe");
+    if (existsSync(bundledPath)) {
+      return `"${bundledPath}"`;
+    }
+  }
+  // Fall back to system pdftotext
+  return "pdftotext";
+}
 
 /**
  * Extracted style information from a DOCX file.
@@ -38,25 +61,35 @@ export interface DocxStyles {
 }
 
 /**
- * Extract text content from a PDF file using pdf-parse.
+ * Extract text content from a PDF file using pdftotext (poppler).
  * For scanned/image PDFs, returns empty string to trigger agent fallback
  * (which uses Claude's vision for better accuracy than OCR).
  */
 export async function extractTextFromPdf(filePath: string): Promise<string> {
   try {
-    const dataBuffer = await readFile(filePath);
-    const data = await pdfParse(dataBuffer);
-    const text = data.text.trim();
+    // Use pdftotext from poppler-utils (bundled or system)
+    // -layout preserves the physical layout of the text
+    // "-" outputs to stdout
+    // Normalize path to forward slashes - backslashes get mangled by shell escaping
+    const normalizedPath = filePath.replace(/\\/g, '/');
+    const pdftotextCmd = getPdftotextPath();
+    const { stdout } = await execAsync(`${pdftotextCmd} -layout "${normalizedPath}" -`, {
+      timeout: 30000, // 30 second timeout
+      maxBuffer: 10 * 1024 * 1024, // 10MB buffer for large PDFs
+    });
+
+    const text = stdout.trim();
 
     if (text.length > 50) {
       return text;
     }
     // Text too short - likely a scanned PDF, return empty to trigger agent fallback
-    console.log(`[Extract] pdf-parse returned only ${text.length} chars, deferring to agent`);
+    console.log(`[Extract] pdftotext returned only ${text.length} chars, deferring to agent`);
     return '';
   } catch (e) {
-    // pdf-parse failed, return empty to trigger agent fallback
-    console.log(`[Extract] pdf-parse failed for ${filePath}, deferring to agent`);
+    // pdftotext failed (not installed or PDF issue), return empty to trigger agent fallback
+    const errorMsg = e instanceof Error ? e.message : String(e);
+    console.log(`[Extract] pdftotext failed for ${filePath}: ${errorMsg.slice(0, 100)}`);
     return '';
   }
 }

@@ -3,8 +3,8 @@ import { streamSSE } from "hono/streaming";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import Anthropic from "@anthropic-ai/sdk";
 
-// CLI path for Claude Agent SDK (set by Electron in production)
-const claudeCodeCliPath = process.env.CLAUDE_CODE_CLI_PATH;
+// SDK CLI options helper - handles both direct and npx modes
+import { getSDKCliOptions } from "../lib/sdk-cli-options";
 import { readdir, readFile, writeFile, mkdir, copyFile, unlink, stat } from "fs/promises";
 import { join, dirname, basename, extname } from "path";
 import { extractTextFromPdf, extractTextFromDocx, extractStylesFromDocx, DocxStyles } from "../lib/extract";
@@ -335,7 +335,7 @@ ${knowledgeContext}`;
           allowedTools: [],
           permissionMode: "acceptEdits",
           maxTurns: 3,
-          pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
+          ...getSDKCliOptions(),
         },
       })) {
         if (msg.type === "assistant") {

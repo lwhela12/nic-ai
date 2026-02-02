@@ -143,7 +143,7 @@ const TOOLS: Anthropic.Tool[] = [
           items: {
             type: "object",
             properties: {
-              field: { type: "string", description: "The field name from needs_review" },
+              field: { type: "string", description: "The EXACT field name from needs_review (e.g., 'insurance_claim_numbers', 'total_medical', 'charges:Provider Name')" },
               resolved_value: { type: "string", description: "The correct value" },
               evidence: { type: "string", description: "Brief explanation" }
             },
@@ -162,7 +162,7 @@ const TOOLS: Anthropic.Tool[] = [
       properties: {
         field: {
           type: "string",
-          description: "The field name from needs_review (e.g., 'charges:Provider Name', 'date_of_loss', 'claim_numbers:3P')"
+          description: "The EXACT field name from needs_review. Common fields: 'insurance_claim_numbers', 'total_medical', 'date_of_loss', 'date_of_birth', 'client_name', 'policy_limits'. For provider charges: 'charges:Provider Name'"
         },
         resolved_value: {
           type: "string",
@@ -404,12 +404,15 @@ async function executeTool(
         await writeFile(indexPath, JSON.stringify(index, null, 2));
 
         return JSON.stringify({
-          success: true,
+          success: resolved.length > 0,
           resolved: resolved.length,
           failed: failed.length,
           remaining: needsReview.length,
           resolved_fields: resolved,
-          failed_fields: failed
+          failed_fields: failed,
+          message: failed.length > 0
+            ? `WARNING: ${failed.length} field(s) not found in needs_review: ${failed.join(', ')}. Make sure to use exact field names from get_conflicts.`
+            : `Successfully resolved ${resolved.length} conflicts`
         });
       }
 

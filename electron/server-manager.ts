@@ -6,6 +6,7 @@ import { existsSync } from "fs";
 export interface ServerManagerOptions {
   isDev: boolean;
   resourcesPath: string;
+  cliCommand?: string; // 'claude' or 'npx @anthropic-ai/claude-code'
 }
 
 export class ServerManager {
@@ -86,11 +87,22 @@ export class ServerManager {
       CLAUDE_PI_SERVER: "https://claude-pi-five.vercel.app",
     };
 
+    // Pass the working CLI command to the server
+    // This is used by the Agent SDK to spawn Claude Code processes
+    if (this.options.cliCommand) {
+      env.CLAUDE_CLI_COMMAND = this.options.cliCommand;
+      console.log(`[ServerManager] CLI command: ${this.options.cliCommand}`);
+    }
+
     if (!this.options.isDev) {
       // In production, set paths to bundled resources
+      env.RESOURCES_PATH = this.options.resourcesPath;
       env.ELECTRON_FRONTEND_PATH = join(this.options.resourcesPath, "frontend");
       env.AGENT_PROMPT_PATH = join(this.options.resourcesPath, "agent");
-      env.CLAUDE_CODE_CLI_PATH = join(this.options.resourcesPath, "claude-agent-sdk", "cli.js");
+      // Only set CLI path if not using npx (npx handles its own resolution)
+      if (this.options.cliCommand && !this.options.cliCommand.includes("npx")) {
+        env.CLAUDE_CODE_CLI_PATH = join(this.options.resourcesPath, "claude-agent-sdk", "cli.js");
+      }
       // Production mode for auth
       env.NODE_ENV = "production";
     }

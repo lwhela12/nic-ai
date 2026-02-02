@@ -82,6 +82,10 @@
         "from": "server/node_modules/@anthropic-ai/claude-agent-sdk/",
         "to": "claude-agent-sdk/",
         "filter": ["cli.js", "*.wasm", "vendor/**/*"]
+      },
+      {
+        "from": "tools/pdftotext/",
+        "to": "tools/pdftotext/"
       }
     ],
     "mac": {

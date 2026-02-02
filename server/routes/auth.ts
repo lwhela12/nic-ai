@@ -13,9 +13,11 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const SUBSCRIPTION_SERVER =
   process.env.CLAUDE_PI_SERVER || "https://api.claude-pi.com";
 
-// Dev mode flag
-const DEV_MODE =
-  process.env.DEV_MODE === "true" || process.env.NODE_ENV !== "production";
+// Dev mode flag - must match middleware/auth.ts logic
+// Electron sets ELECTRON_FRONTEND_PATH, so we're only in dev mode when running directly with bun
+const IS_ELECTRON = !!process.env.ELECTRON_FRONTEND_PATH;
+const DEV_MODE = !IS_ELECTRON &&
+  (process.env.DEV_MODE === "true" || process.env.NODE_ENV !== "production");
 
 interface Config {
   authToken?: string;
