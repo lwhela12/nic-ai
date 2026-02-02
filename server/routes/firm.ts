@@ -2,6 +2,9 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import Anthropic from "@anthropic-ai/sdk";
+
+// CLI path for Claude Agent SDK (set by Electron in production)
+const claudeCodeCliPath = process.env.CLAUDE_CODE_CLI_PATH;
 import { readdir, readFile, stat, writeFile, mkdir } from "fs/promises";
 import { readFileSync, existsSync } from "fs";
 import { join, relative, dirname } from "path";
@@ -67,10 +70,15 @@ async function reportUsage(tokensUsed: number, requestType: string): Promise<voi
 }
 
 // Lazy client creation - API key is set by auth middleware before requests
+// Web shim (imported in server/index.ts) handles runtime selection
 let _anthropic: Anthropic | null = null;
 function getClient(): Anthropic {
   if (!_anthropic) {
-    _anthropic = new Anthropic();
+    // Explicitly pass API key - env var reading may not work in bundled binary
+    _anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      fetch: globalThis.fetch.bind(globalThis),
+    });
   }
   return _anthropic;
 }
@@ -778,7 +786,10 @@ Use the Read tool to read the file. Then return the JSON extraction.`;
 
     for await (const msg of query({
       prompt,
-      options: queryOptions,
+      options: {
+        ...queryOptions,
+        pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
+      },
     })) {
       // Log all message types for debugging
       const msgAny = msg as any;
@@ -1679,6 +1690,7 @@ Return ONLY the JSON hypergraph. No explanation, no planning - just the JSON obj
       allowedTools: [],
       permissionMode: "acceptEdits",
       maxTurns: 4,
+      pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
     },
   })) {
     console.log(`[Hypergraph] Message type: ${msg.type}`);
@@ -1999,6 +2011,7 @@ USER QUESTION: `;
           allowedTools: [], // Read-only - no tools needed
           permissionMode: "acceptEdits",
           maxTurns: 5,
+          pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
         },
       })) {
         // Capture session ID

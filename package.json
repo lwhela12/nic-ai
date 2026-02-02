@@ -13,8 +13,9 @@
     "build:frontend": "cd app && npm run build",
     "build:server": "cd server && bun build index.ts --outdir ../dist --target bun",
     "build:server-exe": "cd server && bun build index.ts --compile --outfile ../dist-server/claude-pi-server",
-    "build:electron": "cd electron && npx tsc",
+    "build:electron": "cd electron && npx tsc && cd .. && echo {\"type\":\"commonjs\"} > dist-electron/package.json",
     "build:all": "npm run build:frontend && npm run build:server-exe && npm run build:electron",
+    "build:icons": "node scripts/generate-icons.mjs",
     "start": "bun run dist/index.js",
     "electron:dev": "npm run build:all && electron .",
     "electron:build": "npm run build:all && electron-builder",
@@ -47,14 +48,22 @@
     "concurrently": "^8.2.2"
   },
   "devDependencies": {
+    "@trysound/sax": "^0.2.0",
     "electron": "^33.0.0",
-    "electron-builder": "^25.0.0"
+    "electron-builder": "^25.0.0",
+    "electron-icon-builder": "^2.0.1",
+    "sharp": "^0.34.5"
   },
   "build": {
     "appId": "com.claudepi.app",
     "productName": "Claude PI",
+    "directories": {
+      "app": ".",
+      "output": "dist"
+    },
     "files": [
-      "dist-electron/**/*"
+      "dist-electron/**/*",
+      "package.json"
     ],
     "extraResources": [
       {
@@ -68,6 +77,11 @@
       {
         "from": "agent/",
         "to": "agent/"
+      },
+      {
+        "from": "server/node_modules/@anthropic-ai/claude-agent-sdk/",
+        "to": "claude-agent-sdk/",
+        "filter": ["cli.js", "*.wasm", "vendor/**/*"]
       }
     ],
     "mac": {
@@ -75,7 +89,7 @@
         "dmg",
         "zip"
       ],
-      "icon": "build/icon.icns",
+      "icon": "build/icons/mac/icon.icns",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
@@ -86,8 +100,8 @@
         "nsis",
         "portable"
       ],
-      "icon": "build/icon.ico"
-    },
-    "afterSign": "scripts/notarize.js"
+      "icon": "build/icons/win/icon.ico",
+      "signAndEditExecutable": false
+    }
   }
 }

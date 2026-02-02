@@ -2,15 +2,23 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import Anthropic from "@anthropic-ai/sdk";
+
+// CLI path for Claude Agent SDK (set by Electron in production)
+const claudeCodeCliPath = process.env.CLAUDE_CODE_CLI_PATH;
 import { readdir, readFile, writeFile, mkdir, copyFile, unlink, stat } from "fs/promises";
 import { join, dirname, basename, extname } from "path";
 import { extractTextFromPdf, extractTextFromDocx, extractStylesFromDocx, DocxStyles } from "../lib/extract";
 
 // Lazy client creation - API key is set by auth middleware before requests
+// Web shim (imported in server/index.ts) handles runtime selection
 let _anthropic: Anthropic | null = null;
 function getClient(): Anthropic {
   if (!_anthropic) {
-    _anthropic = new Anthropic();
+    // Explicitly pass API key - env var reading may not work in bundled binary
+    _anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      fetch: globalThis.fetch.bind(globalThis),
+    });
   }
   return _anthropic;
 }
@@ -327,6 +335,7 @@ ${knowledgeContext}`;
           allowedTools: [],
           permissionMode: "acceptEdits",
           maxTurns: 3,
+          pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
         },
       })) {
         if (msg.type === "assistant") {

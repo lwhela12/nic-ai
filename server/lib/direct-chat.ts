@@ -14,11 +14,29 @@ import { readFile, writeFile } from "fs/promises";
 import { join, dirname } from "path";
 import { generateDocument, type DocumentType } from "./doc-agent";
 
-// Lazy client creation - API key is set by auth middleware before requests
+// Client creation - recreated when API key changes
+// Web shim (imported in server/index.ts) handles runtime selection
 let _anthropic: Anthropic | null = null;
+let _lastApiKey: string | undefined = undefined;
+
 function getClient(): Anthropic {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+
+  // Recreate client if API key changed (e.g., was undefined, now set by auth)
+  if (_anthropic && _lastApiKey !== apiKey) {
+    _anthropic = null;
+  }
+
   if (!_anthropic) {
-    _anthropic = new Anthropic();
+    if (!apiKey) {
+      throw new Error("ANTHROPIC_API_KEY is not set. Auth middleware may have been bypassed.");
+    }
+
+    _anthropic = new Anthropic({
+      apiKey: apiKey,
+      fetch: globalThis.fetch.bind(globalThis),
+    });
+    _lastApiKey = apiKey;
   }
   return _anthropic;
 }
@@ -734,7 +752,7 @@ export async function* directChat(
   });
 
   // Initial API call - context is in system prompt, available on every turn
-  let response = await getClient().messages.create({
+  const response = await getClient().messages.create({
     model: "claude-haiku-4-5-20251001",
     max_tokens: 4096,
     system: systemPrompt,

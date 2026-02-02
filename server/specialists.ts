@@ -9,6 +9,9 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFile } from "fs/promises";
 import { join, dirname } from "path";
 
+// CLI path for Claude Agent SDK (set by Electron in production)
+const claudeCodeCliPath = process.env.CLAUDE_CODE_CLI_PATH;
+
 // Load specialist prompts from command files
 async function loadPrompt(name: string): Promise<string> {
   const path = join(import.meta.dir, "../.claude/commands", `${name}.md`);
@@ -130,6 +133,7 @@ export async function draftDemand(
         allowedTools: ["Read", "Write", "Glob", "Grep", "Bash"],
         permissionMode: "acceptEdits",
         maxTurns: 20,
+        pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
       },
     })) {
       if (msg.type === "assistant") {
@@ -186,6 +190,7 @@ export async function generateMemo(
         allowedTools: ["Read", "Write"],
         permissionMode: "acceptEdits",
         maxTurns: 10,
+        pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
       },
     })) {
       if (msg.type === "assistant") {
@@ -242,6 +247,7 @@ export async function calculateSettlement(
         allowedTools: ["Read", "Write", "Glob", "Grep", "Bash"],
         permissionMode: "acceptEdits",
         maxTurns: 15,
+        pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
       },
     })) {
       if (msg.type === "assistant") {
@@ -298,6 +304,7 @@ export async function analyzeGaps(
         allowedTools: ["Read", "Write", "Glob", "Grep", "Bash"],
         permissionMode: "acceptEdits",
         maxTurns: 10,
+        pathToClaudeCodeExecutable: claudeCodeCliPath || undefined,
       },
     })) {
       if (msg.type === "assistant") {

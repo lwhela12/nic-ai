@@ -1,3 +1,7 @@
+// CRITICAL: Must be first import - forces web runtime for Anthropic SDK
+// This fixes "getDefaultAgent is not a function" error in Bun bundled builds
+import "./shim";
+
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serveStatic } from "hono/bun";

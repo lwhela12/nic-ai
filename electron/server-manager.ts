@@ -70,7 +70,8 @@ export class ServerManager {
       return join(this.options.resourcesPath, "..", "server", "index.ts");
     } else {
       // In production, use the compiled executable
-      return join(this.options.resourcesPath, "server", "claude-pi-server");
+      const exe = process.platform === "win32" ? ".exe" : "";
+      return join(this.options.resourcesPath, "server", `claude-pi-server${exe}`);
     }
   }
 
@@ -89,6 +90,7 @@ export class ServerManager {
       // In production, set paths to bundled resources
       env.ELECTRON_FRONTEND_PATH = join(this.options.resourcesPath, "frontend");
       env.AGENT_PROMPT_PATH = join(this.options.resourcesPath, "agent");
+      env.CLAUDE_CODE_CLI_PATH = join(this.options.resourcesPath, "claude-agent-sdk", "cli.js");
       // Production mode for auth
       env.NODE_ENV = "production";
     }

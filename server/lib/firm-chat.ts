@@ -11,10 +11,15 @@ import { readFile, writeFile, readdir, mkdir } from "fs/promises";
 import { join } from "path";
 
 // Lazy client creation - API key is set by auth middleware before requests
+// Web shim (imported in server/index.ts) handles runtime selection
 let _anthropic: Anthropic | null = null;
 function getClient(): Anthropic {
   if (!_anthropic) {
-    _anthropic = new Anthropic();
+    // Explicitly pass API key - env var reading may not work in bundled binary
+    _anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      fetch: globalThis.fetch.bind(globalThis),
+    });
   }
   return _anthropic;
 }

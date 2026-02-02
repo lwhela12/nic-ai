@@ -3,13 +3,14 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
-// Dev mode bypasses auth entirely
-const DEV_MODE =
-  process.env.DEV_MODE === "true" || process.env.NODE_ENV !== "production";
+// Electron production sets ELECTRON_FRONTEND_PATH - if present, always production
+// Dev mode is ONLY for running server directly with `bun run`
+const IS_ELECTRON = !!process.env.ELECTRON_FRONTEND_PATH;
+const DEV_MODE = !IS_ELECTRON &&
+  (process.env.DEV_MODE === "true" || process.env.NODE_ENV !== "production");
 
 // Log auth mode at startup
 console.log(`[auth] Mode: ${DEV_MODE ? "DEV (auth bypassed)" : "PRODUCTION"}`);
-console.log(`[auth] DEV_MODE env: ${process.env.DEV_MODE}, NODE_ENV: ${process.env.NODE_ENV}`);
 
 // Config file location
 const CONFIG_DIR = process.env.CLAUDE_PI_CONFIG_DIR || join(homedir(), ".claude-pi");
@@ -83,8 +84,10 @@ function isWithinGracePeriod(config: Config): boolean {
 async function validateSubscription(
   authToken: string
 ): Promise<{ anthropicApiKey: string; subscriptionStatus: string; expiresAt: string } | null> {
+  const url = `${SUBSCRIPTION_SERVER}/v1/auth/validate`;
+
   try {
-    const response = await fetch(`${SUBSCRIPTION_SERVER}/v1/auth/validate`, {
+    const response = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -111,8 +114,14 @@ const CONFIG_CACHE_DURATION = 60 * 1000; // 1 minute
  * Auth middleware - validates subscription and injects API key
  */
 export async function authMiddleware(c: Context, next: Next) {
-  // Skip auth in dev mode
+  // In dev mode, skip subscription validation but still load API key from config if needed
   if (DEV_MODE) {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      const config = loadConfig();
+      if (config?.anthropicApiKey) {
+        process.env.ANTHROPIC_API_KEY = config.anthropicApiKey;
+      }
+    }
     return next();
   }
 
