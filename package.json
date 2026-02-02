@@ -57,6 +57,7 @@
   "build": {
     "appId": "com.claudepi.app",
     "productName": "Claude PI",
+    "electronVersion": "33.4.11",
     "directories": {
       "app": ".",
       "output": "dist"

@@ -1,7 +1,26 @@
 import { spawn, ChildProcess } from "child_process";
 import { createServer } from "net";
 import { join } from "path";
-import { existsSync } from "fs";
+import { existsSync, appendFileSync, mkdirSync } from "fs";
+import { homedir } from "os";
+
+// File-based logging for debugging GUI launch issues
+const LOG_DIR = join(homedir(), "AppData", "Local", "Claude PI");
+const LOG_FILE = join(LOG_DIR, "debug.log");
+
+function debugLog(msg: string): void {
+  const timestamp = new Date().toISOString();
+  const line = `[${timestamp}] [server-manager] ${msg}\n`;
+  console.log(`[ServerManager] ${msg}`);
+  try {
+    if (!existsSync(LOG_DIR)) {
+      mkdirSync(LOG_DIR, { recursive: true });
+    }
+    appendFileSync(LOG_FILE, line);
+  } catch (e) {
+    // Ignore logging errors
+  }
+}
 
 export interface ServerManagerOptions {
   isDev: boolean;
@@ -80,6 +99,7 @@ export class ServerManager {
    * Get environment variables for the server
    */
   private getServerEnv(): Record<string, string> {
+    debugLog("getServerEnv() building environment...");
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
       PORT: String(this.port),
@@ -91,7 +111,7 @@ export class ServerManager {
     // This is used by the Agent SDK to spawn Claude Code processes
     if (this.options.cliCommand) {
       env.CLAUDE_CLI_COMMAND = this.options.cliCommand;
-      console.log(`[ServerManager] CLI command: ${this.options.cliCommand}`);
+      debugLog(`CLI command set: ${this.options.cliCommand}`);
     }
 
     if (!this.options.isDev) {
@@ -99,12 +119,13 @@ export class ServerManager {
       env.RESOURCES_PATH = this.options.resourcesPath;
       env.ELECTRON_FRONTEND_PATH = join(this.options.resourcesPath, "frontend");
       env.AGENT_PROMPT_PATH = join(this.options.resourcesPath, "agent");
-      // Only set CLI path if not using npx (npx handles its own resolution)
-      if (this.options.cliCommand && !this.options.cliCommand.includes("npx")) {
-        env.CLAUDE_CODE_CLI_PATH = join(this.options.resourcesPath, "claude-agent-sdk", "cli.js");
-      }
+      // Don't set CLAUDE_CODE_CLI_PATH when global 'claude' command is available
+      // The SDK will find it automatically. Only set a fallback path if no CLI is available.
+      // Note: The bundled cli.js requires Node to run, so we can't use it as a direct executable.
       // Production mode for auth
       env.NODE_ENV = "production";
+      debugLog(`Production env: RESOURCES_PATH=${env.RESOURCES_PATH}`);
+      debugLog(`Production env: CLAUDE_CODE_CLI_PATH=${env.CLAUDE_CODE_CLI_PATH || 'NOT SET'}`);
     }
 
     return env;
@@ -115,16 +136,18 @@ export class ServerManager {
    */
   async start(): Promise<number> {
     this.port = await this.findFreePort();
-    console.log(`[ServerManager] Starting server on port ${this.port}`);
+    debugLog(`Starting server on port ${this.port}`);
 
     const serverPath = this.getServerPath();
     const env = this.getServerEnv();
 
-    console.log(`[ServerManager] Server path: ${serverPath}`);
-    console.log(`[ServerManager] isDev: ${this.options.isDev}`);
+    debugLog(`Server path: ${serverPath}`);
+    debugLog(`isDev: ${this.options.isDev}`);
+    debugLog(`Server exists: ${existsSync(serverPath)}`);
 
     // Check if server file exists
     if (!existsSync(serverPath)) {
+      debugLog(`ERROR: Server not found at: ${serverPath}`);
       throw new Error(`Server not found at: ${serverPath}`);
     }
 

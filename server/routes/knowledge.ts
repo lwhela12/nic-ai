@@ -25,7 +25,9 @@ function getClient(): Anthropic {
 
 const app = new Hono();
 
-const templatesDir = join(import.meta.dir, "../../agent/templates");
+// Use env var for production (set by Electron), fall back to relative path for dev
+const agentPath = process.env.AGENT_PROMPT_PATH || join(import.meta.dir, "../../agent");
+const templatesDir = join(agentPath, "templates");
 
 // ============================================================================
 // TEMPLATE ENDPOINTS

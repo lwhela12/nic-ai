@@ -7,8 +7,29 @@
 
 import { exec } from "child_process";
 import { promisify } from "util";
+import { appendFileSync, mkdirSync, existsSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
 
 const execAsync = promisify(exec);
+
+// File-based logging for debugging GUI launch issues
+const LOG_DIR = join(homedir(), "AppData", "Local", "Claude PI");
+const LOG_FILE = join(LOG_DIR, "debug.log");
+
+function debugLog(msg: string): void {
+  const timestamp = new Date().toISOString();
+  const line = `[${timestamp}] [cli-setup] ${msg}\n`;
+  console.log(`[cli-setup] ${msg}`);
+  try {
+    if (!existsSync(LOG_DIR)) {
+      mkdirSync(LOG_DIR, { recursive: true });
+    }
+    appendFileSync(LOG_FILE, line);
+  } catch (e) {
+    // Ignore logging errors
+  }
+}
 
 export interface CLIStatus {
   available: boolean;
@@ -28,31 +49,44 @@ export interface InstallResult {
  * Tries direct 'claude' command first, then falls back to npx.
  */
 export async function checkClaudeCLI(): Promise<CLIStatus> {
+  debugLog("=== checkClaudeCLI START ===");
+  debugLog(`Platform: ${process.platform}`);
+  debugLog(`PATH: ${process.env.PATH}`);
+  debugLog(`APPDATA: ${process.env.APPDATA}`);
+  debugLog(`LOCALAPPDATA: ${process.env.LOCALAPPDATA}`);
+
   // Try direct command first (faster if globally installed)
   try {
-    const { stdout } = await execAsync("claude --version", {
+    debugLog("Trying direct 'claude --version'...");
+    const { stdout, stderr } = await execAsync("claude --version", {
       timeout: 10000,
       windowsHide: true,
     });
+    debugLog(`Direct command SUCCESS: ${stdout.trim()}`);
+    if (stderr) debugLog(`stderr: ${stderr}`);
     return {
       available: true,
       version: stdout.trim(),
       path: "claude",
       method: "direct",
     };
-  } catch {
-    // Direct command failed, try npx
+  } catch (directErr) {
+    const errMsg = directErr instanceof Error ? directErr.message : String(directErr);
+    debugLog(`Direct command FAILED: ${errMsg}`);
   }
 
   // Try npx as fallback (works if npm/node are installed)
   try {
-    const { stdout } = await execAsync(
+    debugLog("Trying 'npx @anthropic-ai/claude-code --version'...");
+    const { stdout, stderr } = await execAsync(
       "npx @anthropic-ai/claude-code --version",
       {
         timeout: 60000, // npx can be slow first time
         windowsHide: true,
       }
     );
+    debugLog(`npx command SUCCESS: ${stdout.trim()}`);
+    if (stderr) debugLog(`stderr: ${stderr}`);
     return {
       available: true,
       version: stdout.trim(),
@@ -60,6 +94,9 @@ export async function checkClaudeCLI(): Promise<CLIStatus> {
       method: "npx",
     };
   } catch (npxErr) {
+    const errMsg = npxErr instanceof Error ? npxErr.message : String(npxErr);
+    debugLog(`npx command FAILED: ${errMsg}`);
+    debugLog("=== checkClaudeCLI END (not available) ===");
     return {
       available: false,
       error:

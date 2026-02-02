@@ -808,6 +808,24 @@ Use the extract_document tool to return your findings.`
     // ========================================================================
     console.log(`[${fileIndex + 1}/${totalFiles}] Using agent fallback with tools`);
 
+    // DIAGNOSTIC LOGGING - Agent SDK spawn (writes to temp file for packaged app debugging)
+    const sdkCliOpts = getSDKCliOptions();
+    const diagLog = (msg: string) => {
+      const line = `[${new Date().toISOString()}] ${msg}\n`;
+      console.log(`[AGENT-DIAG] ${msg}`);
+      try {
+        const fs = require('fs');
+        const os = require('os');
+        const path = require('path');
+        fs.appendFileSync(path.join(os.tmpdir(), 'claude-pi-agent-diag.log'), line);
+      } catch {}
+    };
+    diagLog(`=== AGENT FALLBACK START: ${filename} ===`);
+    diagLog(`SDK CLI options: ${JSON.stringify(sdkCliOpts)}`);
+    diagLog(`CLAUDE_CLI_COMMAND: ${process.env.CLAUDE_CLI_COMMAND || 'NOT SET'}`);
+    diagLog(`CLAUDE_CODE_CLI_PATH: ${process.env.CLAUDE_CODE_CLI_PATH || 'NOT SET'}`);
+    diagLog(`Platform: ${process.platform}`);
+
     const prompt = `Extract information from this file: ${fullPath}
 
 Use the Read tool to read the file. Then return the JSON extraction with these fields:
@@ -827,15 +845,23 @@ Return ONLY valid JSON, no markdown.`;
       persistSession: false, // Prevent race condition when running concurrent extractions
     };
 
+    diagLog(`Starting query() call...`);
+    let queryStarted = false;
+    try {
     for await (const msg of query({
       prompt,
       options: {
         ...queryOptions,
-        ...getSDKCliOptions(),
+        ...sdkCliOpts,
       },
     })) {
+      if (!queryStarted) {
+        diagLog(`First message received - type: ${msg.type}`);
+        queryStarted = true;
+      }
       // Log all message types for debugging
       const msgAny = msg as any;
+      diagLog(`Message: type=${msg.type}, subtype=${msgAny.subtype || 'none'}`);
       messageLog.push({
         type: msg.type,
         subtype: msgAny.subtype,
@@ -886,6 +912,13 @@ Return ONLY valid JSON, no markdown.`;
         usage.outputTokens = finalUsage.output_tokens || 0;
         usage.apiCalls = 1;
       }
+    }
+    } catch (queryErr) {
+      diagLog(`query() FAILED: ${queryErr}`);
+      diagLog(`Error type: ${queryErr?.constructor?.name}`);
+      diagLog(`Error message: ${queryErr instanceof Error ? queryErr.message : String(queryErr)}`);
+      diagLog(`Error stack: ${queryErr instanceof Error ? queryErr.stack : 'N/A'}`);
+      throw queryErr; // Re-throw to be caught by outer try-catch
     }
 
     result.usage = usage;

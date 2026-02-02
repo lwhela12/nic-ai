@@ -1,5 +1,7 @@
 import { app, BrowserWindow, shell, dialog } from "electron";
 import { join } from "path";
+import { appendFileSync, mkdirSync, existsSync } from "fs";
+import { homedir } from "os";
 import { ServerManager } from "./server-manager.js";
 import {
   checkClaudeCLI,
@@ -8,8 +10,34 @@ import {
   checkNpmAvailable,
 } from "./cli-setup.js";
 
+// File-based logging for debugging GUI launch issues
+const LOG_DIR = join(homedir(), "AppData", "Local", "Claude PI");
+const LOG_FILE = join(LOG_DIR, "debug.log");
+
+function debugLog(msg: string): void {
+  const timestamp = new Date().toISOString();
+  const line = `[${timestamp}] [main] ${msg}\n`;
+  console.log(`[Main] ${msg}`);
+  try {
+    if (!existsSync(LOG_DIR)) {
+      mkdirSync(LOG_DIR, { recursive: true });
+    }
+    appendFileSync(LOG_FILE, line);
+  } catch (e) {
+    // Ignore logging errors
+  }
+}
+
 const isDev = !app.isPackaged;
 const resourcesPath = isDev ? join(__dirname, "..") : process.resourcesPath;
+
+// Log startup immediately
+debugLog("=== ELECTRON MAIN STARTING ===");
+debugLog(`isDev: ${isDev}`);
+debugLog(`resourcesPath: ${resourcesPath}`);
+debugLog(`__dirname: ${__dirname}`);
+debugLog(`process.execPath: ${process.execPath}`);
+debugLog(`app.isPackaged: ${app.isPackaged}`);
 
 let serverManager: ServerManager | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -55,16 +83,17 @@ function createWindow(): void {
  * Shows setup dialog if installation is needed.
  */
 async function ensureCLIAvailable(): Promise<string | null> {
-  console.log("[Main] Checking Claude Code CLI availability...");
+  debugLog("ensureCLIAvailable() called");
 
   const status = await checkClaudeCLI();
+  debugLog(`CLI status: ${JSON.stringify(status)}`);
 
   if (status.available) {
-    console.log(`[Main] CLI available via ${status.method}: ${status.version}`);
+    debugLog(`CLI available via ${status.method}: ${status.version}`);
     return status.path || "claude";
   }
 
-  console.log("[Main] CLI not available, checking npm...");
+  debugLog("CLI not available, checking npm...");
 
   // Check if npm is available before offering to install
   const npmAvailable = await checkNpmAvailable();
@@ -217,27 +246,32 @@ async function ensureCLIAvailable(): Promise<string | null> {
 }
 
 async function startApp(): Promise<void> {
-  console.log(`[Main] Starting Claude PI (isDev: ${isDev})`);
+  debugLog(`startApp() called - isDev: ${isDev}`);
 
   // First, ensure CLI is available
   cliCommand = await ensureCLIAvailable();
 
   if (!cliCommand) {
-    console.log("[Main] CLI not available, quitting");
+    debugLog("CLI not available, quitting");
     app.quit();
     return;
   }
 
-  console.log(`[Main] Using CLI command: ${cliCommand}`);
+  debugLog(`Using CLI command: ${cliCommand}`);
 
   // Start server with CLI command
   serverManager = new ServerManager({ isDev, resourcesPath, cliCommand });
 
   try {
+    debugLog("Starting server...");
     serverPort = await serverManager.start();
+    debugLog(`Server started on port ${serverPort}`);
     createWindow();
+    debugLog("Window created");
   } catch (error) {
-    dialog.showErrorBox("Startup Error", `Failed to start server:\n\n${error instanceof Error ? error.message : String(error)}`);
+    const errMsg = error instanceof Error ? error.message : String(error);
+    debugLog(`Server start FAILED: ${errMsg}`);
+    dialog.showErrorBox("Startup Error", `Failed to start server:\n\n${errMsg}`);
     app.quit();
   }
 }
