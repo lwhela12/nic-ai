@@ -127,7 +127,7 @@ export default function ContactCard({
 
   if (!isOpen) return null
 
-  // Parse policy limits
+  // Parse policy limits - handles both flat keys and nested structure
   const parsePolicyLimits = () => {
     if (!policyLimits) return { thirdParty: null, firstParty: null }
 
@@ -135,10 +135,13 @@ export default function ContactCard({
       return { thirdParty: policyLimits, firstParty: null }
     }
 
-    // Look for 3P limits
+    // Look for 3P limits - try flat keys first, then nested structure
     const thirdParty = policyLimits['3P_bi'] || policyLimits['3P_liability'] || policyLimits['3p_bi'] || policyLimits['3p']
-    // Look for 1P limits
+      || (policyLimits['3P'] as any)?.bodily_injury || (policyLimits['3p'] as any)?.bodily_injury
+    // Look for 1P limits - try flat keys first, then nested structure
     const firstParty = policyLimits['1P_UIM'] || policyLimits['1P_UM'] || policyLimits['1p_uim'] || policyLimits['1p']
+      || (policyLimits['1P'] as any)?.um_uim || (policyLimits['1p'] as any)?.um_uim
+      || (policyLimits['1P'] as any)?.bodily_injury || (policyLimits['1p'] as any)?.bodily_injury
 
     return { thirdParty, firstParty }
   }

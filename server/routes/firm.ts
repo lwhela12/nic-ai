@@ -1899,13 +1899,15 @@ async function buildFirmContext(root: string): Promise<FirmContext> {
         providers = index.summary.providers;
       }
 
-      // Extract policy limits
+      // Extract policy limits - handle both flat keys and nested structure
       let policyLimits: string | undefined;
       const limits = index.policy_limits || index.summary?.policy_limits;
       if (typeof limits === 'string') {
         policyLimits = limits;
       } else if (typeof limits === 'object' && limits !== null) {
-        const biValue = limits['3P_bi'] || limits['3p_bi'] || limits['bi'] || limits['bodily_injury'];
+        // Try flat keys first (3P_bi), then nested structure (3P.bodily_injury)
+        const biValue = limits['3P_bi'] || limits['3p_bi'] || limits['bi'] || limits['bodily_injury']
+          || limits['3P']?.bodily_injury || limits['3p']?.bodily_injury;
         if (typeof biValue === 'string') policyLimits = biValue;
       }
 
