@@ -1655,7 +1655,7 @@ FIELDS TO TRACK:
 10. policy_limits_3p - At-fault party's policy limits. Look for insurance_3p object with:
     - carrier, bodily_injury, property_damage, insured_name
     - Output as JSON object: {"carrier": "X", "bodily_injury": "Y", ...}
-11. provider_charges - Group by provider name (e.g., "charges:Spinal Rehab Center")
+11. charges - Medical charges by provider. Use field name format "charges:Provider Name" (e.g., "charges:Spinal Rehab Center")
 12. provider_balances - Outstanding balances by provider
 13. total_medical - Total medical specials
 14. health_insurance - Look for health_insurance object with carrier, group_no, member_no

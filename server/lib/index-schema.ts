@@ -380,6 +380,7 @@ function normalizeShorthandLimits(value: string): string {
  * Normalize policy_limits to canonical nested structure.
  *
  * Handles:
+ * - JSON string: '{"1P": {...}}' → parsed and normalized
  * - String: "$25,000/$50,000" → { bodily_injury: "$25,000/$50,000", carrier: "Unknown" }
  * - Flat object: { carrier: "X", bodily_injury: "Y" } → same
  * - Shorthand: "25/50/25" → { bodily_injury: "$25,000/$50,000", carrier: "Unknown" }
@@ -388,7 +389,35 @@ function normalizeShorthandLimits(value: string): string {
 export function normalizePolicyLimits(
   value: unknown
 ): Record<string, PolicyLimitDetail> | undefined {
-  if (!value || typeof value !== "object") return undefined;
+  if (!value) return undefined;
+
+  // Handle JSON strings (from LLM or update_index tool)
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{")) {
+      try {
+        value = JSON.parse(trimmed);
+      } catch {
+        // Not valid JSON - treat as simple limit string
+        return {
+          "3P": {
+            carrier: "Unknown",
+            bodily_injury: normalizeShorthandLimits(trimmed),
+          },
+        };
+      }
+    } else {
+      // Simple string like "$25,000/$50,000"
+      return {
+        "3P": {
+          carrier: "Unknown",
+          bodily_injury: normalizeShorthandLimits(trimmed),
+        },
+      };
+    }
+  }
+
+  if (typeof value !== "object") return undefined;
 
   const result: Record<string, PolicyLimitDetail> = {};
   const raw = value as Record<string, unknown>;

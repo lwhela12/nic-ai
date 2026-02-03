@@ -11,12 +11,18 @@ interface ContactInfo {
   }
 }
 
+interface PolicyLimitDetail {
+  carrier?: string
+  bodily_injury?: string
+  medical_payments?: string
+  um_uim?: string
+  property_damage?: string
+}
+
 interface PolicyLimits {
-  '3P_bi'?: string
-  '3P_liability'?: string
-  '1P_UIM'?: string
-  '1P_UM'?: string
-  [key: string]: string | undefined
+  '1P'?: PolicyLimitDetail
+  '3P'?: PolicyLimitDetail
+  [key: string]: PolicyLimitDetail | string | undefined
 }
 
 interface HealthInsurance {
@@ -127,21 +133,31 @@ export default function ContactCard({
 
   if (!isOpen) return null
 
-  // Parse policy limits - handles both flat keys and nested structure
+  // Parse policy limits - canonical schema: { "1P": { um_uim, bodily_injury }, "3P": { bodily_injury } }
   const parsePolicyLimits = () => {
     if (!policyLimits) return { thirdParty: null, firstParty: null }
 
-    if (typeof policyLimits === 'string') {
-      return { thirdParty: policyLimits, firstParty: null }
+    let limits = policyLimits
+    // Handle JSON strings (legacy data)
+    if (typeof limits === 'string') {
+      if (limits.startsWith('{')) {
+        try {
+          limits = JSON.parse(limits)
+        } catch {
+          return { thirdParty: limits, firstParty: null }
+        }
+      } else {
+        return { thirdParty: limits, firstParty: null }
+      }
     }
 
-    // Look for 3P limits - try flat keys first, then nested structure
-    const thirdParty = policyLimits['3P_bi'] || policyLimits['3P_liability'] || policyLimits['3p_bi'] || policyLimits['3p']
-      || (policyLimits['3P'] as any)?.bodily_injury || (policyLimits['3p'] as any)?.bodily_injury
-    // Look for 1P limits - try flat keys first, then nested structure
-    const firstParty = policyLimits['1P_UIM'] || policyLimits['1P_UM'] || policyLimits['1p_uim'] || policyLimits['1p']
-      || (policyLimits['1P'] as any)?.um_uim || (policyLimits['1p'] as any)?.um_uim
-      || (policyLimits['1P'] as any)?.bodily_injury || (policyLimits['1p'] as any)?.bodily_injury
+    // Extract from canonical nested structure
+    const p3 = (limits as any)['3P'] || (limits as any)['3p']
+    const p1 = (limits as any)['1P'] || (limits as any)['1p']
+
+    const thirdParty = p3?.bodily_injury || p3?.bi || null
+    // For 1P, prefer UIM (what matters in PI claims) over BI
+    const firstParty = p1?.um_uim || p1?.bodily_injury || p1?.bi || null
 
     return { thirdParty, firstParty }
   }

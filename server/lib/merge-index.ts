@@ -123,17 +123,20 @@ function confidenceLevel(confidence: number): "high" | "medium" | "low" {
 
 /**
  * Extract provider names from hypergraph charge fields.
- * Charge fields are named like "charges:Provider Name"
+ * Charge fields are named like "charges:Provider Name" or "provider_charges:Provider Name"
  */
 function extractProviders(hypergraph: Record<string, HypergraphField>): string[] {
   const providers: string[] = [];
 
   for (const fieldName of Object.keys(hypergraph)) {
+    let providerName: string | null = null;
     if (fieldName.startsWith("charges:")) {
-      const providerName = fieldName.replace("charges:", "").trim();
-      if (providerName && !providers.includes(providerName)) {
-        providers.push(providerName);
-      }
+      providerName = fieldName.replace("charges:", "").trim();
+    } else if (fieldName.startsWith("provider_charges:")) {
+      providerName = fieldName.replace("provider_charges:", "").trim();
+    }
+    if (providerName && !providers.includes(providerName)) {
+      providers.push(providerName);
     }
   }
 
@@ -142,25 +145,38 @@ function extractProviders(hypergraph: Record<string, HypergraphField>): string[]
 
 /**
  * Calculate total charges from hypergraph charge fields.
+ * Uses values even if UNCERTAIN - better to show approximate data than nothing.
  */
 function calculateTotalCharges(hypergraph: Record<string, HypergraphField>): number {
   let total = 0;
 
   for (const [fieldName, field] of Object.entries(hypergraph)) {
-    if (fieldName.startsWith("charges:") && field.consensus && field.consensus !== "UNCERTAIN") {
-      const amount = parseFloat(field.consensus.replace(/[$,]/g, ""));
-      if (!isNaN(amount)) {
-        total += amount;
+    // Support both "charges:" and "provider_charges:" prefixes for consistency
+    if ((fieldName.startsWith("charges:") || fieldName.startsWith("provider_charges:")) && field.values?.length > 0) {
+      // Use consensus if available, otherwise use the first value
+      const valueToUse = field.consensus && field.consensus !== "UNCERTAIN"
+        ? field.consensus
+        : field.values[0]?.value;
+      if (valueToUse) {
+        const amount = parseFloat(valueToUse.replace(/[$,]/g, ""));
+        if (!isNaN(amount)) {
+          total += amount;
+        }
       }
     }
   }
 
   // Also check for total_medical field
   const totalMedical = hypergraph["total_medical"];
-  if (totalMedical?.consensus && totalMedical.consensus !== "UNCERTAIN") {
-    const amount = parseFloat(totalMedical.consensus.replace(/[$,]/g, ""));
-    if (!isNaN(amount) && amount > total) {
-      total = amount; // Use the higher value
+  if (totalMedical?.values?.length > 0) {
+    const valueToUse = totalMedical.consensus && totalMedical.consensus !== "UNCERTAIN"
+      ? totalMedical.consensus
+      : totalMedical.values[0]?.value;
+    if (valueToUse) {
+      const amount = parseFloat(valueToUse.replace(/[$,]/g, ""));
+      if (!isNaN(amount) && amount > total) {
+        total = amount; // Use the higher value
+      }
     }
   }
 
@@ -336,19 +352,31 @@ function buildPolicyLimits(hypergraph: Record<string, HypergraphField>): Record<
   }> = {};
 
   // Try new structured fields first
+  // Use values even if UNCERTAIN - they'll be flagged for review but still displayed
   const limits1p = hypergraph["policy_limits_1p"];
-  if (limits1p?.consensus && limits1p.consensus !== "UNCERTAIN") {
-    const parsed = parsePolicyLimitObject(limits1p.consensus);
-    if (parsed) {
-      limits["1P"] = { carrier: parsed.carrier || "Unknown", ...parsed };
+  if (limits1p?.values?.length > 0) {
+    // Use consensus if available, otherwise use the first (most common) value
+    const valueToUse = limits1p.consensus && limits1p.consensus !== "UNCERTAIN"
+      ? limits1p.consensus
+      : limits1p.values[0]?.value;
+    if (valueToUse) {
+      const parsed = parsePolicyLimitObject(valueToUse);
+      if (parsed) {
+        limits["1P"] = { carrier: parsed.carrier || "Unknown", ...parsed };
+      }
     }
   }
 
   const limits3p = hypergraph["policy_limits_3p"];
-  if (limits3p?.consensus && limits3p.consensus !== "UNCERTAIN") {
-    const parsed = parsePolicyLimitObject(limits3p.consensus);
-    if (parsed) {
-      limits["3P"] = { carrier: parsed.carrier || "Unknown", ...parsed };
+  if (limits3p?.values?.length > 0) {
+    const valueToUse = limits3p.consensus && limits3p.consensus !== "UNCERTAIN"
+      ? limits3p.consensus
+      : limits3p.values[0]?.value;
+    if (valueToUse) {
+      const parsed = parsePolicyLimitObject(valueToUse);
+      if (parsed) {
+        limits["3P"] = { carrier: parsed.carrier || "Unknown", ...parsed };
+      }
     }
   }
 

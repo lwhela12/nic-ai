@@ -89,11 +89,10 @@ const TOOLS: Anthropic.Tool[] = [
       properties: {
         field_path: {
           type: "string",
-          description: "Dot-notation path to the field (e.g., 'summary.client', 'case_phase', 'summary.contact.phone')"
+          description: "Dot-notation path to the field (e.g., 'summary.client', 'case_phase', 'summary.contact.phone', 'summary.policy_limits')"
         },
         value: {
-          type: "string",
-          description: "New value for the field"
+          description: "New value for the field. Can be a string, number, object, or array depending on the field."
         },
         note: {
           type: "string",
