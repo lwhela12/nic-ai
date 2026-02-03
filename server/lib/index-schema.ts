@@ -4,12 +4,35 @@
  * This is the SINGLE SOURCE OF TRUTH for document_index.json structure.
  * All extraction output flows through normalizeIndex() before being written.
  * The UI can trust this schema completely - no defensive coding needed.
+ *
+ * PRACTICE AREA SUPPORT:
+ * - Personal Injury (PI): Original schema, default when practice_area is undefined
+ * - Workers' Compensation (WC): Extended schema with WC-specific fields
+ *
+ * Backward compatibility: Indexes without practice_area field are treated as PI.
  */
 
 import { z } from "zod";
 
 // =============================================================================
-// SCHEMA DEFINITIONS
+// PRACTICE AREA DEFINITIONS
+// =============================================================================
+
+export const PRACTICE_AREAS = {
+  PI: "Personal Injury",
+  WC: "Workers' Compensation",
+} as const;
+
+export type PracticeAreaCode = keyof typeof PRACTICE_AREAS;
+export type PracticeAreaName = (typeof PRACTICE_AREAS)[PracticeAreaCode];
+
+export const PracticeAreaSchema = z.enum([
+  PRACTICE_AREAS.PI,
+  PRACTICE_AREAS.WC,
+]);
+
+// =============================================================================
+// SHARED SCHEMA DEFINITIONS
 // =============================================================================
 
 export const AddressSchema = z.object({
@@ -17,14 +40,6 @@ export const AddressSchema = z.object({
   city: z.string().optional(),
   state: z.string().optional(),
   zip: z.string().optional(),
-});
-
-export const PolicyLimitDetailSchema = z.object({
-  carrier: z.string(),
-  bodily_injury: z.string().optional(),
-  medical_payments: z.string().optional(),
-  um_uim: z.string().optional(),
-  property_damage: z.string().optional(),
 });
 
 export const ContactSchema = z.object({
@@ -39,17 +54,77 @@ export const HealthInsuranceSchema = z.object({
   member_no: z.string().optional(),
 });
 
+// =============================================================================
+// PERSONAL INJURY SPECIFIC SCHEMAS
+// =============================================================================
+
+export const PolicyLimitDetailSchema = z.object({
+  carrier: z.string(),
+  bodily_injury: z.string().optional(),
+  medical_payments: z.string().optional(),
+  um_uim: z.string().optional(),
+  property_damage: z.string().optional(),
+});
+
+// =============================================================================
+// WORKERS' COMPENSATION SPECIFIC SCHEMAS
+// =============================================================================
+
+export const EmployerSchema = z.object({
+  name: z.string(),
+  address: AddressSchema.optional(),
+  phone: z.string().optional(),
+  contact_name: z.string().optional(),
+});
+
+export const WCCarrierSchema = z.object({
+  name: z.string(),
+  claim_number: z.string().optional(),
+  adjuster_name: z.string().optional(),
+  adjuster_phone: z.string().optional(),
+  adjuster_email: z.string().optional(),
+  tpa_name: z.string().optional(), // Third Party Administrator
+});
+
+export const DisabilityStatusSchema = z.object({
+  type: z.enum(["TTD", "TPD", "PPD", "PTD"]).optional(), // Temporary Total, Temporary Partial, Permanent Partial, Permanent Total
+  aww: z.number().optional(), // Average Weekly Wage
+  compensation_rate: z.number().optional(), // Weekly benefit rate
+  mmi_date: z.string().optional(), // Maximum Medical Improvement date
+  ppd_rating: z.number().optional(), // Permanent Partial Disability percentage
+  ppd_weeks: z.number().optional(), // Weeks of PPD benefits
+  return_to_work_date: z.string().optional(),
+  work_restrictions: z.string().optional(),
+});
+
+// =============================================================================
+// UNIFIED SUMMARY SCHEMA
+// =============================================================================
+
 export const SummarySchema = z.object({
+  // Common fields (all practice areas)
   client: z.string(),
-  dol: z.string(),
   dob: z.string().optional(),
   providers: z.array(z.string()),
   total_charges: z.number(),
-  policy_limits: z.record(z.string(), PolicyLimitDetailSchema).optional(),
   contact: ContactSchema.optional(),
   health_insurance: HealthInsuranceSchema.optional(),
-  claim_numbers: z.record(z.string(), z.string()).optional(),
   case_summary: z.string(),
+
+  // Incident date - stored as "incident_date" but accepts dol/doi on input
+  incident_date: z.string(),
+
+  // PI-specific fields (optional, only populated for PI cases)
+  policy_limits: z.record(z.string(), PolicyLimitDetailSchema).optional(),
+  claim_numbers: z.record(z.string(), z.string()).optional(), // 1P/3P claim numbers
+
+  // WC-specific fields (optional, only populated for WC cases)
+  employer: EmployerSchema.optional(),
+  wc_carrier: WCCarrierSchema.optional(),
+  disability_status: DisabilityStatusSchema.optional(),
+  job_title: z.string().optional(),
+  injury_description: z.string().optional(),
+  body_parts: z.array(z.string()).optional(), // Affected body parts
 });
 
 export const FileEntrySchema = z.object({
@@ -77,7 +152,12 @@ export const ErrataSchema = z.object({
   confidence: z.enum(["high", "medium", "low"]),
 });
 
-export const CasePhaseSchema = z.enum([
+// =============================================================================
+// CASE PHASE SCHEMAS (Practice Area Specific)
+// =============================================================================
+
+// PI phases
+export const PI_PHASES = [
   "Intake",
   "Investigation",
   "Treatment",
@@ -85,7 +165,31 @@ export const CasePhaseSchema = z.enum([
   "Negotiation",
   "Settlement",
   "Complete",
-]);
+] as const;
+
+// WC phases
+export const WC_PHASES = [
+  "Intake",
+  "Investigation",
+  "Treatment",
+  "MMI Evaluation",
+  "Benefits Resolution",
+  "Settlement/Hearing",
+  "Closed",
+] as const;
+
+// Combined for schema validation (accepts either)
+export const ALL_PHASES = [...new Set([...PI_PHASES, ...WC_PHASES])] as const;
+
+export const CasePhaseSchema = z.enum(ALL_PHASES as unknown as [string, ...string[]]);
+
+export type PICasePhase = (typeof PI_PHASES)[number];
+export type WCCasePhase = (typeof WC_PHASES)[number];
+export type CasePhase = PICasePhase | WCCasePhase;
+
+// =============================================================================
+// PI-SPECIFIC ASSESSMENT SCHEMAS
+// =============================================================================
 
 export const LiabilitySchema = z.enum(["clear", "moderate", "contested"]);
 
@@ -95,12 +199,37 @@ export const InjuryTierSchema = z.enum([
   "tier_3_surgical",
 ]);
 
+// =============================================================================
+// WC-SPECIFIC ASSESSMENT SCHEMAS
+// =============================================================================
+
+export const CompensabilitySchema = z.enum([
+  "clearly_compensable",      // AOE/COE clear, no defenses
+  "likely_compensable",       // Minor issues but should prevail
+  "disputed",                 // Significant compensability questions
+  "denied",                   // Carrier has denied, appeal needed
+]);
+
+export const ClaimTypeSchema = z.enum([
+  "specific_injury",          // Single incident
+  "occupational_disease",     // Illness from work exposure
+  "cumulative_trauma",        // Repetitive stress/injury over time
+]);
+
+// =============================================================================
+// DOCUMENT INDEX SCHEMA
+// =============================================================================
+
 export const DocumentIndexSchema = z.object({
+  // Core fields
   indexed_at: z.string(),
   case_name: z.string(),
+  practice_area: PracticeAreaSchema.optional(), // Undefined = PI (backward compat)
   case_phase: CasePhaseSchema,
   summary: SummarySchema,
   folders: z.record(z.string(), FolderSchema),
+
+  // Processing metadata
   failed_files: z
     .array(
       z.object({
@@ -118,11 +247,19 @@ export const DocumentIndexSchema = z.object({
   case_analysis: z.string().optional(),
   case_notes: z.array(z.unknown()).optional(),
   chat_archives: z.array(z.unknown()).optional(),
-  // Assessment fields
+
+  // PI-specific assessment fields
   liability_assessment: LiabilitySchema.nullable().optional(),
   injury_tier: InjuryTierSchema.nullable().optional(),
   estimated_value_range: z.string().nullable().optional(),
   policy_limits_demand_appropriate: z.boolean().nullable().optional(),
+
+  // WC-specific assessment fields
+  compensability: CompensabilitySchema.nullable().optional(),
+  claim_type: ClaimTypeSchema.nullable().optional(),
+  estimated_ttd_weeks: z.number().nullable().optional(),
+  estimated_ppd_rating: z.number().nullable().optional(),
+  third_party_potential: z.boolean().nullable().optional(),
 });
 
 export type DocumentIndex = z.infer<typeof DocumentIndexSchema>;
@@ -133,7 +270,44 @@ export type Contact = z.infer<typeof ContactSchema>;
 export type HealthInsurance = z.infer<typeof HealthInsuranceSchema>;
 export type FileEntry = z.infer<typeof FileEntrySchema>;
 export type Folder = z.infer<typeof FolderSchema>;
-export type CasePhase = z.infer<typeof CasePhaseSchema>;
+export type Employer = z.infer<typeof EmployerSchema>;
+export type WCCarrier = z.infer<typeof WCCarrierSchema>;
+export type DisabilityStatus = z.infer<typeof DisabilityStatusSchema>;
+
+// =============================================================================
+// PRACTICE AREA HELPERS
+// =============================================================================
+
+/**
+ * Get the practice area from an index, defaulting to PI for backward compatibility.
+ */
+export function getPracticeArea(index: DocumentIndex | Record<string, unknown>): PracticeAreaName {
+  const pa = (index as Record<string, unknown>).practice_area;
+  if (pa === PRACTICE_AREAS.WC) return PRACTICE_AREAS.WC;
+  return PRACTICE_AREAS.PI; // Default for undefined or "Personal Injury"
+}
+
+/**
+ * Check if the practice area is Workers' Compensation.
+ */
+export function isWorkersComp(index: DocumentIndex | Record<string, unknown>): boolean {
+  return getPracticeArea(index) === PRACTICE_AREAS.WC;
+}
+
+/**
+ * Get valid phases for a practice area.
+ */
+export function getPhasesForPracticeArea(practiceArea?: string): readonly string[] {
+  if (practiceArea === PRACTICE_AREAS.WC) return WC_PHASES;
+  return PI_PHASES;
+}
+
+/**
+ * Get the default/initial phase for a practice area.
+ */
+export function getDefaultPhase(practiceArea?: string): string {
+  return "Intake"; // Same for both
+}
 
 // =============================================================================
 // JSON SCHEMA FOR ANTHROPIC API (tool_use)
@@ -143,6 +317,70 @@ export type CasePhase = z.infer<typeof CasePhaseSchema>;
  * JSON Schema for per-file extraction via tool_use.
  * Used with direct Haiku calls (pre-extracted text path).
  */
+// =============================================================================
+// DOCUMENT TYPES BY PRACTICE AREA
+// =============================================================================
+
+// Shared document types (all practice areas)
+export const SHARED_DOC_TYPES = [
+  "intake_form",
+  "medical_record",
+  "medical_bill",
+  "correspondence",
+  "authorization",
+  "identification",
+  "settlement",
+  "lien",
+  "other",
+] as const;
+
+// PI-specific document types
+export const PI_DOC_TYPES = [
+  "lor",                    // Letter of Representation
+  "declaration",
+  "police_report",
+  "demand",
+  "balance_request",
+  "balance_confirmation",
+  "property_damage",
+] as const;
+
+// WC-specific document types
+export const WC_DOC_TYPES = [
+  "c4_claim",               // Employee's Claim for Compensation (C-4)
+  "c3_employer_report",     // Employer's First Report of Injury (C-3)
+  "c4_supplemental",        // Supplemental claim form
+  "ime_report",             // Independent Medical Examination
+  "fce_report",             // Functional Capacity Evaluation
+  "work_status_report",     // ATP work status/restrictions
+  "ppd_rating",             // PPD rating report
+  "vocational_report",      // Vocational rehabilitation report
+  "wage_statement",         // Wage documentation
+  "d9_form",                // Request for Hearing
+  "d16_form",               // Petition to Reopen
+  "aoe_coe_investigation",  // Compensability investigation
+  "utilization_review",     // UR decision
+] as const;
+
+// All document types combined
+export const ALL_DOC_TYPES = [
+  ...SHARED_DOC_TYPES,
+  ...PI_DOC_TYPES,
+  ...WC_DOC_TYPES,
+] as const;
+
+export type DocumentType = (typeof ALL_DOC_TYPES)[number];
+
+/**
+ * Get valid document types for a practice area.
+ */
+export function getDocTypesForPracticeArea(practiceArea?: string): readonly string[] {
+  if (practiceArea === PRACTICE_AREAS.WC) {
+    return [...SHARED_DOC_TYPES, ...WC_DOC_TYPES];
+  }
+  return [...SHARED_DOC_TYPES, ...PI_DOC_TYPES];
+}
+
 export const FILE_EXTRACTION_TOOL_SCHEMA = {
   name: "extract_document",
   description:
@@ -152,24 +390,7 @@ export const FILE_EXTRACTION_TOOL_SCHEMA = {
     properties: {
       type: {
         type: "string" as const,
-        enum: [
-          "intake_form",
-          "lor",
-          "declaration",
-          "medical_record",
-          "medical_bill",
-          "correspondence",
-          "authorization",
-          "identification",
-          "police_report",
-          "demand",
-          "settlement",
-          "lien",
-          "balance_request",
-          "balance_confirmation",
-          "property_damage",
-          "other",
-        ],
+        enum: ALL_DOC_TYPES as unknown as string[],
         description: "Document type classification",
       },
       key_info: {
@@ -286,10 +507,60 @@ export const FILE_EXTRACTION_TOOL_SCHEMA = {
           demand_amount: { type: "number" as const },
           offer_amount: { type: "number" as const },
 
-          // Adjuster info
+          // Adjuster info (PI and WC)
           adjuster_name: { type: "string" as const },
           adjuster_phone: { type: "string" as const },
           adjuster_email: { type: "string" as const },
+
+          // WC-specific fields
+          employer_name: { type: "string" as const },
+          employer_address: {
+            type: "object" as const,
+            properties: {
+              street: { type: "string" as const },
+              city: { type: "string" as const },
+              state: { type: "string" as const },
+              zip: { type: "string" as const },
+            },
+          },
+          employer_phone: { type: "string" as const },
+          job_title: { type: "string" as const },
+          doi: {
+            type: "string" as const,
+            description: "Date of injury in MM/DD/YYYY format (Workers' Comp)",
+          },
+          injury_description: { type: "string" as const },
+          body_parts: {
+            type: "array" as const,
+            items: { type: "string" as const },
+            description: "List of affected body parts",
+          },
+          wc_carrier: { type: "string" as const },
+          wc_claim_number: { type: "string" as const },
+          tpa_name: { type: "string" as const },
+          aww: {
+            type: "number" as const,
+            description: "Average Weekly Wage in dollars",
+          },
+          compensation_rate: {
+            type: "number" as const,
+            description: "Weekly compensation rate in dollars",
+          },
+          disability_type: {
+            type: "string" as const,
+            enum: ["TTD", "TPD", "PPD", "PTD"],
+            description: "Type of disability status",
+          },
+          mmi_date: {
+            type: "string" as const,
+            description: "Maximum Medical Improvement date",
+          },
+          ppd_rating: {
+            type: "number" as const,
+            description: "Permanent Partial Disability rating percentage",
+          },
+          work_restrictions: { type: "string" as const },
+          return_to_work_date: { type: "string" as const },
         },
       },
     },
@@ -631,23 +902,145 @@ export function normalizeClaimNumbers(
 }
 
 // =============================================================================
+// WC-SPECIFIC NORMALIZATION FUNCTIONS
+// =============================================================================
+
+/**
+ * Normalize employer information.
+ */
+export function normalizeEmployer(value: unknown): Employer | undefined {
+  if (!value || typeof value !== "object") return undefined;
+
+  const obj = value as Record<string, unknown>;
+  const name = obj.name ?? obj.employer_name ?? obj.employer;
+
+  if (typeof name !== "string" || !name.trim()) return undefined;
+
+  const result: Employer = { name: name.trim() };
+
+  const address = parseAddress(obj.address ?? obj.employer_address);
+  if (address) result.address = address;
+
+  if (typeof obj.phone === "string" && obj.phone.trim()) {
+    result.phone = obj.phone.trim();
+  }
+  if (typeof obj.contact_name === "string" && obj.contact_name.trim()) {
+    result.contact_name = obj.contact_name.trim();
+  }
+
+  return result;
+}
+
+/**
+ * Normalize WC carrier information.
+ */
+export function normalizeWCCarrier(value: unknown): WCCarrier | undefined {
+  if (!value || typeof value !== "object") return undefined;
+
+  const obj = value as Record<string, unknown>;
+  const name = obj.name ?? obj.carrier ?? obj.wc_carrier ?? obj.insurer;
+
+  if (typeof name !== "string" || !name.trim()) return undefined;
+
+  const result: WCCarrier = { name: name.trim() };
+
+  if (typeof obj.claim_number === "string" && obj.claim_number.trim()) {
+    result.claim_number = obj.claim_number.trim();
+  } else if (typeof obj.wc_claim_number === "string" && obj.wc_claim_number.trim()) {
+    result.claim_number = obj.wc_claim_number.trim();
+  }
+
+  if (typeof obj.adjuster_name === "string" && obj.adjuster_name.trim()) {
+    result.adjuster_name = obj.adjuster_name.trim();
+  }
+  if (typeof obj.adjuster_phone === "string" && obj.adjuster_phone.trim()) {
+    result.adjuster_phone = obj.adjuster_phone.trim();
+  }
+  if (typeof obj.adjuster_email === "string" && obj.adjuster_email.trim()) {
+    result.adjuster_email = obj.adjuster_email.trim();
+  }
+  if (typeof obj.tpa_name === "string" && obj.tpa_name.trim()) {
+    result.tpa_name = obj.tpa_name.trim();
+  }
+
+  return result;
+}
+
+/**
+ * Normalize disability status information.
+ */
+export function normalizeDisabilityStatus(value: unknown): DisabilityStatus | undefined {
+  if (!value || typeof value !== "object") return undefined;
+
+  const obj = value as Record<string, unknown>;
+  const result: DisabilityStatus = {};
+
+  const disabilityType = validateDisabilityType(obj.type ?? obj.disability_type);
+  if (disabilityType) result.type = disabilityType;
+
+  if (typeof obj.aww === "number") result.aww = obj.aww;
+  else if (typeof obj.aww === "string") result.aww = parseAmount(obj.aww);
+
+  if (typeof obj.compensation_rate === "number") result.compensation_rate = obj.compensation_rate;
+  else if (typeof obj.compensation_rate === "string") result.compensation_rate = parseAmount(obj.compensation_rate);
+
+  if (typeof obj.mmi_date === "string" && obj.mmi_date.trim()) {
+    result.mmi_date = obj.mmi_date.trim();
+  }
+
+  if (typeof obj.ppd_rating === "number") result.ppd_rating = obj.ppd_rating;
+  else if (typeof obj.ppd_rating === "string") result.ppd_rating = parseFloat(obj.ppd_rating) || undefined;
+
+  if (typeof obj.ppd_weeks === "number") result.ppd_weeks = obj.ppd_weeks;
+
+  if (typeof obj.return_to_work_date === "string" && obj.return_to_work_date.trim()) {
+    result.return_to_work_date = obj.return_to_work_date.trim();
+  }
+
+  if (typeof obj.work_restrictions === "string" && obj.work_restrictions.trim()) {
+    result.work_restrictions = obj.work_restrictions.trim();
+  }
+
+  // Return undefined if empty
+  if (Object.keys(result).length === 0) return undefined;
+
+  return result;
+}
+
+// =============================================================================
 // PHASE AND ENUM VALIDATORS
 // =============================================================================
 
-const VALID_PHASES = [
-  "Intake",
-  "Investigation",
-  "Treatment",
-  "Demand",
-  "Negotiation",
-  "Settlement",
-  "Complete",
-] as const;
+/**
+ * Validate phase based on practice area.
+ * Invalid phases default to "Intake".
+ */
+function validatePhase(value: unknown, practiceArea?: string): CasePhase {
+  if (typeof value !== "string") return "Intake";
 
-function validatePhase(value: unknown): CasePhase {
-  if (typeof value === "string" && VALID_PHASES.includes(value as CasePhase)) {
+  const validPhases = getPhasesForPracticeArea(practiceArea);
+  if (validPhases.includes(value as CasePhase)) {
     return value as CasePhase;
   }
+
+  // Try to map PI phases to WC equivalents and vice versa
+  if (practiceArea === PRACTICE_AREAS.WC) {
+    const piToWcMap: Record<string, CasePhase> = {
+      "Demand": "Benefits Resolution",
+      "Negotiation": "Benefits Resolution",
+      "Complete": "Closed",
+    };
+    if (piToWcMap[value]) return piToWcMap[value];
+  } else {
+    const wcToPiMap: Record<string, CasePhase> = {
+      "MMI Evaluation": "Treatment",
+      "Benefits Resolution": "Negotiation",
+      "Settlement/Hearing": "Settlement",
+      "Closed": "Complete",
+    };
+    if (wcToPiMap[value]) return wcToPiMap[value];
+  }
+
   return "Intake";
 }
 
@@ -683,6 +1076,57 @@ function validateInjuryTier(
   return null;
 }
 
+const VALID_COMPENSABILITY = [
+  "clearly_compensable",
+  "likely_compensable",
+  "disputed",
+  "denied",
+] as const;
+
+function validateCompensability(
+  value: unknown
+): (typeof VALID_COMPENSABILITY)[number] | null {
+  if (
+    typeof value === "string" &&
+    VALID_COMPENSABILITY.includes(value as (typeof VALID_COMPENSABILITY)[number])
+  ) {
+    return value as (typeof VALID_COMPENSABILITY)[number];
+  }
+  return null;
+}
+
+const VALID_CLAIM_TYPES = [
+  "specific_injury",
+  "occupational_disease",
+  "cumulative_trauma",
+] as const;
+
+function validateClaimType(
+  value: unknown
+): (typeof VALID_CLAIM_TYPES)[number] | null {
+  if (
+    typeof value === "string" &&
+    VALID_CLAIM_TYPES.includes(value as (typeof VALID_CLAIM_TYPES)[number])
+  ) {
+    return value as (typeof VALID_CLAIM_TYPES)[number];
+  }
+  return null;
+}
+
+const VALID_DISABILITY_TYPES = ["TTD", "TPD", "PPD", "PTD"] as const;
+
+function validateDisabilityType(
+  value: unknown
+): (typeof VALID_DISABILITY_TYPES)[number] | undefined {
+  if (
+    typeof value === "string" &&
+    VALID_DISABILITY_TYPES.includes(value as (typeof VALID_DISABILITY_TYPES)[number])
+  ) {
+    return value as (typeof VALID_DISABILITY_TYPES)[number];
+  }
+  return undefined;
+}
+
 // =============================================================================
 // MAIN NORMALIZATION ENTRY POINT
 // =============================================================================
@@ -692,8 +1136,11 @@ function validateInjuryTier(
  *
  * This is the ONLY function that should be called before writing document_index.json.
  * It coerces all fields to their expected types and structures.
+ *
+ * @param raw - The raw index data to normalize
+ * @param practiceArea - Optional practice area override (otherwise detected from data or defaults to PI)
  */
-export function normalizeIndex(raw: unknown): DocumentIndex {
+export function normalizeIndex(raw: unknown, practiceArea?: string): DocumentIndex {
   if (!raw || typeof raw !== "object") {
     throw new Error("normalizeIndex: input must be an object");
   }
@@ -701,30 +1148,75 @@ export function normalizeIndex(raw: unknown): DocumentIndex {
   const input = raw as Record<string, unknown>;
   const rawSummary = (input.summary ?? {}) as Record<string, unknown>;
 
-  // Build normalized summary
+  // Determine practice area (param > data > default to PI)
+  const detectedPracticeArea =
+    practiceArea ??
+    (typeof input.practice_area === "string" ? input.practice_area : undefined);
+  const isWC = detectedPracticeArea === PRACTICE_AREAS.WC;
+
+  // Normalize incident date - accept dol (PI), doi (WC), or incident_date
+  const incidentDate =
+    typeof rawSummary.incident_date === "string"
+      ? rawSummary.incident_date
+      : typeof rawSummary.dol === "string"
+        ? rawSummary.dol
+        : typeof rawSummary.doi === "string"
+          ? rawSummary.doi
+          : "Unknown";
+
+  // Build normalized summary with common fields
   const summary: Summary = {
     client:
       typeof rawSummary.client === "string" ? rawSummary.client : "Unknown",
-    dol: typeof rawSummary.dol === "string" ? rawSummary.dol : "Unknown",
+    incident_date: incidentDate,
     dob: typeof rawSummary.dob === "string" ? rawSummary.dob : undefined,
     providers: normalizeProviders(rawSummary.providers),
     total_charges: parseAmount(rawSummary.total_charges),
-    policy_limits: normalizePolicyLimits(rawSummary.policy_limits),
     contact: normalizeContact(rawSummary.contact),
     health_insurance: normalizeHealthInsurance(rawSummary.health_insurance),
-    claim_numbers: normalizeClaimNumbers(rawSummary.claim_numbers),
     case_summary:
       typeof rawSummary.case_summary === "string"
         ? rawSummary.case_summary
         : "No summary available",
   };
 
-  // Clean up undefined optional fields (Zod handles this but cleaner JSON)
+  // PI-specific summary fields
+  if (!isWC) {
+    summary.policy_limits = normalizePolicyLimits(rawSummary.policy_limits);
+    summary.claim_numbers = normalizeClaimNumbers(rawSummary.claim_numbers);
+  }
+
+  // WC-specific summary fields
+  if (isWC) {
+    summary.employer = normalizeEmployer(rawSummary.employer);
+    summary.wc_carrier = normalizeWCCarrier(rawSummary.wc_carrier);
+    summary.disability_status = normalizeDisabilityStatus(rawSummary.disability_status);
+
+    if (typeof rawSummary.job_title === "string" && rawSummary.job_title.trim()) {
+      summary.job_title = rawSummary.job_title.trim();
+    }
+    if (typeof rawSummary.injury_description === "string" && rawSummary.injury_description.trim()) {
+      summary.injury_description = rawSummary.injury_description.trim();
+    }
+    if (Array.isArray(rawSummary.body_parts)) {
+      summary.body_parts = rawSummary.body_parts.filter(
+        (x): x is string => typeof x === "string" && x.trim().length > 0
+      );
+      if (summary.body_parts.length === 0) delete summary.body_parts;
+    }
+  }
+
+  // Clean up undefined optional fields
   if (!summary.dob) delete summary.dob;
   if (!summary.policy_limits) delete summary.policy_limits;
   if (!summary.contact) delete summary.contact;
   if (!summary.health_insurance) delete summary.health_insurance;
   if (!summary.claim_numbers) delete summary.claim_numbers;
+  if (!summary.employer) delete summary.employer;
+  if (!summary.wc_carrier) delete summary.wc_carrier;
+  if (!summary.disability_status) delete summary.disability_status;
+  if (!summary.job_title) delete summary.job_title;
+  if (!summary.injury_description) delete summary.injury_description;
 
   // Build full normalized index
   const normalized: DocumentIndex = {
@@ -734,10 +1226,15 @@ export function normalizeIndex(raw: unknown): DocumentIndex {
         : new Date().toISOString(),
     case_name:
       typeof input.case_name === "string" ? input.case_name : "Unknown",
-    case_phase: validatePhase(input.case_phase),
+    case_phase: validatePhase(input.case_phase, detectedPracticeArea),
     summary,
     folders: normalizeFolders(input.folders),
   };
+
+  // Add practice_area if explicitly set (omit for PI to maintain backward compat)
+  if (detectedPracticeArea === PRACTICE_AREAS.WC) {
+    normalized.practice_area = PRACTICE_AREAS.WC;
+  }
 
   // Optional arrays - only include if present
   if (Array.isArray(input.failed_files) && input.failed_files.length > 0) {
@@ -773,17 +1270,37 @@ export function normalizeIndex(raw: unknown): DocumentIndex {
     normalized.chat_archives = input.chat_archives;
   }
 
-  // Assessment fields
-  normalized.liability_assessment = validateLiability(input.liability_assessment);
-  normalized.injury_tier = validateInjuryTier(input.injury_tier);
-  normalized.estimated_value_range =
-    typeof input.estimated_value_range === "string"
-      ? input.estimated_value_range
-      : null;
-  normalized.policy_limits_demand_appropriate =
-    typeof input.policy_limits_demand_appropriate === "boolean"
-      ? input.policy_limits_demand_appropriate
-      : null;
+  // PI-specific assessment fields
+  if (!isWC) {
+    normalized.liability_assessment = validateLiability(input.liability_assessment);
+    normalized.injury_tier = validateInjuryTier(input.injury_tier);
+    normalized.estimated_value_range =
+      typeof input.estimated_value_range === "string"
+        ? input.estimated_value_range
+        : null;
+    normalized.policy_limits_demand_appropriate =
+      typeof input.policy_limits_demand_appropriate === "boolean"
+        ? input.policy_limits_demand_appropriate
+        : null;
+  }
+
+  // WC-specific assessment fields
+  if (isWC) {
+    normalized.compensability = validateCompensability(input.compensability);
+    normalized.claim_type = validateClaimType(input.claim_type);
+    normalized.estimated_ttd_weeks =
+      typeof input.estimated_ttd_weeks === "number"
+        ? input.estimated_ttd_weeks
+        : null;
+    normalized.estimated_ppd_rating =
+      typeof input.estimated_ppd_rating === "number"
+        ? input.estimated_ppd_rating
+        : null;
+    normalized.third_party_potential =
+      typeof input.third_party_potential === "boolean"
+        ? input.third_party_potential
+        : null;
+  }
 
   return normalized;
 }
