@@ -288,7 +288,7 @@ app.get("/cases", async (c) => {
     const cases: CaseSummary[] = [];
 
     for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      if (!entry.isDirectory() || entry.name === ".pi_tool") continue;
 
       const casePath = join(root, entry.name);
       const indexPath = join(casePath, ".pi_tool", "document_index.json");
@@ -1529,7 +1529,7 @@ app.post("/batch-index", async (c) => {
     try {
       const entries = await readdir(root, { withFileTypes: true });
       for (const entry of entries) {
-        if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+        if (!entry.isDirectory() || entry.name === ".pi_tool") continue;
         const casePath = join(root, entry.name);
         const indexPath = join(casePath, ".pi_tool", "document_index.json");
         try {
@@ -1606,7 +1606,7 @@ async function checkNeedsReindex(casePath: string, indexedAt: number): Promise<b
     try {
       const entries = await readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.name.startsWith(".")) continue;
+        if (entry.name === ".pi_tool") continue;
         const fullPath = join(dir, entry.name);
         if (entry.isDirectory()) {
           if (await checkDir(fullPath)) return true;
@@ -1919,7 +1919,7 @@ async function buildFirmContext(root: string): Promise<FirmContext> {
   let indexedCount = 0;
 
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+    if (!entry.isDirectory() || entry.name === ".pi_tool") continue;
 
     const casePath = join(root, entry.name);
     const indexPath = join(casePath, ".pi_tool", "document_index.json");
@@ -2033,7 +2033,7 @@ async function buildFirmContext(root: string): Promise<FirmContext> {
 
   return {
     root,
-    caseCount: entries.filter(e => e.isDirectory() && !e.name.startsWith(".")).length,
+    caseCount: entries.filter(e => e.isDirectory() && e.name !== ".pi_tool").length,
     indexedCount,
     caseSummaries,
     aggregates: {

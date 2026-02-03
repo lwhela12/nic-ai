@@ -408,7 +408,7 @@ async function buildFirmContext(firmRoot: string): Promise<string> {
     const entries = await readdir(firmRoot, { withFileTypes: true });
 
     for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      if (!entry.isDirectory() || entry.name === ".pi_tool") continue;
 
       const casePath = join(firmRoot, entry.name);
       const indexPath = join(casePath, ".pi_tool", "document_index.json");
@@ -519,7 +519,7 @@ async function buildFirmContext(firmRoot: string): Promise<string> {
 
     // Add portfolio metrics
     parts.push(`\n## PORTFOLIO METRICS
-- Total Cases: ${entries.filter(e => e.isDirectory() && !e.name.startsWith(".")).length}
+- Total Cases: ${entries.filter(e => e.isDirectory() && e.name !== ".pi_tool").length}
 - Indexed Cases: ${indexedCount}
 - Total Medical Specials: $${totalSpecials.toLocaleString()}
 - Cases with SOL < 90 days: ${solUrgent}

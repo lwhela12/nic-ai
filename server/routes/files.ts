@@ -12,7 +12,7 @@ app.get("/browse", async (c) => {
   try {
     const entries = await readdir(dir, { withFileTypes: true });
     const folders = entries
-      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .filter((e) => e.isDirectory() && e.name !== ".pi_tool")
       .map((e) => ({
         name: e.name,
         path: join(dir, e.name),
@@ -40,7 +40,7 @@ app.get("/cases", async (c) => {
   try {
     const entries = await readdir(baseDir, { withFileTypes: true });
     const folders = entries
-      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .filter((e) => e.isDirectory() && e.name !== ".pi_tool")
       .map((e) => ({
         name: e.name,
         path: join(baseDir, e.name),
@@ -86,7 +86,7 @@ app.get("/index-status", async (c) => {
     try {
       const entries = await readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.name.startsWith(".")) continue;
+        if (entry.name === ".pi_tool") continue;
         const fullPath = join(dir, entry.name);
         const relativePath = base ? join(base, entry.name) : entry.name;
 
@@ -227,7 +227,7 @@ app.get("/list", async (c) => {
     const results: any[] = [];
 
     for (const entry of entries) {
-      if (entry.name.startsWith(".")) continue;
+      if (entry.name === ".pi_tool") continue;
 
       const fullPath = join(dir, entry.name);
       const relativePath = base ? join(base, entry.name) : entry.name;
