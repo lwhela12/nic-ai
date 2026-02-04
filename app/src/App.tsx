@@ -22,6 +22,9 @@ interface FirmTodo {
   createdAt: string
 }
 const FIRM_ROOT_KEY = 'claude-pi-firm-root'
+const PRACTICE_AREA_KEY = 'claude-pi-practice-area'
+
+type PracticeArea = 'Personal Injury' | 'Workers\' Compensation'
 
 // URL param helpers for persisting navigation state across refreshes
 const getUrlParam = (key: string): string | null => {
@@ -48,11 +51,26 @@ const setUrlParam = (key: string, value: string | null, replace = false) => {
 // Set VITE_AUTH_ENABLED=true to force auth even in dev mode
 const DEV_MODE = import.meta.env.DEV && import.meta.env.VITE_AUTH_ENABLED !== 'true'
 
+type TeamRole = 'attorney' | 'case_manager_lead' | 'case_manager' | 'case_manager_assistant'
+
+interface TeamContext {
+  userId: string
+  name: string
+  role: TeamRole
+  status: 'pending' | 'active' | 'deactivated'
+  permissions: {
+    canManageTeam: boolean
+    canAssignCases: boolean
+    canViewAllCases: boolean
+  }
+}
+
 interface AuthState {
   authenticated: boolean
   email?: string
   subscriptionStatus?: string
   devMode?: boolean
+  team?: TeamContext
 }
 
 export interface NeedsReviewItem {
@@ -208,6 +226,11 @@ function App() {
   const [firmRoot, setFirmRoot] = useState<string | null>(() => {
     return localStorage.getItem(FIRM_ROOT_KEY)
   })
+  const [practiceArea, setPracticeArea] = useState<PracticeArea>(() => {
+    const stored = localStorage.getItem(PRACTICE_AREA_KEY)
+    return (stored === 'Workers\' Compensation') ? 'Workers\' Compensation' : 'Personal Injury'
+  })
+  const [_pendingFolderPath, _setPendingFolderPath] = useState<string | null>(null) // eslint-disable-line @typescript-eslint/no-unused-vars
   const [caseFolder, setCaseFolderState] = useState<string | null>(() => {
     return getUrlParam('case')
   })
@@ -244,6 +267,7 @@ function App() {
   const [showKnowledgeInit, setShowKnowledgeInit] = useState(false)
   const [knowledgeTemplates, setKnowledgeTemplates] = useState<Array<{ id: string; practiceArea: string; jurisdiction: string }>>([])
   const [knowledgeInitLoading, setKnowledgeInitLoading] = useState(false)
+  const [knowledgeVersion, setKnowledgeVersion] = useState(0) // Increments after init to trigger re-fetch
 
   const loadTodos = useCallback(async () => {
     if (!firmRoot) return
@@ -393,6 +417,7 @@ function App() {
       })
       if (res.ok) {
         setShowKnowledgeInit(false)
+        setKnowledgeVersion(v => v + 1) // Trigger FirmDashboard to re-fetch knowledge
       }
     } catch {
       // Ignore
@@ -427,10 +452,11 @@ function App() {
     checkAuth()
   }, [])
 
-  // Save firm root to localStorage and check for knowledge base
+  // Save firm root and practice area to localStorage and check for knowledge base
   useEffect(() => {
     if (firmRoot) {
       localStorage.setItem(FIRM_ROOT_KEY, firmRoot)
+      localStorage.setItem(PRACTICE_AREA_KEY, practiceArea)
 
       // Check if knowledge base exists for this firm root
       fetch(`${API_URL}/api/knowledge/manifest?root=${encodeURIComponent(firmRoot)}`)
@@ -447,8 +473,18 @@ function App() {
           // Knowledge exists — nothing to do
         })
         .catch(() => {})
+
+      // Reload auth status with team context for this firm root
+      if (authState?.authenticated && authState?.email) {
+        fetch(`${API_URL}/api/auth/status?firmRoot=${encodeURIComponent(firmRoot)}`)
+          .then(res => res.ok ? res.json() : null)
+          .then(data => {
+            if (data) setAuthState(data)
+          })
+          .catch(() => {})
+      }
     }
-  }, [firmRoot])
+  }, [firmRoot, practiceArea, authState?.authenticated, authState?.email])
 
   const handleShowFile = useCallback((filePath: string) => {
     if (!caseFolder) return
@@ -570,7 +606,34 @@ function App() {
             </div>
             <h1 className="font-serif text-3xl text-brand-900">Claude PI</h1>
           </div>
-          <p className="text-brand-500 mb-8">Personal Injury Case Management</p>
+          <p className="text-brand-500 mb-8">Legal Case Management</p>
+
+          {/* Practice Area Selection */}
+          <div className="mb-6">
+            <label className="block text-sm font-medium text-brand-700 mb-2">Practice Area</label>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                onClick={() => setPracticeArea('Personal Injury')}
+                className={`px-4 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
+                  practiceArea === 'Personal Injury'
+                    ? 'border-accent-500 bg-accent-50 text-accent-700'
+                    : 'border-surface-200 text-brand-600 hover:border-accent-300 hover:bg-surface-50'
+                }`}
+              >
+                Personal Injury
+              </button>
+              <button
+                onClick={() => setPracticeArea('Workers\' Compensation')}
+                className={`px-4 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
+                  practiceArea === 'Workers\' Compensation'
+                    ? 'border-accent-500 bg-accent-50 text-accent-700'
+                    : 'border-surface-200 text-brand-600 hover:border-accent-300 hover:bg-surface-50'
+                }`}
+              >
+                Workers' Comp
+              </button>
+            </div>
+          </div>
 
           <button
             onClick={() => setShowPicker(true)}
@@ -620,8 +683,10 @@ function App() {
         <FirmDashboard
           apiUrl={API_URL}
           firmRoot={firmRoot}
+          practiceArea={practiceArea}
           onSelectCase={(path) => handleCaseSelect(path)}
           onChangeFirmRoot={() => setShowPicker(true)}
+          onChangePracticeArea={setPracticeArea}
           userEmail={authState?.email}
           onLogout={handleLogout}
           todos={todos}
@@ -630,6 +695,8 @@ function App() {
           firmChatPrompt={firmChatPrompt}
           forceShowFirmChat={forceShowFirmChat}
           onFirmChatPromptUsed={handleFirmChatPromptUsed}
+          knowledgeVersion={knowledgeVersion}
+          teamContext={authState?.team}
         />
         {showPicker && (
           <FolderPicker

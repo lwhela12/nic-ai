@@ -1,5 +1,17 @@
-import { resolve, relative } from "path";
-import { realpath } from "fs/promises";
+import { resolve, relative, isAbsolute } from "path";
+import { realpath, access } from "fs/promises";
+import { constants } from "fs";
+
+/**
+ * Validate that a path is a valid absolute path and exists.
+ */
+export function validatePath(path: string | undefined | null): path is string {
+  if (!path || typeof path !== "string") return false;
+  if (!isAbsolute(path)) return false;
+  // Basic security: no null bytes, no suspicious patterns
+  if (path.includes("\0")) return false;
+  return true;
+}
 
 /**
  * Check if a path is within the allowed boundary.

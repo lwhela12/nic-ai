@@ -142,8 +142,59 @@ Case Level (init)
     └── Reads documents, extracts info, returns structured data
 ```
 
+## Practice Areas
+
+The index schema supports two practice areas:
+
+### Personal Injury (PI) - Default
+- `practice_area`: `undefined` or `"Personal Injury"`
+- Assessment fields: `liability_assessment`, `injury_tier`, `estimated_value_range`, `policy_limits_demand_appropriate`
+- Summary fields: `policy_limits`, `claim_numbers`, `dol` (date of loss)
+- Case phases: `Intake`, `Investigation`, `Treatment`, `Demand`, `Negotiation`, `Settlement`, `Complete`
+
+### Workers' Compensation (WC)
+- `practice_area`: `"Workers' Compensation"`
+- Assessment fields: `compensability`, `claim_type`, `estimated_ttd_weeks`, `estimated_ppd_rating`, `third_party_potential`
+- Summary fields:
+  - `employer` (object): `name`, `address`, `phone`, `contact_name`
+  - `wc_carrier` (object): `name`, `claim_number`, `adjuster_name`, `adjuster_phone`, `tpa_name`
+  - `disability_status` (object): `type` (TTD/TPD/PPD/PTD), `aww`, `compensation_rate`, `mmi_date`, `ppd_rating`
+  - `job_title`, `injury_description`, `body_parts`
+  - `doi` (date of injury) → normalized to `incident_date`
+- Case phases: `Intake`, `Investigation`, `Treatment`, `MMI Evaluation`, `Benefits Resolution`, `Settlement/Hearing`, `Closed`
+
+### WC Assessment Field Definitions
+- `compensability` (string): One of `clearly_compensable`, `likely_compensable`, `disputed`, `denied`
+- `claim_type` (string): One of `specific_injury`, `occupational_disease`, `cumulative_trauma`
+- `estimated_ttd_weeks` (number): Estimated weeks of Temporary Total Disability benefits
+- `estimated_ppd_rating` (number): Estimated Permanent Partial Disability rating percentage
+- `third_party_potential` (boolean): Whether there is potential for a third-party liability claim
+
+### WC Summary Sub-objects
+
+#### employer
+- `name` (string, required): Employer company name
+- `address` (object): Street, city, state, zip
+- `phone` (string): Employer phone number
+- `contact_name` (string): Contact person at employer
+
+#### wc_carrier
+- `name` (string, required): Workers' comp insurance carrier name
+- `claim_number` (string): WC claim number
+- `adjuster_name` (string): Adjuster's name
+- `adjuster_phone` (string): Adjuster's phone
+- `tpa_name` (string): Third Party Administrator name if applicable
+
+#### disability_status
+- `type` (string): One of `TTD` (Temporary Total), `TPD` (Temporary Partial), `PPD` (Permanent Partial), `PTD` (Permanent Total)
+- `aww` (number): Average Weekly Wage in dollars
+- `compensation_rate` (number): Weekly compensation rate in dollars
+- `mmi_date` (string): Maximum Medical Improvement date
+- `ppd_rating` (number): Permanent Partial Disability rating percentage
+
 ## Phase Detection
 
+### Personal Injury Phases
 After indexing, phase is determined by checking:
 1. **Complete**: Release signed in Settlement folder
 2. **Settlement**: Settlement memo exists
@@ -152,3 +203,12 @@ After indexing, phase is determined by checking:
 5. **Treatment**: Medical records in Records & Bills
 6. **Investigation**: LOR files present
 7. **Intake**: Default if intake exists
+
+### Workers' Compensation Phases
+1. **Closed**: Case resolved, all benefits paid or denied
+2. **Settlement/Hearing**: Active settlement negotiations or hearing scheduled
+3. **Benefits Resolution**: Dispute over benefits, waiting on determinations
+4. **MMI Evaluation**: At or near Maximum Medical Improvement, awaiting rating
+5. **Treatment**: Active medical treatment ongoing
+6. **Investigation**: Compensability investigation underway
+7. **Intake**: Default initial phase
