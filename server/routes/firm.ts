@@ -526,7 +526,8 @@ async function buildCaseSummary(
     // Extract from index - handle various formats
     caseSummary.clientName = index.summary?.client || index.client_name || index.summary?.client_name || index.case_name?.split(" v.")[0] || caseName;
     caseSummary.casePhase = index.case_phase || index.summary?.case_phase || "Unknown";
-    caseSummary.dateOfLoss = index.summary?.dol || index.date_of_loss || index.summary?.date_of_loss || index.dol;
+    // Check incident_date (canonical field), dol (PI legacy), and date_of_loss variants
+    caseSummary.dateOfLoss = index.summary?.incident_date || index.summary?.dol || index.date_of_loss || index.summary?.date_of_loss || index.dol;
     caseSummary.policyLimits = index.policy_limits || index.summary?.policy_limits || index["3p_policy_limits"];
 
     caseSummary.totalSpecials = parseAmount(index.total_specials)
@@ -1947,6 +1948,11 @@ async function indexCase(
       policy_limits_demand_appropriate: existingIndex?.policy_limits_demand_appropriate ?? null,
     };
 
+    // Add practice area if specified (omit for PI to maintain backward compat)
+    if (options?.practiceArea === PRACTICE_AREAS.WC) {
+      initialIndex.practice_area = PRACTICE_AREAS.WC;
+    }
+
     // Add linked case fields if this is a subcase
     if (options?.parentCase) {
       initialIndex.parent_case = options.parentCase;
@@ -2006,8 +2012,8 @@ async function indexCase(
       }
     );
 
-    // Normalize to canonical schema before writing
-    const normalizedIndex = normalizeIndex(mergedIndex);
+    // Normalize to canonical schema before writing (pass practiceArea for WC-specific normalization)
+    const normalizedIndex = normalizeIndex(mergedIndex, options?.practiceArea);
 
     // Validate and log any issues (non-blocking)
     const validation = validateIndex(normalizedIndex);

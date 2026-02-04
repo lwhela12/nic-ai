@@ -6,6 +6,7 @@
  */
 
 import type { CaseSummaryResult } from "./case-summary";
+import { PRACTICE_AREAS } from "./index-schema";
 
 // Hypergraph structure from Haiku
 export interface HypergraphField {
@@ -65,12 +66,13 @@ export interface PolicyLimitDetail {
 
 // Final summary structure
 export interface CaseSummary {
+  // Common fields
   client: string;
-  dol: string;
+  dol: string;  // PI: date_of_loss, WC: date_of_injury
+  incident_date?: string;  // Canonical field (normalized from dol/doi)
   dob?: string;
   providers: string[];
   total_charges: number;
-  policy_limits?: Record<string, PolicyLimitDetail>;
   contact?: {
     phone?: string;
     email?: string;
@@ -81,13 +83,40 @@ export interface CaseSummary {
       zip?: string;
     };
   };
+  claim_numbers?: Record<string, string>;
+  case_summary: string;
+
+  // PI-specific fields
+  policy_limits?: Record<string, PolicyLimitDetail>;
   health_insurance?: {
     carrier?: string;
     group_no?: string;
     member_no?: string;
   };
-  claim_numbers?: Record<string, string>;
-  case_summary: string;
+
+  // WC-specific fields
+  employer?: {
+    name?: string;
+    address?: string;
+    phone?: string;
+  };
+  wc_carrier?: {
+    carrier?: string;
+    claim_number?: string;
+    adjuster?: string;
+    adjuster_phone?: string;
+    tpa?: string;
+  };
+  disability_status?: {
+    type?: string;  // TTD, TPD, PPD, PTD
+    aww?: number;   // Average Weekly Wage
+    compensation_rate?: number;
+    mmi_date?: string;
+    ppd_rating?: number;
+  };
+  job_title?: string;
+  injury_description?: string;
+  body_parts?: string[];
 }
 
 /**
@@ -472,6 +501,7 @@ export function mergeToIndex(
   existingIndex: Record<string, any>
 ): Record<string, any> {
   const hg = hypergraphResult.hypergraph;
+  const isWC = existingIndex.practice_area === PRACTICE_AREAS.WC;
 
   // Get consensus values with fallback
   const getConsensus = (field: string, fallback: string = ""): string => {
@@ -480,23 +510,113 @@ export function mergeToIndex(
     return f.consensus;
   };
 
-  // Build summary object
+  // Parse amount from string (handles "$1,234.56" format)
+  const parseAmount = (val: string): number | undefined => {
+    if (!val) return undefined;
+    const cleaned = val.replace(/[$,]/g, '');
+    const num = parseFloat(cleaned);
+    return isNaN(num) ? undefined : num;
+  };
+
+  // Get incident date - WC uses doi (date_of_injury), PI uses dol (date_of_loss)
+  const incidentDate = isWC
+    ? (getConsensus("date_of_injury") || getConsensus("doi"))
+    : (getConsensus("date_of_loss") || getConsensus("dol"));
+
+  // Build summary object with common fields
   const summary: CaseSummary = {
-    client: getConsensus("client_name", "Unknown"),
-    dol: getConsensus("date_of_loss") || getConsensus("dol", "Unknown"),
+    client: getConsensus("client_name") || getConsensus("claimant_name", "Unknown"),
+    dol: incidentDate || "Unknown",
+    incident_date: incidentDate || undefined,
     dob: getConsensus("date_of_birth") || getConsensus("dob") || undefined,
     providers: extractProviders(hg),
     total_charges: calculateTotalCharges(hg),
-    policy_limits: buildPolicyLimits(hg),
     contact: {
       phone: getConsensus("client_phone") || getConsensus("phone") || undefined,
       email: getConsensus("client_email") || getConsensus("email") || undefined,
       address: parseAddress(getConsensus("client_address") || getConsensus("address"))
     },
-    health_insurance: buildHealthInsurance(hg),
     claim_numbers: buildClaimNumbers(hg),
     case_summary: caseSummaryResult.case_summary
   };
+
+  // Add PI-specific fields
+  if (!isWC) {
+    summary.policy_limits = buildPolicyLimits(hg);
+    summary.health_insurance = buildHealthInsurance(hg);
+  }
+
+  // Add WC-specific fields
+  if (isWC) {
+    // Employer info
+    const employerName = getConsensus("employer_name") || getConsensus("employer");
+    const employerAddress = getConsensus("employer_address");
+    const employerPhone = getConsensus("employer_phone");
+    if (employerName || employerAddress || employerPhone) {
+      summary.employer = {
+        name: employerName || undefined,
+        address: employerAddress || undefined,
+        phone: employerPhone || undefined,
+      };
+    }
+
+    // WC carrier info
+    const wcCarrier = getConsensus("wc_carrier") || getConsensus("wc_insurance_carrier");
+    const wcClaimNumber = getConsensus("wc_claim_number") || getConsensus("claim_number");
+    const adjusterName = getConsensus("adjuster_name");
+    const adjusterPhone = getConsensus("adjuster_phone");
+    const tpa = getConsensus("tpa_name") || getConsensus("third_party_administrator");
+    if (wcCarrier || wcClaimNumber || adjusterName || tpa) {
+      summary.wc_carrier = {
+        carrier: wcCarrier || undefined,
+        claim_number: wcClaimNumber || undefined,
+        adjuster: adjusterName || undefined,
+        adjuster_phone: adjusterPhone || undefined,
+        tpa: tpa || undefined,
+      };
+    }
+
+    // Disability status
+    const disabilityType = getConsensus("disability_type");
+    const awwStr = getConsensus("aww") || getConsensus("average_weekly_wage");
+    const compRateStr = getConsensus("compensation_rate") || getConsensus("weekly_compensation_rate");
+    const mmiDate = getConsensus("mmi_date");
+    const ppdRatingStr = getConsensus("ppd_rating");
+    const aww = parseAmount(awwStr);
+    const compRate = parseAmount(compRateStr);
+    const ppdRating = parseAmount(ppdRatingStr);
+    if (disabilityType || aww || compRate || mmiDate || ppdRating) {
+      summary.disability_status = {
+        type: disabilityType || undefined,
+        aww: aww,
+        compensation_rate: compRate,
+        mmi_date: mmiDate || undefined,
+        ppd_rating: ppdRating,
+      };
+    }
+
+    // Job info
+    const jobTitle = getConsensus("job_title");
+    if (jobTitle) {
+      summary.job_title = jobTitle;
+    }
+
+    // Injury details
+    const injuryDescription = getConsensus("injury_description");
+    if (injuryDescription) {
+      summary.injury_description = injuryDescription;
+    }
+
+    // Body parts (parse from consensus or extract from hypergraph)
+    const bodyPartsConsensus = getConsensus("body_parts") || getConsensus("body_parts_injured");
+    if (bodyPartsConsensus) {
+      // Parse comma-separated or array-like string
+      const parts = bodyPartsConsensus.split(/[,;]/).map(p => p.trim()).filter(p => p);
+      if (parts.length > 0) {
+        summary.body_parts = parts;
+      }
+    }
+  }
 
   // Clean up empty nested objects
   if (!summary.contact?.phone && !summary.contact?.email && !summary.contact?.address?.street) {
@@ -510,6 +630,16 @@ export function mergeToIndex(
   }
   if (Object.keys(summary.policy_limits || {}).length === 0) {
     delete summary.policy_limits;
+  }
+  // Clean up empty WC objects
+  if (summary.employer && !summary.employer.name && !summary.employer.address && !summary.employer.phone) {
+    delete summary.employer;
+  }
+  if (summary.wc_carrier && !summary.wc_carrier.carrier && !summary.wc_carrier.claim_number && !summary.wc_carrier.adjuster && !summary.wc_carrier.tpa) {
+    delete summary.wc_carrier;
+  }
+  if (summary.disability_status && !summary.disability_status.type && !summary.disability_status.aww && !summary.disability_status.compensation_rate) {
+    delete summary.disability_status;
   }
 
   // Build needs_review and errata
