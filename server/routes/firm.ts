@@ -124,7 +124,8 @@ const SYNTHESIS_SECTION_IDS = [
 ];
 
 // JSON Schema for structured synthesis output (used with direct API call)
-const SYNTHESIS_SCHEMA = {
+// PI-specific schema
+const SYNTHESIS_SCHEMA_PI = {
   type: "object" as const,
   properties: {
     needs_review: {
@@ -259,6 +260,199 @@ const SYNTHESIS_SCHEMA = {
     "case_phase"
   ] as const
 };
+
+// WC-specific schema for synthesis
+const SYNTHESIS_SCHEMA_WC = {
+  type: "object" as const,
+  properties: {
+    // Shared fields (same structure as PI)
+    needs_review: {
+      type: "array" as const,
+      description: "Fields requiring human review due to conflicts or uncertainty",
+      items: {
+        type: "object" as const,
+        properties: {
+          field: { type: "string" as const, description: "Field name or path (e.g., 'charges:Provider Name')" },
+          conflicting_values: {
+            type: "array" as const,
+            items: { type: "string" as const },
+            description: "The different values found"
+          },
+          sources: {
+            type: "array" as const,
+            items: { type: "string" as const },
+            description: "Source documents for each value"
+          },
+          reason: { type: "string" as const, description: "Why this requires human review" }
+        },
+        required: ["field", "conflicting_values", "sources", "reason"] as const
+      }
+    },
+    errata: {
+      type: "array" as const,
+      description: "Documentation of decisions made during synthesis",
+      items: {
+        type: "object" as const,
+        properties: {
+          field: { type: "string" as const, description: "Field that was resolved" },
+          decision: { type: "string" as const, description: "Value chosen" },
+          evidence: { type: "string" as const, description: "What the extractions showed" },
+          confidence: { type: "string" as const, enum: ["high", "medium", "low"] }
+        },
+        required: ["field", "decision", "evidence", "confidence"] as const
+      }
+    },
+    case_analysis: {
+      type: "string" as const,
+      description: "Substantive WC case analysis: compensability assessment, injury classification, benefits calculation, treatment status, next steps"
+    },
+    // WC-specific assessment fields
+    compensability: {
+      type: "string" as const,
+      enum: ["clearly_compensable", "likely_compensable", "disputed", "denied"],
+      description: "Compensability status of the claim based on AOE/COE analysis"
+    },
+    claim_type: {
+      type: "string" as const,
+      enum: ["specific_injury", "occupational_disease", "cumulative_trauma"],
+      description: "Type of workers' compensation claim"
+    },
+    estimated_ttd_weeks: {
+      type: "number" as const,
+      description: "Estimated weeks of Temporary Total Disability benefits"
+    },
+    estimated_ppd_rating: {
+      type: "number" as const,
+      description: "Estimated Permanent Partial Disability rating percentage"
+    },
+    third_party_potential: {
+      type: "boolean" as const,
+      description: "Whether there is potential for a third-party liability claim"
+    },
+    // WC summary structure
+    summary: {
+      type: "object" as const,
+      description: "Case summary fields for Workers' Compensation",
+      properties: {
+        client: { type: "string" as const, description: "Client's full name" },
+        doi: { type: "string" as const, description: "Date of injury (MM/DD/YYYY or YYYY-MM-DD)" },
+        dob: { type: "string" as const, description: "Client's date of birth" },
+        providers: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: "List of medical provider names"
+        },
+        total_charges: { type: "number" as const, description: "Total medical charges in dollars" },
+        contact: {
+          type: "object" as const,
+          properties: {
+            phone: { type: "string" as const },
+            email: { type: "string" as const },
+            address: {
+              type: "object" as const,
+              properties: {
+                street: { type: "string" as const },
+                city: { type: "string" as const },
+                state: { type: "string" as const },
+                zip: { type: "string" as const }
+              }
+            }
+          }
+        },
+        health_insurance: {
+          type: "object" as const,
+          properties: {
+            carrier: { type: "string" as const },
+            group_no: { type: "string" as const },
+            member_no: { type: "string" as const }
+          }
+        },
+        case_summary: { type: "string" as const, description: "Brief narrative summary of the case" },
+        // WC-specific summary fields
+        employer: {
+          type: "object" as const,
+          description: "Employer information",
+          properties: {
+            name: { type: "string" as const, description: "Employer company name" },
+            address: {
+              type: "object" as const,
+              properties: {
+                street: { type: "string" as const },
+                city: { type: "string" as const },
+                state: { type: "string" as const },
+                zip: { type: "string" as const }
+              }
+            },
+            phone: { type: "string" as const }
+          },
+          required: ["name"] as const
+        },
+        wc_carrier: {
+          type: "object" as const,
+          description: "Workers' compensation insurance carrier information",
+          properties: {
+            name: { type: "string" as const, description: "Insurance carrier name" },
+            claim_number: { type: "string" as const, description: "WC claim number" },
+            adjuster_name: { type: "string" as const },
+            adjuster_phone: { type: "string" as const },
+            tpa_name: { type: "string" as const, description: "Third Party Administrator name if applicable" }
+          }
+        },
+        disability_status: {
+          type: "object" as const,
+          description: "Current disability status and benefits information",
+          properties: {
+            type: {
+              type: "string" as const,
+              enum: ["TTD", "TPD", "PPD", "PTD"],
+              description: "Type of disability (Temporary Total, Temporary Partial, Permanent Partial, Permanent Total)"
+            },
+            aww: { type: "number" as const, description: "Average Weekly Wage in dollars" },
+            compensation_rate: { type: "number" as const, description: "Weekly compensation rate in dollars" },
+            mmi_date: { type: "string" as const, description: "Maximum Medical Improvement date" },
+            ppd_rating: { type: "number" as const, description: "Permanent Partial Disability rating percentage" }
+          }
+        },
+        job_title: { type: "string" as const, description: "Client's job title at time of injury" },
+        injury_description: { type: "string" as const, description: "Description of the work injury" },
+        body_parts: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: "List of affected body parts"
+        }
+      },
+      required: ["client", "doi", "providers", "total_charges", "employer"] as const
+    },
+    case_name: {
+      type: "string" as const,
+      description: "Case name (typically 'LASTNAME, Firstname')"
+    },
+    case_phase: {
+      type: "string" as const,
+      enum: ["Intake", "Investigation", "Treatment", "MMI Evaluation", "Benefits Resolution", "Settlement/Hearing", "Closed"],
+      description: "Current phase of the Workers' Compensation case"
+    }
+  },
+  required: [
+    "needs_review",
+    "errata",
+    "case_analysis",
+    "compensability",
+    "summary",
+    "case_name",
+    "case_phase"
+  ] as const
+};
+
+/**
+ * Get the appropriate synthesis schema based on practice area.
+ */
+function getSynthesisSchema(practiceArea?: string) {
+  if (practiceArea === PRACTICE_AREAS.WC) {
+    return SYNTHESIS_SCHEMA_WC;
+  }
+  return SYNTHESIS_SCHEMA_PI;
+}
 
 interface CaseSummary {
   path: string;
@@ -1303,7 +1497,7 @@ Analyze the case and use the case_synthesis tool to return your synthesis.`
       tools: [{
         name: "case_synthesis",
         description: "Output the synthesized case analysis with all required fields",
-        input_schema: SYNTHESIS_SCHEMA
+        input_schema: getSynthesisSchema(practiceArea)
       }],
       tool_choice: { type: "tool", name: "case_synthesis" }
     });
@@ -1327,15 +1521,15 @@ Analyze the case and use the case_synthesis tool to return your synthesis.`
 
     // Step 6: Merge synthesis into existing index and write back
     const existingIndex = JSON.parse(documentIndexContent);
-    const merged = {
+    const isWC = practiceArea === PRACTICE_AREAS.WC;
+
+    // Build merged index with practice-area-aware field extraction
+    const merged: Record<string, any> = {
       ...existingIndex,
+      // Common fields
       needs_review: synthesis.needs_review || [],
       errata: synthesis.errata || [],
       case_analysis: synthesis.case_analysis || '',
-      liability_assessment: synthesis.liability_assessment || null,
-      injury_tier: synthesis.injury_tier || null,
-      estimated_value_range: synthesis.estimated_value_range || null,
-      policy_limits_demand_appropriate: synthesis.policy_limits_demand_appropriate ?? null,
       case_name: synthesis.case_name || existingIndex.case_name,
       case_phase: synthesis.case_phase || existingIndex.case_phase,
       // Deep merge summary, preserving folders structure
@@ -1348,6 +1542,49 @@ Analyze the case and use the case_synthesis tool to return your synthesis.`
           : existingIndex.summary?.providers || [],
       }
     };
+
+    // Practice-area-specific assessment fields
+    if (isWC) {
+      // WC fields
+      merged.compensability = synthesis.compensability || null;
+      merged.claim_type = synthesis.claim_type || null;
+      merged.estimated_ttd_weeks = synthesis.estimated_ttd_weeks ?? null;
+      merged.estimated_ppd_rating = synthesis.estimated_ppd_rating ?? null;
+      merged.third_party_potential = synthesis.third_party_potential ?? null;
+      // Ensure WC summary sub-objects are properly merged
+      if (synthesis.summary?.employer) {
+        merged.summary.employer = synthesis.summary.employer;
+      }
+      if (synthesis.summary?.wc_carrier) {
+        merged.summary.wc_carrier = synthesis.summary.wc_carrier;
+      }
+      if (synthesis.summary?.disability_status) {
+        merged.summary.disability_status = synthesis.summary.disability_status;
+      }
+      if (synthesis.summary?.job_title) {
+        merged.summary.job_title = synthesis.summary.job_title;
+      }
+      if (synthesis.summary?.injury_description) {
+        merged.summary.injury_description = synthesis.summary.injury_description;
+      }
+      if (synthesis.summary?.body_parts) {
+        merged.summary.body_parts = synthesis.summary.body_parts;
+      }
+      // Use doi for WC incident date
+      if (synthesis.summary?.doi) {
+        merged.summary.incident_date = synthesis.summary.doi;
+      }
+    } else {
+      // PI fields
+      merged.liability_assessment = synthesis.liability_assessment || null;
+      merged.injury_tier = synthesis.injury_tier || null;
+      merged.estimated_value_range = synthesis.estimated_value_range || null;
+      merged.policy_limits_demand_appropriate = synthesis.policy_limits_demand_appropriate ?? null;
+      // Use dol for PI incident date
+      if (synthesis.summary?.dol) {
+        merged.summary.incident_date = synthesis.summary.dol;
+      }
+    }
 
     await writeFile(indexPath, JSON.stringify(merged, null, 2));
     console.log(`[Sonnet] Wrote merged index to ${indexPath}`);
@@ -1620,7 +1857,7 @@ async function indexCase(
 
     // Run both Haiku calls in parallel
     const [hypergraphResult, caseSummaryResult] = await Promise.all([
-      generateHypergraph(caseFolder, { folders }),
+      generateHypergraph(caseFolder, { folders }, options?.practiceArea),
       generateCaseSummary(initialIndexForSummary, options?.firmRoot)
     ]);
 
@@ -1893,8 +2130,8 @@ async function checkNeedsReindex(casePath: string, indexedAt: number): Promise<b
 // HYPERGRAPH GENERATION - Cross-document consistency analysis
 // ============================================================================
 
-// System prompt for hypergraph generation (Haiku)
-const hypergraphSystemPrompt = `You are a data consistency analyzer for a Personal Injury law firm.
+// System prompt for hypergraph generation (Haiku) - Personal Injury
+const hypergraphSystemPromptPI = `You are a data consistency analyzer for a Personal Injury law firm.
 
 YOUR TASK: Read a document index JSON and build a hypergraph that groups related data points across documents to identify inconsistencies.
 
@@ -1973,6 +2210,99 @@ IMPORTANT:
 - For provider-specific fields, use format "charges:<provider_name>"
 - If a field appears in only one document, confidence is lower but no conflict`;
 
+// System prompt for hypergraph generation (Haiku) - Workers' Compensation
+const hypergraphSystemPromptWC = `You are a data consistency analyzer for a Workers' Compensation law firm.
+
+YOUR TASK: Read a document index JSON and build a hypergraph that groups related data points across documents to identify inconsistencies.
+
+HYPERGRAPH STRUCTURE:
+- Each "hyperedge" groups all mentions of a semantic field (e.g., all dates of injury, all DOBs, all AWW values)
+- Nodes within a hyperedge should have the same value if extracted correctly
+- Inconsistencies = nodes in same hyperedge with different values
+
+FIELDS TO TRACK:
+1. date_of_injury / doi - The work injury date (critical - appears in many docs)
+2. date_of_birth / dob - Client DOB
+3. client_name / claimant_name - Client's full name
+4. client_phone / phone - Client phone number
+5. client_email / email - Client email address
+6. client_address / address - Client mailing address
+7. employer_name / employer - Employer company name (critical for WC)
+8. employer_address - Employer address
+9. employer_phone - Employer phone
+10. job_title - Client's job title/position
+11. wc_carrier / wc_insurance_carrier - Workers' comp insurance carrier name
+12. wc_claim_number / claim_number - WC claim number
+13. tpa_name / third_party_administrator - Third Party Administrator (e.g., CCMSI)
+14. adjuster_name - Claims adjuster name
+15. adjuster_phone - Claims adjuster phone
+16. aww / average_weekly_wage - Average Weekly Wage (critical for benefits calculation)
+17. compensation_rate / weekly_compensation_rate - Weekly benefit rate
+18. disability_type - TTD/TPD/PPD/PTD status
+19. injury_description - Description of injury mechanism
+20. body_parts / body_parts_injured - Affected body parts
+21. providers - Treating physicians/facilities
+22. mmi_date - Maximum Medical Improvement date
+23. ppd_rating - Permanent Partial Disability rating percentage
+
+ANALYSIS RULES:
+1. Normalize values for comparison:
+   - Dates: treat "6/25/2023", "06/25/2023", "6/25/23" as equivalent
+   - Money: treat "$6,558", "6558", "6,558.00" as equivalent
+   - Names: ignore minor variations (case, spacing)
+   - Employer: "Caesars Palace" = "CAESARS PALACE" = "Caesar's Palace"
+2. Count how many documents support each value
+3. Majority value = consensus (higher confidence)
+4. Flag outliers with their source documents
+
+HANDLING UNCERTAINTY:
+- If document counts are EQUAL (e.g., 1:1 or 2:2), do NOT declare a consensus. Set consensus to "UNCERTAIN" and confidence to 0.
+- Do NOT guess which document is "more authoritative" or "more recent" - that's not your job.
+- AWW and compensation_rate conflicts are CRITICAL - always flag them.
+
+OUTPUT FORMAT - Return ONLY valid JSON:
+{
+  "hypergraph": {
+    "<field_name>": {
+      "values": [
+        { "value": "<normalized_value>", "sources": ["file1.pdf", "file2.pdf"], "count": 2 }
+      ],
+      "consensus": "<majority_value>",
+      "confidence": 0.95,
+      "has_conflict": true|false
+    }
+  },
+  "conflicts": [
+    {
+      "field": "<field_name>",
+      "consensus_value": "<majority_value>",
+      "consensus_sources": ["file1.pdf", "file2.pdf"],
+      "outlier_value": "<different_value>",
+      "outlier_sources": ["file3.pdf"],
+      "likely_reason": "<optional explanation>"
+    }
+  ],
+  "summary": {
+    "total_fields_analyzed": 8,
+    "fields_with_conflicts": 2,
+    "confidence_score": 0.85
+  }
+}
+
+IMPORTANT:
+- Return ONLY the JSON object, no markdown, no explanation
+- Only include fields that have actual data in the index
+- AWW and compensation_rate are CRITICAL for WC - always extract if present
+- If a field appears in only one document, confidence is lower but no conflict`;
+
+// Helper to get the right hypergraph prompt based on practice area
+function getHypergraphPrompt(practiceArea?: string): string {
+  if (practiceArea === PRACTICE_AREAS.WC) {
+    return hypergraphSystemPromptWC;
+  }
+  return hypergraphSystemPromptPI;
+}
+
 // Generate hypergraph from document index
 interface HypergraphResult {
   hypergraph: Record<string, {
@@ -1999,9 +2329,10 @@ interface HypergraphResult {
 
 async function generateHypergraph(
   caseFolder: string,
-  documentIndex: Record<string, any>
+  documentIndex: Record<string, any>,
+  practiceArea?: string
 ): Promise<HypergraphResult> {
-  console.log(`\n========== GENERATING HYPERGRAPH ==========`);
+  console.log(`\n========== GENERATING HYPERGRAPH (${practiceArea || 'PI'}) ==========`);
 
   let result: HypergraphResult = {
     hypergraph: {},
@@ -2038,7 +2369,7 @@ ${indexJson}
 Return ONLY the JSON hypergraph. No explanation, no planning - just the JSON object.`,
     options: {
       cwd: caseFolder,
-      systemPrompt: hypergraphSystemPrompt,
+      systemPrompt: getHypergraphPrompt(practiceArea),
       model: "haiku",
       allowedTools: [],
       permissionMode: "acceptEdits",
@@ -2130,7 +2461,10 @@ app.post("/generate-hypergraph", async (c) => {
     const indexContent = await readFile(indexPath, "utf-8");
     const documentIndex = JSON.parse(indexContent);
 
-    const hypergraph = await generateHypergraph(caseFolder, documentIndex);
+    // Detect practice area from existing index
+    const practiceArea = documentIndex.practice_area;
+
+    const hypergraph = await generateHypergraph(caseFolder, documentIndex, practiceArea);
 
     return c.json({
       success: true,
