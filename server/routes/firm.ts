@@ -803,11 +803,17 @@ EXTRACTION PRIORITIES:
 6. Wage information:
    - Average Weekly Wage (AWW)
    - Compensation rate (typically 2/3 of AWW)
-7. Disability status:
-   - TTD (Temporary Total Disability) dates and amounts
-   - TPD (Temporary Partial Disability) if applicable
-   - MMI date if determined
-   - PPD rating percentage if assigned
+7. Disability status (IMPORTANT - always determine disability_type when work status is mentioned):
+   - TTD (Temporary Total Disability): Patient is completely off work, cannot work at all
+   - TPD (Temporary Partial Disability): Patient on modified/light duty, working with restrictions
+   - PPD (Permanent Partial Disability): Patient has reached MMI with permanent impairment rating
+   - PTD (Permanent Total Disability): Patient permanently unable to work
+
+   INFERENCE RULES for disability_type:
+   - "Off work", "no work", "cannot work" → TTD
+   - "Modified duty", "light duty", "work restrictions", "limited duty" → TPD
+   - "MMI reached" + impairment rating → PPD
+   - Always extract disability_type if work status or benefits are mentioned
 8. Medical treatment:
    - Treating physician name (ATP)
    - Treatment dates and types
@@ -909,10 +915,19 @@ EXTRACTION FOCUS:
 - WC Carrier name, claim number, adjuster
 - Body parts injured, diagnosis codes
 - Average Weekly Wage (AWW), compensation rate
-- TTD status and payment amounts
+- disability_type (IMPORTANT - always determine when work status mentioned):
+  * TTD = off work completely, cannot work
+  * TPD = modified/light duty, working with restrictions
+  * PPD = MMI reached with permanent impairment rating
+  * PTD = permanently unable to work
 - MMI date, PPD rating if present
 - Treating physician (ATP), work restrictions
 - Hearing case numbers and dates
+
+DISABILITY TYPE INFERENCE:
+- "Off work", "no work", "cannot work" → disability_type: "TTD"
+- "Modified duty", "light duty", "work restrictions" → disability_type: "TPD"
+- "MMI reached" + rating percentage → disability_type: "PPD"
 
 OUTPUT FORMAT - Return ONLY valid JSON:
 {
