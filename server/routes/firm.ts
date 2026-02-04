@@ -10,7 +10,7 @@ import { readFileSync, existsSync } from "fs";
 import { join, relative, dirname } from "path";
 import { homedir } from "os";
 import { getFirmSession, saveFirmSession } from "../sessions";
-import { PHASE_RULES } from "../shared/phase-rules";
+import { PHASE_RULES, getPhaseRules } from "../shared/phase-rules";
 import { loadPracticeGuide, loadSectionsByIds, clearKnowledgeCache } from "./knowledge";
 import { extractTextFromFile } from "../lib/extract";
 import { generateCaseSummary } from "../lib/case-summary";
@@ -20,6 +20,7 @@ import {
   normalizeIndex,
   validateIndex,
   FILE_EXTRACTION_TOOL_SCHEMA,
+  PRACTICE_AREAS,
   type DocumentIndex,
 } from "../lib/index-schema";
 
@@ -28,7 +29,7 @@ import {
 // ============================================================================
 
 const DEV_MODE = process.env.DEV_MODE === "true" || process.env.NODE_ENV !== "production";
-const SUBSCRIPTION_SERVER = process.env.CLAUDE_PI_SERVER || "https://api.claude-pi.com";
+const SUBSCRIPTION_SERVER = process.env.CLAUDE_PI_SERVER || "https://claude-pi-five.vercel.app";
 const CONFIG_DIR = process.env.CLAUDE_PI_CONFIG_DIR || join(homedir(), ".claude-pi");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 
@@ -273,15 +274,27 @@ interface CaseSummary {
   solDaysRemaining?: number;
   needsReindex?: boolean;
   providers?: string[];
+  practiceArea?: string;
+  // WC-specific fields
+  employer?: string;
+  ttdStatus?: string;
+  aww?: number;
+  compensationRate?: number;
+  openHearings?: Array<{ case_number: string; type: string; next_date?: string; issue?: string }>;
+  // Team assignments
+  assignments?: Array<{ userId: string; assignedAt: string; assignedBy: string }>;
 }
 
 // Get all cases in a firm's root folder
 app.get("/cases", async (c) => {
   const root = c.req.query("root");
+  const practiceArea = c.req.query("practiceArea"); // Firm-level setting from UI
 
   if (!root) {
     return c.json({ error: "root query param required" }, 400);
   }
+
+  const isWC = practiceArea === PRACTICE_AREAS.WC;
 
   try {
     const entries = await readdir(root, { withFileTypes: true });
@@ -377,6 +390,30 @@ app.get("/cases", async (c) => {
           caseSummary.providers = index.summary.providers;
         }
 
+        // Practice area - use firm-level setting, fallback to index
+        caseSummary.practiceArea = practiceArea || index.practice_area || index.practiceArea;
+
+        // WC-specific fields (based on firm-level practice area setting)
+        if (isWC) {
+          // Employer
+          caseSummary.employer = index.summary?.employer?.name || index.summary?.employer;
+
+          // TTD Status
+          caseSummary.ttdStatus = index.summary?.disability_status?.type || index.ttd_status;
+
+          // AWW and compensation rate
+          caseSummary.aww = parseAmount(index.summary?.disability_status?.aww) || parseAmount(index.aww);
+          caseSummary.compensationRate = parseAmount(index.summary?.disability_status?.compensation_rate) || parseAmount(index.compensation_rate);
+
+          // Open hearings
+          caseSummary.openHearings = index.open_hearings;
+        }
+
+        // Team assignments
+        if (Array.isArray(index.assignments)) {
+          caseSummary.assignments = index.assignments;
+        }
+
         // Check if needs reindex (files modified after index)
         caseSummary.needsReindex = await checkNeedsReindex(casePath, indexStats.mtimeMs);
 
@@ -421,8 +458,12 @@ app.get("/cases", async (c) => {
 // FILE EXTRACTION SYSTEM - One agent per file, server-side orchestration
 // ============================================================================
 
-// System prompt for structured extraction (used with tool_use for schema enforcement)
-const fileExtractionSystemPrompt = `You are a document extraction agent for a Personal Injury law firm in Nevada (Muslusky Law).
+// =============================================================================
+// PRACTICE-AREA-AWARE EXTRACTION PROMPTS
+// =============================================================================
+
+// Personal Injury extraction prompt
+const PI_EXTRACTION_PROMPT = `You are a document extraction agent for a Personal Injury law firm in Nevada.
 
 YOUR TASK: Analyze the provided document text and extract key information using the extract_document tool.
 
@@ -461,8 +502,73 @@ CRITICAL FOR DECLARATION PAGES:
 
 Always call the extract_document tool with your findings.`;
 
-// System prompt for fallback when pre-extraction fails (agent reads file with tools)
-const fileExtractionSystemPromptWithTools = `You are a document extraction agent for a Personal Injury law firm in Nevada (Muslusky Law).
+// Workers' Compensation extraction prompt
+const WC_EXTRACTION_PROMPT = `You are a document extraction agent for a Workers' Compensation law firm in Nevada.
+
+YOUR TASK: Analyze the provided document text and extract key information using the extract_document tool.
+
+DOCUMENT TYPES (use for the "type" field):
+- c4_claim: C-4 Employee's Claim for Compensation form
+- c3_employer_report: C-3 Employer's Report of Industrial Injury
+- c5_carrier_acceptance: C-5 Insurer's Acceptance/Denial of Claim
+- medical_record: Treatment records from ATP (Authorized Treating Physician)
+- medical_bill: Bills from medical providers
+- work_status_report: Work restrictions, light duty documentation
+- ime_report: Independent Medical Examination report
+- mmi_determination: Maximum Medical Improvement determination
+- ppd_rating: Permanent Partial Disability rating report
+- ttd_check: Temporary Total Disability benefit check/stub
+- correspondence: Letters with adjuster, insurer, or DIR
+- authorization: Medical treatment authorizations
+- identification: Driver's license, ID, SSN documents
+- d9_hearing: D-9 Request for Hearing form
+- hearing_notice: Notice of hearing from DIR
+- hearing_decision: Administrative Officer or Hearing Officer decision
+- settlement: Stipulation, settlement agreement
+- wage_records: Pay stubs, W-2s, wage verification
+- job_description: Job duties, physical requirements
+- other: Anything that doesn't fit above
+
+EXTRACTION PRIORITIES:
+1. Claimant name, DOB, SSN (last 4), contact info
+2. Date of injury (DOI) in MM/DD/YYYY format
+3. Employer information:
+   - Employer name, address
+   - Job title at time of injury
+   - Date of hire
+4. WC Carrier/TPA information:
+   - Carrier name, claim number, adjuster name/contact
+5. Injury details:
+   - Body parts injured
+   - Mechanism of injury
+   - ICD-10 diagnosis codes if present
+6. Wage information:
+   - Average Weekly Wage (AWW)
+   - Compensation rate (typically 2/3 of AWW)
+7. Disability status:
+   - TTD (Temporary Total Disability) dates and amounts
+   - TPD (Temporary Partial Disability) if applicable
+   - MMI date if determined
+   - PPD rating percentage if assigned
+8. Medical treatment:
+   - Treating physician name (ATP)
+   - Treatment dates and types
+   - Work restrictions
+9. Hearing information:
+   - Case/docket number
+   - Hearing dates
+   - Issues in dispute
+
+Always call the extract_document tool with your findings.`;
+
+// Function to get the appropriate extraction prompt
+function getFileExtractionSystemPrompt(practiceArea?: string): string {
+  if (practiceArea === PRACTICE_AREAS.WC) return WC_EXTRACTION_PROMPT;
+  return PI_EXTRACTION_PROMPT;
+}
+
+// PI fallback extraction prompt (agent reads file with tools)
+const PI_EXTRACTION_PROMPT_WITH_TOOLS = `You are a document extraction agent for a Personal Injury law firm in Nevada.
 
 YOUR TASK: Read ONE document and extract key information.
 
@@ -511,11 +617,166 @@ IMPORTANT:
 - For all other files: use the Read tool directly
 - If a file cannot be read or parsed, return the JSON with key_info explaining the issue`;
 
+// WC fallback extraction prompt (agent reads file with tools)
+const WC_EXTRACTION_PROMPT_WITH_TOOLS = `You are a document extraction agent for a Workers' Compensation law firm in Nevada.
+
+YOUR TASK: Read ONE document and extract key information.
+
+DOCUMENT TYPES:
+- c4_claim: C-4 Employee's Claim for Compensation
+- c3_employer_report: C-3 Employer's Report of Industrial Injury
+- c5_carrier_acceptance: C-5 Insurer's Acceptance/Denial
+- medical_record: Treatment records from ATP
+- medical_bill: Bills from medical providers
+- work_status_report: Work restrictions, light duty docs
+- ime_report: Independent Medical Examination
+- mmi_determination: Maximum Medical Improvement determination
+- ppd_rating: Permanent Partial Disability rating
+- ttd_check: TTD benefit check/stub
+- correspondence: Letters with adjuster, insurer, DIR
+- authorization: Medical treatment authorizations
+- identification: Driver's license, ID, SSN documents
+- d9_hearing: D-9 Request for Hearing
+- hearing_notice: Notice of hearing from DIR
+- hearing_decision: AO or HO decision
+- settlement: Stipulation, settlement agreement
+- wage_records: Pay stubs, W-2s, wage verification
+- job_description: Job duties, physical requirements
+- other: Anything that doesn't fit above
+
+EXTRACTION FOCUS:
+- Claimant name, DOB, SSN (last 4), contact info
+- Date of injury (DOI)
+- Employer name, job title
+- WC Carrier name, claim number, adjuster
+- Body parts injured, diagnosis codes
+- Average Weekly Wage (AWW), compensation rate
+- TTD status and payment amounts
+- MMI date, PPD rating if present
+- Treating physician (ATP), work restrictions
+- Hearing case numbers and dates
+
+OUTPUT FORMAT - Return ONLY valid JSON:
+{
+  "filename": "<exact filename>",
+  "folder": "<folder name>",
+  "type": "<document_type from list above>",
+  "key_info": "<2-3 sentence summary of most important information>",
+  "extracted_data": {
+    // Include any specific data points found
+  }
+}
+
+IMPORTANT:
+- Return ONLY the JSON object, no markdown, no explanation
+- For PDFs: use pdftotext "filename" - 2>/dev/null | head -200
+- For all other files: use the Read tool directly
+- If a file cannot be read or parsed, return the JSON with key_info explaining the issue`;
+
+// Function to get the appropriate fallback extraction prompt
+function getFileExtractionSystemPromptWithTools(practiceArea?: string): string {
+  if (practiceArea === PRACTICE_AREAS.WC) return WC_EXTRACTION_PROMPT_WITH_TOOLS;
+  return PI_EXTRACTION_PROMPT_WITH_TOOLS;
+}
+
 // Build synthesis system prompt for JSON output (used with direct API call)
-async function buildSynthesisSystemPrompt(firmRoot?: string): Promise<string> {
+async function buildSynthesisSystemPrompt(firmRoot?: string, practiceArea?: string): Promise<string> {
   const practiceKnowledge = await loadSectionsByIds(firmRoot, SYNTHESIS_SECTION_IDS);
   const indexSchema = await loadIndexSchema();
+  const phaseRules = getPhaseRules(practiceArea);
+  const isWC = practiceArea === PRACTICE_AREAS.WC;
 
+  if (isWC) {
+    return `You are a case analyst and summarizer for a Workers' Compensation law firm in Nevada.
+
+You will receive:
+1. document_index.json - Data extracted from all case documents
+2. hypergraph_analysis.json - Cross-document analysis showing consensus values and conflicts
+
+YOUR JOB: Analyze the case substantively and return a JSON synthesis. Do NOT make any tool calls.
+
+## PRACTICE KNOWLEDGE
+
+${practiceKnowledge}
+
+## CANONICAL INDEX SCHEMA
+
+${indexSchema}
+
+## ANALYSIS WORKFLOW:
+
+1. **Case Analysis** — Using the practice knowledge above, assess:
+   - **Compensability**: Is the claim accepted, denied, or disputed?
+   - **Injury severity**: Body parts affected, surgical vs conservative treatment
+   - **Disability status**: TTD ongoing, TPD, or MMI reached? PPD rating if applicable
+   - **Benefits status**: Are TTD payments current? Any disputes or suspensions?
+   - **Document quality gaps**: What critical documents are missing?
+
+2. Use hypergraph consensus values where available
+
+3. Generate a case summary consolidating:
+   - Contact info into summary.contact
+   - Employer info into summary.employer (name, address, job_title)
+   - WC carrier info into summary.wc_carrier (carrier, claim_number, adjuster)
+   - Disability status into summary.disability_status (type, aww, compensation_rate, mmi_date, ppd_rating)
+
+4. Document ALL judgment calls in "errata"
+
+5. Put CRITICAL unresolved conflicts in "needs_review"
+
+## CRITICAL: HANDLING HYPERGRAPH CONFLICTS
+
+**MANDATORY needs_review items** - If the hypergraph shows ANY of these, you MUST add to needs_review:
+1. Any field where consensus is "UNCERTAIN" - these REQUIRE human decision
+2. Any AWW or compensation rate conflicts
+3. Any date_of_injury conflicts
+4. Any PPD rating conflicts
+
+**You are NOT authorized to resolve UNCERTAIN values.** When hypergraph says consensus: "UNCERTAIN", you MUST:
+1. Add it to needs_review with both values and their sources
+2. NOT pick one value to use in the summary
+3. Use "NEEDS REVIEW" or leave empty in summary fields
+
+## ERRATA - Document ALL decisions
+
+Every field you fill in should have an errata entry:
+{
+  "field": "<what field>",
+  "decision": "<value you used>",
+  "evidence": "<what the extractions showed>",
+  "confidence": "high|medium|low"
+}
+
+## PHASE RULES:
+${Object.entries(phaseRules).map(([phase, desc]) => `- ${phase}: ${desc}`).join('\n')}
+
+## OUTPUT FORMAT
+
+Return a JSON object with these fields:
+- needs_review: Array of conflicts requiring human review
+- errata: Array of documented decisions
+- case_analysis: String with substantive analysis (compensability, injury severity, disability status, benefits status, gaps, next steps)
+- compensability_status: "accepted" | "denied" | "disputed"
+- disability_type: "ttd" | "tpd" | "ppd" | "ptd"
+- summary: Object with:
+  - client: Claimant name
+  - doi: Date of injury (MM/DD/YYYY)
+  - dob: Date of birth
+  - providers: Array of provider names (strings)
+  - total_charges: Total medical charges
+  - employer: { name, address, job_title }
+  - wc_carrier: { carrier, claim_number, adjuster }
+  - disability_status: { type, aww, compensation_rate, mmi_date, ppd_rating }
+  - contact: { phone, email, address }
+  - case_summary: Brief narrative summary
+- case_name: e.g. "LASTNAME, Firstname"
+- case_phase: One of Intake, Investigation, Treatment, MMI Evaluation, Benefits Resolution, Settlement/Hearing, Closed
+- open_hearings: Array of { case_number, type, next_date, issue }
+
+**IMPORTANT**: You MUST include needs_review and errata arrays. Empty arrays only if truly zero conflicts.`;
+  }
+
+  // Personal Injury synthesis prompt (default)
   return `You are a case analyst and summarizer for a Personal Injury law firm in Nevada.
 
 You will receive:
@@ -581,7 +842,7 @@ Every field you fill in should have an errata entry:
 }
 
 ## PHASE RULES:
-${Object.entries(PHASE_RULES).map(([phase, desc]) => `- ${phase}: ${desc}`).join('\n')}
+${Object.entries(phaseRules).map(([phase, desc]) => `- ${phase}: ${desc}`).join('\n')}
 
 ## OUTPUT FORMAT
 
@@ -656,6 +917,7 @@ async function extractFile(
   filePath: string, // relative path like "Intake/Intake.pdf"
   fileIndex: number,
   totalFiles: number,
+  practiceArea?: string,
   onProgress?: (event: { type: string; [key: string]: any }) => void
 ): Promise<FileExtraction> {
   const filename = filePath.split('/').pop() || filePath;
@@ -739,7 +1001,7 @@ async function extractFile(
         const response = await getClient().messages.create({
           model: "claude-haiku-4-5-20251001",
           max_tokens: 2000,
-          system: fileExtractionSystemPrompt,
+          system: getFileExtractionSystemPrompt(practiceArea),
           messages: [{
             role: "user",
             content: `Extract information from this document.
@@ -837,7 +1099,7 @@ Return ONLY valid JSON, no markdown.`;
 
     const queryOptions = {
       cwd: caseFolder,
-      systemPrompt: fileExtractionSystemPromptWithTools,
+      systemPrompt: getFileExtractionSystemPromptWithTools(practiceArea),
       model: "haiku" as const,
       allowedTools: ["Bash", "Read"],
       permissionMode: "acceptEdits" as const,
@@ -987,7 +1249,8 @@ Return ONLY valid JSON, no markdown.`;
 async function synthesizeCaseSummary(
   caseFolder: string,
   conflictCount: number,
-  firmRoot?: string
+  firmRoot?: string,
+  practiceArea?: string
 ): Promise<UsageStats> {
   console.log(`\n========== SONNET SYNTHESIS (Single-Turn) ==========`);
   console.log(`[Sonnet] Case folder: ${caseFolder}`);
@@ -1018,7 +1281,7 @@ async function synthesizeCaseSummary(
     console.log(`[Sonnet] Read index (${documentIndexContent.length} chars) and hypergraph (${hypergraphContent.length} chars)`);
 
     // Step 2: Build system prompt
-    const synthesisSystemPrompt = await buildSynthesisSystemPrompt(firmRoot);
+    const synthesisSystemPrompt = await buildSynthesisSystemPrompt(firmRoot, practiceArea);
 
     // Step 3: Make single API call with tool use for structured output
     const response = await getClient().messages.create({
@@ -1129,7 +1392,7 @@ async function listCaseFiles(caseFolder: string): Promise<string[]> {
 async function indexCase(
   caseFolder: string,
   onProgress: (event: { type: string; [key: string]: any }) => void,
-  options?: { incrementalFiles?: string[]; firmRoot?: string }
+  options?: { incrementalFiles?: string[]; firmRoot?: string; practiceArea?: string }
 ): Promise<{ success: boolean; error?: string }> {
   const caseName = caseFolder.split('/').pop() || caseFolder;
   const isIncremental = options?.incrementalFiles && options.incrementalFiles.length > 0;
@@ -1249,7 +1512,7 @@ async function indexCase(
     const extractionResults = await processWithLimit(
       files,
       CONCURRENCY_LIMIT,
-      (filePath, index) => extractFile(caseFolder, filePath, index, files.length, (event) => {
+      (filePath, index) => extractFile(caseFolder, filePath, index, files.length, options?.practiceArea, (event) => {
         onProgress({ ...event, caseName });
       })
     );
@@ -1516,7 +1779,7 @@ async function indexCase(
 
 // Batch index multiple cases - runs indexCase for each in parallel
 app.post("/batch-index", async (c) => {
-  const { root, cases: casesToIndex } = await c.req.json();
+  const { root, cases: casesToIndex, practiceArea } = await c.req.json();
 
   if (!root) {
     return c.json({ error: "root is required" }, 400);
@@ -1567,7 +1830,7 @@ app.post("/batch-index", async (c) => {
             await stream.writeSSE({
               data: JSON.stringify(event)
             });
-          }, { firmRoot: root })
+          }, { firmRoot: root, practiceArea })
         )
       );
 
@@ -2274,6 +2537,99 @@ app.post("/todos", async (c) => {
     return c.json({ success: true });
   } catch (error) {
     console.error("Save todos error:", error);
+    return c.json({
+      error: error instanceof Error ? error.message : String(error),
+    }, 500);
+  }
+});
+
+// =============================================================================
+// CASE ASSIGNMENT ENDPOINTS
+// =============================================================================
+
+// Assign users to a case
+app.put("/case/assign", async (c) => {
+  const { casePath, userIds, assignedBy } = await c.req.json();
+
+  if (!casePath || !userIds || !assignedBy) {
+    return c.json({ error: "casePath, userIds, and assignedBy are required" }, 400);
+  }
+
+  if (!Array.isArray(userIds)) {
+    return c.json({ error: "userIds must be an array" }, 400);
+  }
+
+  try {
+    const indexPath = join(casePath, ".pi_tool", "document_index.json");
+
+    if (!existsSync(indexPath)) {
+      return c.json({ error: "Case index not found" }, 404);
+    }
+
+    const indexContent = await readFile(indexPath, "utf-8");
+    const index = JSON.parse(indexContent);
+
+    // Initialize or update assignments
+    const existingAssignments = index.assignments || [];
+    const existingUserIds = new Set(existingAssignments.map((a: { userId: string }) => a.userId));
+
+    // Add new assignments (don't duplicate)
+    const now = new Date().toISOString();
+    for (const userId of userIds) {
+      if (!existingUserIds.has(userId)) {
+        existingAssignments.push({
+          userId,
+          assignedAt: now,
+          assignedBy: assignedBy.toLowerCase(),
+        });
+      }
+    }
+
+    index.assignments = existingAssignments;
+
+    // Normalize and save
+    const normalized = normalizeIndex(index);
+    await writeFile(indexPath, JSON.stringify(normalized, null, 2));
+
+    return c.json({ success: true, assignments: normalized.assignments });
+  } catch (error) {
+    console.error("Assign case error:", error);
+    return c.json({
+      error: error instanceof Error ? error.message : String(error),
+    }, 500);
+  }
+});
+
+// Remove assignment from a case
+app.delete("/case/unassign", async (c) => {
+  const casePath = c.req.query("casePath");
+  const userId = c.req.query("userId");
+
+  if (!casePath || !userId) {
+    return c.json({ error: "casePath and userId query params are required" }, 400);
+  }
+
+  try {
+    const indexPath = join(casePath, ".pi_tool", "document_index.json");
+
+    if (!existsSync(indexPath)) {
+      return c.json({ error: "Case index not found" }, 404);
+    }
+
+    const indexContent = await readFile(indexPath, "utf-8");
+    const index = JSON.parse(indexContent);
+
+    // Remove the assignment
+    const existingAssignments = index.assignments || [];
+    index.assignments = existingAssignments.filter((a: { userId: string }) => a.userId !== userId);
+
+    // Normalize and save
+    const normalized = normalizeIndex(index);
+    await writeFile(indexPath, JSON.stringify(normalized, null, 2));
+
+    return c.json({ success: true, assignments: normalized.assignments });
+  } catch (error) {
+    console.error("Unassign case error:", error);
     return c.json({
       error: error instanceof Error ? error.message : String(error),
     }, 500);

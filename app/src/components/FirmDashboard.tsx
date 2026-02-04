@@ -3,6 +3,8 @@ import FirmChat from './FirmChat'
 import KnowledgeEditor from './KnowledgeEditor'
 import KnowledgeChat from './KnowledgeChat'
 import TemplateManager from './TemplateManager'
+import TeamManager from './TeamManager'
+import CaseAssignmentDropdown from './CaseAssignmentDropdown'
 
 // URL param helpers for persisting view state across refreshes
 const getUrlParam = (key: string): string | null => {
@@ -34,6 +36,24 @@ interface FirmTodo {
   createdAt: string
 }
 
+type PracticeArea = 'Personal Injury' | 'Workers\' Compensation'
+type TeamRole = 'attorney' | 'case_manager_lead' | 'case_manager' | 'case_manager_assistant'
+type AssignmentFilter = 'all' | 'mine' | 'unassigned'
+
+interface TeamMember {
+  id: string
+  email: string
+  name: string
+  role: TeamRole
+  status: 'pending' | 'active' | 'deactivated'
+}
+
+interface CaseAssignment {
+  userId: string
+  assignedAt: string
+  assignedBy: string
+}
+
 interface CaseSummary {
   path: string
   name: string
@@ -41,13 +61,22 @@ interface CaseSummary {
   indexedAt?: string
   clientName?: string
   casePhase?: string
-  dateOfLoss?: string
+  dateOfLoss?: string  // Also used for DOI in WC
   totalSpecials?: number
   policyLimits?: string | Record<string, unknown>
   statuteOfLimitations?: string
   solDaysRemaining?: number
   needsReindex?: boolean
   providers?: string[]
+  practiceArea?: string
+  // WC-specific fields
+  employer?: string
+  ttdStatus?: string
+  aww?: number
+  compensationRate?: number
+  openHearings?: Array<{ case_number: string; type: string; next_date?: string; issue?: string }>
+  // Team assignments
+  assignments?: CaseAssignment[]
 }
 
 interface FirmData {
@@ -63,8 +92,10 @@ interface FirmData {
 interface Props {
   apiUrl: string
   firmRoot: string
+  practiceArea: PracticeArea
   onSelectCase: (casePath: string) => void
   onChangeFirmRoot: () => void
+  onChangePracticeArea: (pa: PracticeArea) => void
   userEmail?: string
   onLogout?: () => void
   // Todo props - managed by App.tsx
@@ -75,6 +106,18 @@ interface Props {
   firmChatPrompt?: string
   forceShowFirmChat?: boolean
   onFirmChatPromptUsed?: () => void
+  // Knowledge refresh trigger - increments after init
+  knowledgeVersion?: number
+  // Team context - from auth
+  teamContext?: {
+    userId: string
+    role: TeamRole
+    permissions: {
+      canManageTeam: boolean
+      canAssignCases: boolean
+      canViewAllCases: boolean
+    }
+  }
 }
 
 interface BatchProgress {
@@ -166,10 +209,13 @@ const ClipboardDocumentListIcon = () => (
 )
 
 export default function FirmDashboard({
-  apiUrl, firmRoot, onSelectCase, onChangeFirmRoot, userEmail, onLogout,
+  apiUrl, firmRoot, practiceArea, onSelectCase, onChangeFirmRoot, onChangePracticeArea, userEmail, onLogout,
   todos, onDrawerOpen, onTodosUpdated,
-  firmChatPrompt, forceShowFirmChat, onFirmChatPromptUsed
+  firmChatPrompt, forceShowFirmChat, onFirmChatPromptUsed,
+  knowledgeVersion,
+  teamContext
 }: Props) {
+  const isWC = practiceArea === 'Workers\' Compensation'
   const [firmData, setFirmData] = useState<FirmData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -229,6 +275,11 @@ export default function FirmDashboard({
   const [uploadingLogo, setUploadingLogo] = useState(false)
   const [logoDragOver, setLogoDragOver] = useState(false)
 
+  // Team management state
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
+  const [settingsTab, setSettingsTab] = useState<'firm' | 'team'>('firm')
+  const [assignmentFilter, setAssignmentFilter] = useState<AssignmentFilter>('all')
+
   const toggleCase = (path: string) => {
     setSelectedCases(prev => {
       const next = new Set(prev)
@@ -258,7 +309,8 @@ export default function FirmDashboard({
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(`${apiUrl}/api/firm/cases?root=${encodeURIComponent(firmRoot)}`)
+      const practiceAreaParam = isWC ? 'WC' : 'PI'
+      const res = await fetch(`${apiUrl}/api/firm/cases?root=${encodeURIComponent(firmRoot)}&practiceArea=${practiceAreaParam}`)
       if (!res.ok) throw new Error('Failed to load cases')
       const data = await res.json()
       setFirmData(data)
@@ -267,11 +319,24 @@ export default function FirmDashboard({
     } finally {
       setLoading(false)
     }
+  }, [apiUrl, firmRoot, isWC])
+
+  const loadTeamMembers = useCallback(async () => {
+    try {
+      const res = await fetch(`${apiUrl}/api/team?root=${encodeURIComponent(firmRoot)}`)
+      if (res.ok) {
+        const data = await res.json()
+        if (data.configured && data.team?.members) {
+          setTeamMembers(data.team.members)
+        }
+      }
+    } catch {}
   }, [apiUrl, firmRoot])
 
   useEffect(() => {
     loadCases()
-  }, [loadCases])
+    loadTeamMembers()
+  }, [loadCases, loadTeamMembers])
 
   // Check if knowledge base exists
   const checkKnowledge = useCallback(async () => {
@@ -283,7 +348,7 @@ export default function FirmDashboard({
     }
   }, [apiUrl, firmRoot])
 
-  useEffect(() => { checkKnowledge() }, [checkKnowledge])
+  useEffect(() => { checkKnowledge() }, [checkKnowledge, knowledgeVersion])
 
   const loadFirmConfig = useCallback(async () => {
     try {
@@ -411,7 +476,7 @@ export default function FirmDashboard({
       const res = await fetch(`${apiUrl}/api/firm/batch-index`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ root: firmRoot, cases: casePaths })
+        body: JSON.stringify({ root: firmRoot, cases: casePaths, practiceArea })
       })
 
       const reader = res.body?.getReader()
@@ -628,8 +693,39 @@ export default function FirmDashboard({
     )
   }
 
+  const getTTDStatusBadge = (status?: string) => {
+    if (!status) return <span className="text-brand-400">—</span>
+
+    const colors: Record<string, string> = {
+      'active': 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200',
+      'suspended': 'bg-amber-50 text-amber-700 ring-1 ring-amber-200',
+      'terminated': 'bg-red-50 text-red-700 ring-1 ring-red-200',
+      'closed': 'bg-surface-100 text-brand-600 ring-1 ring-surface-200',
+    }
+    const color = colors[status.toLowerCase()] || 'bg-surface-100 text-brand-500'
+    return (
+      <span className={`inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-md ${color}`}>
+        {status}
+      </span>
+    )
+  }
+
+  const formatAWW = (aww?: number, rate?: number) => {
+    if (!aww && !rate) return '—'
+    const parts = []
+    if (aww) parts.push(`AWW: ${formatCurrency(aww)}`)
+    if (rate) parts.push(`Rate: ${formatCurrency(rate)}`)
+    return parts.join(' / ')
+  }
+
+  const formatHearings = (hearings?: Array<{ case_number: string; type: string; next_date?: string }>) => {
+    if (!hearings || hearings.length === 0) return '—'
+    return hearings.map(h => h.case_number).join(', ')
+  }
+
   const getPhaseBadge = (phase?: string) => {
     const colors: Record<string, string> = {
+      // PI phases
       'Intake': 'bg-surface-100 text-brand-600',
       'Investigation': 'bg-blue-50 text-blue-700',
       'Treatment': 'bg-purple-50 text-purple-700',
@@ -637,6 +733,11 @@ export default function FirmDashboard({
       'Negotiation': 'bg-yellow-50 text-yellow-700',
       'Settlement': 'bg-emerald-50 text-emerald-700',
       'Complete': 'bg-emerald-50 text-emerald-700',
+      // WC phases
+      'MMI Evaluation': 'bg-indigo-50 text-indigo-700',
+      'Benefits Resolution': 'bg-orange-50 text-orange-700',
+      'Settlement/Hearing': 'bg-amber-50 text-amber-700',
+      'Closed': 'bg-emerald-50 text-emerald-700',
     }
     const color = colors[phase || ''] || 'bg-surface-100 text-brand-500'
     return (
@@ -648,6 +749,15 @@ export default function FirmDashboard({
 
   const sortedCases = firmData?.cases
     .filter(c => filterPhase === 'all' || c.casePhase === filterPhase)
+    .filter(c => {
+      // Assignment filter
+      if (assignmentFilter === 'all') return true
+      if (assignmentFilter === 'unassigned') return !c.assignments || c.assignments.length === 0
+      if (assignmentFilter === 'mine' && teamContext?.userId) {
+        return c.assignments?.some(a => a.userId === teamContext.userId)
+      }
+      return true
+    })
     .sort((a, b) => {
       switch (sortField) {
         case 'name':
@@ -703,7 +813,9 @@ export default function FirmDashboard({
               <ScaleIcon />
             </div>
             <div>
-              <h1 className="font-serif text-2xl tracking-tight">Case Dashboard</h1>
+              <h1 className="font-serif text-2xl tracking-tight">
+                {isWC ? 'Workers\' Comp Dashboard' : 'Case Dashboard'}
+              </h1>
               <p className="text-sm text-brand-300 mt-0.5">{firmRoot}</p>
             </div>
           </div>
@@ -746,6 +858,29 @@ export default function FirmDashboard({
               <FolderIcon />
               <span>Change Folder</span>
             </button>
+            {/* Practice Area toggle */}
+            <div className="flex bg-white/10 rounded-lg p-1 ml-2">
+              <button
+                onClick={() => onChangePracticeArea('Personal Injury')}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                  !isWC
+                    ? 'bg-white text-brand-900'
+                    : 'text-brand-300 hover:text-white'
+                }`}
+              >
+                PI
+              </button>
+              <button
+                onClick={() => onChangePracticeArea('Workers\' Compensation')}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                  isWC
+                    ? 'bg-white text-brand-900'
+                    : 'text-brand-300 hover:text-white'
+                }`}
+              >
+                WC
+              </button>
+            </div>
             {/* View toggle */}
             <div className="flex bg-white/10 rounded-lg p-1 ml-2">
               <button
@@ -828,7 +963,9 @@ export default function FirmDashboard({
           <div className="bg-white/10 backdrop-blur rounded-xl p-5">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-brand-300 uppercase tracking-wide">SOL {'<'} 90 Days</p>
+                <p className="text-sm font-medium text-brand-300 uppercase tracking-wide">
+                  {isWC ? 'Open Hearings' : 'SOL < 90 Days'}
+                </p>
                 <p className="text-4xl font-serif text-white mt-1">{firmData?.summary.needsAttention || 0}</p>
               </div>
               <div className="w-12 h-12 rounded-full bg-amber-500/20 flex items-center justify-center text-amber-400">
@@ -881,7 +1018,7 @@ export default function FirmDashboard({
               </button>
             </div>
             <button
-              onClick={() => { loadFirmConfig(); loadFirmLogo(); setShowFirmConfig(true) }}
+              onClick={() => { loadFirmConfig(); loadFirmLogo(); loadTeamMembers(); setShowFirmConfig(true) }}
               className="ml-auto flex items-center gap-1.5 text-sm text-brand-500 hover:text-brand-700 transition-colors"
             >
               <CogIcon />
@@ -923,10 +1060,20 @@ export default function FirmDashboard({
                 className="text-sm border border-surface-200 rounded-lg px-3 py-2 bg-white
                            focus:outline-none focus:ring-2 focus:ring-accent-500 focus:border-transparent"
               >
-                <option value="sol">SOL Urgency</option>
-                <option value="name">Client Name</option>
-                <option value="phase">Case Phase</option>
-                <option value="specials">Total Specials</option>
+                {isWC ? (
+                  <>
+                    <option value="name">Client Name</option>
+                    <option value="phase">Case Phase</option>
+                    <option value="specials">Total Medical</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="sol">SOL Urgency</option>
+                    <option value="name">Client Name</option>
+                    <option value="phase">Case Phase</option>
+                    <option value="specials">Total Specials</option>
+                  </>
+                )}
               </select>
             </div>
             <div className="flex items-center gap-2">
@@ -943,6 +1090,22 @@ export default function FirmDashboard({
                 ))}
               </select>
             </div>
+            {/* Assignment filter - only show when team is configured */}
+            {teamMembers.length > 0 && (
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-brand-600">Assignment</label>
+                <select
+                  value={assignmentFilter}
+                  onChange={(e) => setAssignmentFilter(e.target.value as AssignmentFilter)}
+                  className="text-sm border border-surface-200 rounded-lg px-3 py-2 bg-white
+                             focus:outline-none focus:ring-2 focus:ring-accent-500 focus:border-transparent"
+                >
+                  <option value="all">All Cases</option>
+                  <option value="mine">My Cases</option>
+                  <option value="unassigned">Unassigned</option>
+                </select>
+              </div>
+            )}
             <div className="ml-auto text-sm text-brand-500">
               {sortedCases.length} case{sortedCases.length !== 1 ? 's' : ''}
             </div>
@@ -964,10 +1127,26 @@ export default function FirmDashboard({
                 </th>
                 <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Client</th>
                 <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Phase</th>
-                <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Date of Loss</th>
-                <th className="text-right px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Specials</th>
-                <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Policy Limits</th>
-                <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">SOL</th>
+                <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">
+                  {isWC ? 'Date of Injury' : 'Date of Loss'}
+                </th>
+                {isWC ? (
+                  <>
+                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Employer</th>
+                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">TTD Status</th>
+                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">AWW / Rate</th>
+                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Hearings</th>
+                  </>
+                ) : (
+                  <>
+                    <th className="text-right px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Specials</th>
+                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Policy Limits</th>
+                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">SOL</th>
+                  </>
+                )}
+                {teamMembers.length > 0 && (
+                  <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Assigned To</th>
+                )}
                 <th className="text-center px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Status</th>
               </tr>
             </thead>
@@ -998,11 +1177,45 @@ export default function FirmDashboard({
                   </td>
                   <td className="px-6 py-4">{getPhaseBadge(c.casePhase)}</td>
                   <td className="px-6 py-4 text-sm text-brand-600">{formatDate(c.dateOfLoss)}</td>
-                  <td className="px-6 py-4 text-sm text-brand-900 text-right font-semibold tabular-nums">
-                    {formatCurrency(c.totalSpecials)}
-                  </td>
-                  <td className="px-6 py-4 text-sm text-brand-600">{formatPolicyLimits(c.policyLimits)}</td>
-                  <td className="px-6 py-4">{getSolBadge(c.solDaysRemaining)}</td>
+                  {isWC ? (
+                    <>
+                      <td className="px-6 py-4 text-sm text-brand-600">{c.employer || '—'}</td>
+                      <td className="px-6 py-4">{getTTDStatusBadge(c.ttdStatus)}</td>
+                      <td className="px-6 py-4 text-sm text-brand-600 tabular-nums">{formatAWW(c.aww, c.compensationRate)}</td>
+                      <td className="px-6 py-4 text-sm text-brand-600">{formatHearings(c.openHearings)}</td>
+                    </>
+                  ) : (
+                    <>
+                      <td className="px-6 py-4 text-sm text-brand-900 text-right font-semibold tabular-nums">
+                        {formatCurrency(c.totalSpecials)}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-brand-600">{formatPolicyLimits(c.policyLimits)}</td>
+                      <td className="px-6 py-4">{getSolBadge(c.solDaysRemaining)}</td>
+                    </>
+                  )}
+                  {teamMembers.length > 0 && (
+                    <td className="px-6 py-4" onClick={e => e.stopPropagation()}>
+                      <CaseAssignmentDropdown
+                        casePath={c.path}
+                        assignments={c.assignments || []}
+                        teamMembers={teamMembers}
+                        userEmail={userEmail || ''}
+                        canAssign={teamContext?.permissions?.canAssignCases || false}
+                        onAssignmentChange={(newAssignments) => {
+                          // Update the case in firmData
+                          if (firmData) {
+                            setFirmData({
+                              ...firmData,
+                              cases: firmData.cases.map(cs =>
+                                cs.path === c.path ? { ...cs, assignments: newAssignments } : cs
+                              )
+                            })
+                          }
+                        }}
+                        compact
+                      />
+                    </td>
+                  )}
                   <td className="px-6 py-4">
                     <div className="flex items-center justify-center">
                       {!c.indexed ? (
@@ -1044,89 +1257,134 @@ export default function FirmDashboard({
         </>
       )}
 
-      {/* Firm config modal */}
+      {/* Firm Settings modal with tabs */}
       {showFirmConfig && (
         <div className="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl shadow-elevated w-full max-w-md p-6">
-            <h2 className="text-lg font-semibold text-brand-900 mb-4">Firm Settings</h2>
-            <div className="space-y-3">
-              {[
-                { key: 'firmName', label: 'Firm Name' },
-                { key: 'address', label: 'Address' },
-                { key: 'phone', label: 'Phone' },
-                { key: 'practiceArea', label: 'Practice Area' },
-                { key: 'feeStructure', label: 'Fee Structure' },
-              ].map(field => (
-                <div key={field.key}>
-                  <label className="text-xs font-medium text-brand-600 mb-1 block">{field.label}</label>
-                  <input
-                    value={firmConfig[field.key] || ''}
-                    onChange={(e) => setFirmConfig(prev => ({ ...prev, [field.key]: e.target.value }))}
-                    className="w-full border border-surface-200 rounded-lg px-3 py-2 text-sm
-                               focus:outline-none focus:ring-2 focus:ring-accent-500"
-                  />
-                </div>
-              ))}
+          <div className="bg-white rounded-2xl shadow-elevated w-full max-w-lg overflow-hidden">
+            {/* Tabs header */}
+            <div className="flex border-b border-surface-200">
+              <button
+                onClick={() => setSettingsTab('firm')}
+                className={`flex-1 px-6 py-4 text-sm font-medium transition-colors ${
+                  settingsTab === 'firm'
+                    ? 'text-brand-900 border-b-2 border-brand-900'
+                    : 'text-brand-500 hover:text-brand-700'
+                }`}
+              >
+                Firm Info
+              </button>
+              <button
+                onClick={() => setSettingsTab('team')}
+                className={`flex-1 px-6 py-4 text-sm font-medium transition-colors ${
+                  settingsTab === 'team'
+                    ? 'text-brand-900 border-b-2 border-brand-900'
+                    : 'text-brand-500 hover:text-brand-700'
+                }`}
+              >
+                Team
+              </button>
+            </div>
 
-              {/* Logo upload section */}
-              <div className="pt-3 border-t border-surface-200 mt-3">
-                <label className="text-xs font-medium text-brand-600 mb-2 block">Firm Logo</label>
+            {/* Tab content */}
+            {settingsTab === 'firm' ? (
+              <div className="p-6">
+                <div className="space-y-3">
+                  {[
+                    { key: 'firmName', label: 'Firm Name' },
+                    { key: 'address', label: 'Address' },
+                    { key: 'phone', label: 'Phone' },
+                    { key: 'practiceArea', label: 'Practice Area' },
+                    { key: 'feeStructure', label: 'Fee Structure' },
+                  ].map(field => (
+                    <div key={field.key}>
+                      <label className="text-xs font-medium text-brand-600 mb-1 block">{field.label}</label>
+                      <input
+                        value={firmConfig[field.key] || ''}
+                        onChange={(e) => setFirmConfig(prev => ({ ...prev, [field.key]: e.target.value }))}
+                        className="w-full border border-surface-200 rounded-lg px-3 py-2 text-sm
+                                   focus:outline-none focus:ring-2 focus:ring-accent-500"
+                      />
+                    </div>
+                  ))}
 
-                {logoPreview ? (
-                  <div className="flex items-center gap-4">
-                    <img src={logoPreview} alt="Firm logo" className="h-16 object-contain rounded border border-surface-200" />
-                    <button
-                      onClick={handleLogoDelete}
-                      className="text-sm text-red-500 hover:text-red-700 transition-colors"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ) : (
-                  <div
-                    onDrop={handleLogoDrop}
-                    onDragOver={handleLogoDragOver}
-                    onDragLeave={handleLogoDragLeave}
-                    className={`relative border-2 border-dashed rounded-lg p-4 text-center cursor-pointer transition-colors
-                      ${logoDragOver ? 'border-accent-500 bg-accent-50' : 'border-surface-300 hover:border-accent-500'}
-                      ${uploadingLogo ? 'opacity-50 pointer-events-none' : ''}
-                    `}
-                  >
-                    <input
-                      type="file"
-                      accept=".png,.jpg,.jpeg"
-                      onChange={(e) => handleLogoUpload(e.target.files)}
-                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                      disabled={uploadingLogo}
-                    />
-                    {uploadingLogo ? (
-                      <p className="text-sm text-brand-500">Uploading...</p>
+                  {/* Logo upload section */}
+                  <div className="pt-3 border-t border-surface-200 mt-3">
+                    <label className="text-xs font-medium text-brand-600 mb-2 block">Firm Logo</label>
+
+                    {logoPreview ? (
+                      <div className="flex items-center gap-4">
+                        <img src={logoPreview} alt="Firm logo" className="h-16 object-contain rounded border border-surface-200" />
+                        <button
+                          onClick={handleLogoDelete}
+                          className="text-sm text-red-500 hover:text-red-700 transition-colors"
+                        >
+                          Remove
+                        </button>
+                      </div>
                     ) : (
-                      <>
-                        <p className="text-sm text-brand-500">Drop image or click to upload</p>
-                        <p className="text-xs text-brand-400 mt-1">PNG or JPG</p>
-                      </>
+                      <div
+                        onDrop={handleLogoDrop}
+                        onDragOver={handleLogoDragOver}
+                        onDragLeave={handleLogoDragLeave}
+                        className={`relative border-2 border-dashed rounded-lg p-4 text-center cursor-pointer transition-colors
+                          ${logoDragOver ? 'border-accent-500 bg-accent-50' : 'border-surface-300 hover:border-accent-500'}
+                          ${uploadingLogo ? 'opacity-50 pointer-events-none' : ''}
+                        `}
+                      >
+                        <input
+                          type="file"
+                          accept=".png,.jpg,.jpeg"
+                          onChange={(e) => handleLogoUpload(e.target.files)}
+                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                          disabled={uploadingLogo}
+                        />
+                        {uploadingLogo ? (
+                          <p className="text-sm text-brand-500">Uploading...</p>
+                        ) : (
+                          <>
+                            <p className="text-sm text-brand-500">Drop image or click to upload</p>
+                            <p className="text-xs text-brand-400 mt-1">PNG or JPG</p>
+                          </>
+                        )}
+                      </div>
                     )}
                   </div>
-                )}
+                </div>
+                <div className="flex justify-end gap-2 mt-5">
+                  <button
+                    onClick={() => setShowFirmConfig(false)}
+                    className="px-4 py-2 text-sm text-brand-500 hover:text-brand-700 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={saveFirmConfig}
+                    disabled={firmConfigSaving}
+                    className="px-4 py-2 text-sm bg-brand-900 text-white rounded-lg hover:bg-brand-800
+                               disabled:opacity-50 transition-colors"
+                  >
+                    {firmConfigSaving ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
               </div>
-            </div>
-            <div className="flex justify-end gap-2 mt-5">
-              <button
-                onClick={() => setShowFirmConfig(false)}
-                className="px-4 py-2 text-sm text-brand-500 hover:text-brand-700 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={saveFirmConfig}
-                disabled={firmConfigSaving}
-                className="px-4 py-2 text-sm bg-brand-900 text-white rounded-lg hover:bg-brand-800
-                           disabled:opacity-50 transition-colors"
-              >
-                {firmConfigSaving ? 'Saving...' : 'Save'}
-              </button>
-            </div>
+            ) : (
+              <div className="max-h-[60vh] overflow-y-auto">
+                <TeamManager
+                  firmRoot={firmRoot}
+                  userEmail={userEmail || ''}
+                  canManageTeam={teamContext?.permissions?.canManageTeam || false}
+                  onClose={() => setShowFirmConfig(false)}
+                />
+                <div className="px-6 pb-6 flex justify-end border-t border-surface-100 pt-4">
+                  <button
+                    onClick={() => { setShowFirmConfig(false); loadTeamMembers() }}
+                    className="px-4 py-2 text-sm bg-brand-900 text-white rounded-lg hover:bg-brand-800 transition-colors"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
