@@ -504,7 +504,8 @@ async function buildCaseSummary(
   }
 ): Promise<CaseSummary> {
   const indexPath = join(casePath, ".pi_tool", "document_index.json");
-  const isWC = options?.practiceArea === PRACTICE_AREAS.WC;
+  // Accept both short code ("WC") and full name ("Workers' Compensation")
+  const isWC = options?.practiceArea === PRACTICE_AREAS.WC || options?.practiceArea === "WC";
 
   const caseSummary: CaseSummary = {
     path: casePath,
@@ -647,7 +648,8 @@ app.get("/cases", async (c) => {
     return c.json({ error: "root query param required" }, 400);
   }
 
-  const isWC = practiceArea === PRACTICE_AREAS.WC;
+  // Accept both short code ("WC") and full name ("Workers' Compensation")
+  const isWC = practiceArea === PRACTICE_AREAS.WC || practiceArea === "WC";
 
   try {
     const entries = await readdir(root, { withFileTypes: true });
@@ -1949,7 +1951,8 @@ async function indexCase(
     };
 
     // Add practice area if specified (omit for PI to maintain backward compat)
-    if (options?.practiceArea === PRACTICE_AREAS.WC) {
+    // Accept both short code ("WC") and full name ("Workers' Compensation")
+    if (options?.practiceArea === PRACTICE_AREAS.WC || options?.practiceArea === "WC") {
       initialIndex.practice_area = PRACTICE_AREAS.WC;
     }
 
