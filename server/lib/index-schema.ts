@@ -95,6 +95,18 @@ export const InjuryTierSchema = z.enum([
   "tier_3_surgical",
 ]);
 
+// Linked case relationship schema
+export const LinkedCaseSchema = z.object({
+  path: z.string(),
+  name: z.string(),
+});
+
+export const RelatedCaseSchema = z.object({
+  path: z.string(),
+  name: z.string(),
+  type: z.enum(["subcase", "sibling"]),
+});
+
 export const DocumentIndexSchema = z.object({
   indexed_at: z.string(),
   case_name: z.string(),
@@ -123,6 +135,10 @@ export const DocumentIndexSchema = z.object({
   injury_tier: InjuryTierSchema.nullable().optional(),
   estimated_value_range: z.string().nullable().optional(),
   policy_limits_demand_appropriate: z.boolean().nullable().optional(),
+  // Linked case relationships
+  parent_case: LinkedCaseSchema.optional(),
+  related_cases: z.array(RelatedCaseSchema).optional(),
+  is_subcase: z.boolean().optional(),
 });
 
 export type DocumentIndex = z.infer<typeof DocumentIndexSchema>;
@@ -134,6 +150,8 @@ export type HealthInsurance = z.infer<typeof HealthInsuranceSchema>;
 export type FileEntry = z.infer<typeof FileEntrySchema>;
 export type Folder = z.infer<typeof FolderSchema>;
 export type CasePhase = z.infer<typeof CasePhaseSchema>;
+export type LinkedCase = z.infer<typeof LinkedCaseSchema>;
+export type RelatedCase = z.infer<typeof RelatedCaseSchema>;
 
 // =============================================================================
 // JSON SCHEMA FOR ANTHROPIC API (tool_use)
@@ -784,6 +802,29 @@ export function normalizeIndex(raw: unknown): DocumentIndex {
     typeof input.policy_limits_demand_appropriate === "boolean"
       ? input.policy_limits_demand_appropriate
       : null;
+
+  // Linked case relationships
+  if (input.parent_case && typeof input.parent_case === "object") {
+    const pc = input.parent_case as Record<string, unknown>;
+    if (typeof pc.path === "string" && typeof pc.name === "string") {
+      normalized.parent_case = { path: pc.path, name: pc.name };
+    }
+  }
+  if (Array.isArray(input.related_cases) && input.related_cases.length > 0) {
+    const filtered = input.related_cases.filter(
+      (rc): rc is { path: string; name: string; type: "subcase" | "sibling" } =>
+        rc && typeof rc === "object" &&
+        typeof (rc as any).path === "string" &&
+        typeof (rc as any).name === "string" &&
+        ["subcase", "sibling"].includes((rc as any).type)
+    );
+    if (filtered.length > 0) {
+      normalized.related_cases = filtered;
+    }
+  }
+  if (typeof input.is_subcase === "boolean") {
+    normalized.is_subcase = input.is_subcase;
+  }
 
   return normalized;
 }

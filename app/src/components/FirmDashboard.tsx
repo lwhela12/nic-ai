@@ -48,6 +48,10 @@ interface CaseSummary {
   solDaysRemaining?: number
   needsReindex?: boolean
   providers?: string[]
+  // Linked case fields
+  isSubcase?: boolean
+  parentPath?: string
+  parentName?: string
 }
 
 interface FirmData {
@@ -978,7 +982,7 @@ export default function FirmDashboard({
                   onClick={() => c.indexed && onSelectCase(c.path)}
                   className={`group ${c.indexed
                     ? 'hover:bg-surface-50 cursor-pointer border-l-2 border-l-transparent hover:border-l-accent-500'
-                    : 'bg-surface-50/50 opacity-60'} transition-all`}
+                    : 'bg-surface-50/50 opacity-60'} ${c.isSubcase ? 'bg-surface-25' : ''} transition-all`}
                 >
                   <td className="px-4 py-4 w-10" onClick={e => e.stopPropagation()}>
                     <input
@@ -988,11 +992,20 @@ export default function FirmDashboard({
                       className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
                     />
                   </td>
-                  <td className="px-6 py-4">
+                  <td className={`py-4 ${c.isSubcase ? 'pl-10 pr-6' : 'px-6'}`}>
                     <div className="flex items-center gap-3">
+                      {c.isSubcase && (
+                        <span className="text-brand-300 mr-1 -ml-4">└</span>
+                      )}
                       <div>
                         <div className="font-medium text-brand-900">{c.clientName || c.name}</div>
-                        <div className="text-xs text-brand-400 mt-0.5">{c.name}</div>
+                        {c.isSubcase ? (
+                          <div className="text-xs text-brand-400 mt-0.5">
+                            Linked to: {c.parentName}
+                          </div>
+                        ) : (
+                          <div className="text-xs text-brand-400 mt-0.5">{c.name}</div>
+                        )}
                       </div>
                     </div>
                   </td>

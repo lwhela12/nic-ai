@@ -273,6 +273,136 @@ interface CaseSummary {
   solDaysRemaining?: number;
   needsReindex?: boolean;
   providers?: string[];
+  // Linked case fields
+  isSubcase?: boolean;
+  parentPath?: string;
+  parentName?: string;
+}
+
+// Helper to build a CaseSummary from a case folder path
+async function buildCaseSummary(
+  casePath: string,
+  caseName: string,
+  subcaseInfo?: { parentPath: string; parentName: string }
+): Promise<CaseSummary> {
+  const indexPath = join(casePath, ".pi_tool", "document_index.json");
+
+  const caseSummary: CaseSummary = {
+    path: casePath,
+    name: caseName,
+    indexed: false,
+    isSubcase: !!subcaseInfo,
+    parentPath: subcaseInfo?.parentPath,
+    parentName: subcaseInfo?.parentName,
+  };
+
+  try {
+    const indexContent = await readFile(indexPath, "utf-8");
+    const index = JSON.parse(indexContent);
+    const indexStats = await stat(indexPath);
+
+    caseSummary.indexed = true;
+    caseSummary.indexedAt = indexStats.mtime.toISOString();
+
+    // Extract from index - handle various formats
+    caseSummary.clientName = index.summary?.client || index.client_name || index.summary?.client_name || index.case_name?.split(" v.")[0] || caseName;
+    caseSummary.casePhase = index.case_phase || index.summary?.case_phase || "Unknown";
+    caseSummary.dateOfLoss = index.summary?.dol || index.date_of_loss || index.summary?.date_of_loss || index.dol;
+    caseSummary.policyLimits = index.policy_limits || index.summary?.policy_limits || index["3p_policy_limits"];
+
+    // Calculate total specials from various possible locations
+    // Handle both number and string formats (e.g., "$24,419.90")
+    const parseAmount = (val: any): number | undefined => {
+      if (typeof val === 'number') return val;
+      if (typeof val === 'string') {
+        const cleaned = val.replace(/[$,]/g, '');
+        const num = parseFloat(cleaned);
+        return isNaN(num) ? undefined : num;
+      }
+      return undefined;
+    };
+
+    caseSummary.totalSpecials = parseAmount(index.total_specials)
+      ?? parseAmount(index.summary?.total_specials)
+      ?? parseAmount(index.summary?.total_charges)
+      ?? parseAmount(index.total_medical_charges)
+      ?? parseAmount(index.total_charges)
+      ?? parseAmount(index.financials?.total_charges);
+
+    // Statute of limitations - use explicit value or calculate from DOL + 2 years (Nevada PI)
+    caseSummary.statuteOfLimitations = index.statute_of_limitations || index.summary?.statute_of_limitations;
+
+    // If no explicit SOL, calculate from DOL (Nevada PI = 2 years)
+    if (!caseSummary.statuteOfLimitations && caseSummary.dateOfLoss) {
+      try {
+        // Parse DOL - handle various formats like "01/04/2024" or "2024-03-21"
+        const dolStr = caseSummary.dateOfLoss;
+        let dolDate: Date;
+        if (dolStr.includes('/')) {
+          // MM/DD/YYYY format
+          const [month, day, year] = dolStr.split('/');
+          dolDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+        } else {
+          // ISO format
+          dolDate = new Date(dolStr);
+        }
+
+        if (!isNaN(dolDate.getTime())) {
+          // Add 2 years for Nevada PI statute
+          const solDate = new Date(dolDate);
+          solDate.setFullYear(solDate.getFullYear() + 2);
+          caseSummary.statuteOfLimitations = solDate.toISOString().split('T')[0];
+        }
+      } catch {
+        // Could not parse DOL
+      }
+    }
+
+    if (caseSummary.statuteOfLimitations) {
+      const solDate = new Date(caseSummary.statuteOfLimitations);
+      const now = new Date();
+      const diffMs = solDate.getTime() - now.getTime();
+      caseSummary.solDaysRemaining = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+    }
+
+    // Providers list
+    if (index.providers) {
+      caseSummary.providers = Array.isArray(index.providers)
+        ? index.providers.map((p: any) => typeof p === 'string' ? p : p.name)
+        : Object.keys(index.providers);
+    } else if (index.summary?.providers) {
+      caseSummary.providers = index.summary.providers;
+    }
+
+    // Check if needs reindex (files modified after index)
+    caseSummary.needsReindex = await checkNeedsReindex(casePath, indexStats.mtimeMs);
+
+  } catch {
+    // No index found - case exists but not indexed
+    caseSummary.indexed = false;
+  }
+
+  return caseSummary;
+}
+
+// Discover subcases and build their summaries
+async function discoverAndBuildSubcases(
+  parentPath: string,
+  parentName: string
+): Promise<CaseSummary[]> {
+  const subcasePaths = await discoverSubcases(parentPath);
+  const subcases: CaseSummary[] = [];
+
+  for (const subcasePath of subcasePaths) {
+    const subcaseName = subcasePath.split('/').pop() || subcasePath;
+    const summary = await buildCaseSummary(subcasePath, subcaseName, {
+      parentPath,
+      parentName,
+    });
+    subcases.push(summary);
+  }
+
+  return subcases;
 }
 
 // Get all cases in a firm's root folder
@@ -289,107 +419,24 @@ app.get("/cases", async (c) => {
 
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name === ".pi_tool") continue;
+      // Skip dot-prefixed folders at root level (they shouldn't be cases)
+      if (entry.name.startsWith('.')) continue;
 
       const casePath = join(root, entry.name);
-      const indexPath = join(casePath, ".pi_tool", "document_index.json");
 
-      const caseSummary: CaseSummary = {
-        path: casePath,
-        name: entry.name,
-        indexed: false,
-      };
-
-      try {
-        const indexContent = await readFile(indexPath, "utf-8");
-        const index = JSON.parse(indexContent);
-        const indexStats = await stat(indexPath);
-
-        caseSummary.indexed = true;
-        caseSummary.indexedAt = indexStats.mtime.toISOString();
-
-        // Extract from index - handle various formats
-        caseSummary.clientName = index.summary?.client || index.client_name || index.summary?.client_name || index.case_name?.split(" v.")[0] || entry.name;
-        caseSummary.casePhase = index.case_phase || index.summary?.case_phase || "Unknown";
-        caseSummary.dateOfLoss = index.summary?.dol || index.date_of_loss || index.summary?.date_of_loss || index.dol;
-        caseSummary.policyLimits = index.policy_limits || index.summary?.policy_limits || index["3p_policy_limits"];
-
-        // Calculate total specials from various possible locations
-        // Handle both number and string formats (e.g., "$24,419.90")
-        const parseAmount = (val: any): number | undefined => {
-          if (typeof val === 'number') return val;
-          if (typeof val === 'string') {
-            const cleaned = val.replace(/[$,]/g, '');
-            const num = parseFloat(cleaned);
-            return isNaN(num) ? undefined : num;
-          }
-          return undefined;
-        };
-
-        caseSummary.totalSpecials = parseAmount(index.total_specials)
-          ?? parseAmount(index.summary?.total_specials)
-          ?? parseAmount(index.summary?.total_charges)
-          ?? parseAmount(index.total_medical_charges)
-          ?? parseAmount(index.total_charges)
-          ?? parseAmount(index.financials?.total_charges);
-
-        // Statute of limitations - use explicit value or calculate from DOL + 2 years (Nevada PI)
-        caseSummary.statuteOfLimitations = index.statute_of_limitations || index.summary?.statute_of_limitations;
-
-        // If no explicit SOL, calculate from DOL (Nevada PI = 2 years)
-        if (!caseSummary.statuteOfLimitations && caseSummary.dateOfLoss) {
-          try {
-            // Parse DOL - handle various formats like "01/04/2024" or "2024-03-21"
-            const dolStr = caseSummary.dateOfLoss;
-            let dolDate: Date;
-            if (dolStr.includes('/')) {
-              // MM/DD/YYYY format
-              const [month, day, year] = dolStr.split('/');
-              dolDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
-            } else {
-              // ISO format
-              dolDate = new Date(dolStr);
-            }
-
-            if (!isNaN(dolDate.getTime())) {
-              // Add 2 years for Nevada PI statute
-              const solDate = new Date(dolDate);
-              solDate.setFullYear(solDate.getFullYear() + 2);
-              caseSummary.statuteOfLimitations = solDate.toISOString().split('T')[0];
-            }
-          } catch {
-            // Could not parse DOL
-          }
-        }
-
-        if (caseSummary.statuteOfLimitations) {
-          const solDate = new Date(caseSummary.statuteOfLimitations);
-          const now = new Date();
-          const diffMs = solDate.getTime() - now.getTime();
-          caseSummary.solDaysRemaining = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
-        }
-
-        // Providers list
-        if (index.providers) {
-          caseSummary.providers = Array.isArray(index.providers)
-            ? index.providers.map((p: any) => typeof p === 'string' ? p : p.name)
-            : Object.keys(index.providers);
-        } else if (index.summary?.providers) {
-          caseSummary.providers = index.summary.providers;
-        }
-
-        // Check if needs reindex (files modified after index)
-        caseSummary.needsReindex = await checkNeedsReindex(casePath, indexStats.mtimeMs);
-
-      } catch {
-        // No index found - case exists but not indexed
-        caseSummary.indexed = false;
-      }
-
+      // Build parent case summary
+      const caseSummary = await buildCaseSummary(casePath, entry.name);
       cases.push(caseSummary);
+
+      // Discover and add subcases (linked family members)
+      const subcases = await discoverAndBuildSubcases(casePath, entry.name);
+      cases.push(...subcases);
     }
 
     // Sort by SOL (most urgent first), then by name
-    cases.sort((a, b) => {
+    // Keep subcases immediately after their parent
+    const parentCases = cases.filter(c => !c.isSubcase);
+    parentCases.sort((a, b) => {
       // Indexed cases first
       if (a.indexed !== b.indexed) return a.indexed ? -1 : 1;
       // Then by SOL urgency
@@ -402,13 +449,23 @@ app.get("/cases", async (c) => {
       return a.name.localeCompare(b.name);
     });
 
+    // Rebuild final list with subcases after their parents
+    const sortedCases: CaseSummary[] = [];
+    for (const parent of parentCases) {
+      sortedCases.push(parent);
+      // Add subcases for this parent
+      const subcases = cases.filter(c => c.isSubcase && c.parentPath === parent.path);
+      subcases.sort((a, b) => a.name.localeCompare(b.name));
+      sortedCases.push(...subcases);
+    }
+
     return c.json({
       root,
-      cases,
+      cases: sortedCases,
       summary: {
-        total: cases.length,
-        indexed: cases.filter(c => c.indexed).length,
-        needsAttention: cases.filter(c => c.solDaysRemaining !== undefined && c.solDaysRemaining <= 90).length,
+        total: sortedCases.length,
+        indexed: sortedCases.filter(c => c.indexed).length,
+        needsAttention: sortedCases.filter(c => c.solDaysRemaining !== undefined && c.solDaysRemaining <= 90).length,
       }
     });
   } catch (error) {
@@ -1109,7 +1166,13 @@ async function listCaseFiles(caseFolder: string): Promise<string[]> {
   async function walkDir(dir: string, base: string = '') {
     const entries = await readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue;
+      // Skip .pi_tool entirely
+      if (entry.name === '.pi_tool') continue;
+      // For directories, skip dot-prefixed ones (they're separate subcase folders)
+      if (entry.isDirectory() && entry.name.startsWith('.')) continue;
+      // For files, skip hidden files
+      if (!entry.isDirectory() && entry.name.startsWith('.')) continue;
+
       const fullPath = join(dir, entry.name);
       const relativePath = base ? `${base}/${entry.name}` : entry.name;
 
@@ -1125,11 +1188,43 @@ async function listCaseFiles(caseFolder: string): Promise<string[]> {
   return files;
 }
 
+// Discover dot-prefixed subfolders that represent linked cases (e.g., .ClientB Spouse)
+async function discoverSubcases(casePath: string): Promise<string[]> {
+  const subcases: string[] = [];
+  try {
+    const entries = await readdir(casePath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === '.pi_tool') continue;
+      if (!entry.name.startsWith('.')) continue;
+
+      // Check if subfolder has any files (not empty)
+      const subPath = join(casePath, entry.name);
+      try {
+        const subEntries = await readdir(subPath, { withFileTypes: true });
+        const hasFiles = subEntries.some(e => !e.isDirectory() || e.name !== '.pi_tool');
+        if (hasFiles) {
+          subcases.push(subPath);
+        }
+      } catch {
+        // Can't read subfolder, skip it
+      }
+    }
+  } catch {
+    // Can't read parent folder
+  }
+  return subcases;
+}
+
 // Index a single case using file-by-file extraction
 async function indexCase(
   caseFolder: string,
   onProgress: (event: { type: string; [key: string]: any }) => void,
-  options?: { incrementalFiles?: string[]; firmRoot?: string }
+  options?: {
+    incrementalFiles?: string[];
+    firmRoot?: string;
+    parentCase?: { path: string; name: string };
+  }
 ): Promise<{ success: boolean; error?: string }> {
   const caseName = caseFolder.split('/').pop() || caseFolder;
   const isIncremental = options?.incrementalFiles && options.incrementalFiles.length > 0;
@@ -1327,7 +1422,7 @@ async function indexCase(
       failed_at: new Date().toISOString(),
     }));
 
-    const initialIndex = {
+    const initialIndex: Record<string, any> = {
       indexed_at: new Date().toISOString(),
       case_name: caseName,
       case_phase: isIncremental && existingIndex?.case_phase ? existingIndex.case_phase : 'Unknown',
@@ -1346,6 +1441,12 @@ async function indexCase(
       estimated_value_range: existingIndex?.estimated_value_range ?? null,
       policy_limits_demand_appropriate: existingIndex?.policy_limits_demand_appropriate ?? null,
     };
+
+    // Add linked case fields if this is a subcase
+    if (options?.parentCase) {
+      initialIndex.parent_case = options.parentCase;
+      initialIndex.is_subcase = true;
+    }
     await writeFile(indexPath, JSON.stringify(initialIndex, null, 2));
     console.log(`[Index] Wrote initial document_index.json`);
 
@@ -1496,6 +1597,38 @@ async function indexCase(
       reportUsage(totalTokensUsed, "indexing").catch(() => {});
     }
 
+    // If this is a subcase, update parent's index to include it in related_cases
+    if (options?.parentCase) {
+      try {
+        const parentIndexPath = join(options.parentCase.path, '.pi_tool', 'document_index.json');
+        const parentContent = await readFile(parentIndexPath, 'utf-8');
+        const parentIndex = JSON.parse(parentContent);
+
+        // Initialize or update related_cases array
+        const relatedCases = parentIndex.related_cases || [];
+        const existingIdx = relatedCases.findIndex((rc: any) => rc.path === caseFolder);
+
+        const relatedEntry = {
+          path: caseFolder,
+          name: caseName,
+          type: "subcase" as const,
+        };
+
+        if (existingIdx >= 0) {
+          relatedCases[existingIdx] = relatedEntry;
+        } else {
+          relatedCases.push(relatedEntry);
+        }
+
+        parentIndex.related_cases = relatedCases;
+        await writeFile(parentIndexPath, JSON.stringify(parentIndex, null, 2));
+        console.log(`[Index] Updated parent index with related_cases`);
+      } catch (parentErr) {
+        // Parent index may not exist yet - that's ok
+        console.warn(`[Index] Could not update parent index:`, parentErr);
+      }
+    }
+
     onProgress({ type: "case_done", caseName, success: true });
     return { success: true };
 
@@ -1515,6 +1648,13 @@ async function indexCase(
 }
 
 // Batch index multiple cases - runs indexCase for each in parallel
+// Structure to track cases with their parent info for batch indexing
+interface BatchIndexTarget {
+  path: string;
+  name: string;
+  parentCase?: { path: string; name: string };
+}
+
 app.post("/batch-index", async (c) => {
   const { root, cases: casesToIndex } = await c.req.json();
 
@@ -1522,22 +1662,81 @@ app.post("/batch-index", async (c) => {
     return c.json({ error: "root is required" }, 400);
   }
 
-  // If no specific cases provided, find all unindexed ones
-  let targetCases: string[] = casesToIndex || [];
+  // Build list of cases to index (including subcases)
+  let targetCases: BatchIndexTarget[] = [];
 
-  if (targetCases.length === 0) {
+  if (casesToIndex && casesToIndex.length > 0) {
+    // Specific cases provided - check if any are subcases by looking for parent
+    for (const casePath of casesToIndex) {
+      const caseName = casePath.split('/').pop() || casePath;
+      // Check if this is a subcase (dot-prefixed name inside a parent folder)
+      const parentPath = dirname(casePath);
+      const parentName = parentPath.split('/').pop() || '';
+
+      // It's a subcase if the case name starts with '.' and parent is not the root
+      if (caseName.startsWith('.') && parentPath !== root) {
+        targetCases.push({
+          path: casePath,
+          name: caseName,
+          parentCase: { path: parentPath, name: parentName },
+        });
+      } else {
+        targetCases.push({ path: casePath, name: caseName });
+
+        // Also discover and add any unindexed subcases
+        const subcasePaths = await discoverSubcases(casePath);
+        for (const subcasePath of subcasePaths) {
+          const subcaseName = subcasePath.split('/').pop() || subcasePath;
+          const subcaseIndexPath = join(subcasePath, ".pi_tool", "document_index.json");
+          try {
+            await stat(subcaseIndexPath);
+            // Subcase already indexed, skip
+          } catch {
+            // No index, add to list
+            targetCases.push({
+              path: subcasePath,
+              name: subcaseName,
+              parentCase: { path: casePath, name: caseName },
+            });
+          }
+        }
+      }
+    }
+  } else {
+    // No specific cases provided - find all unindexed ones (including subcases)
     try {
       const entries = await readdir(root, { withFileTypes: true });
       for (const entry of entries) {
         if (!entry.isDirectory() || entry.name === ".pi_tool") continue;
+        if (entry.name.startsWith('.')) continue; // Skip dot-prefixed at root
+
         const casePath = join(root, entry.name);
         const indexPath = join(casePath, ".pi_tool", "document_index.json");
+
         try {
           await stat(indexPath);
-          // Index exists, skip
+          // Parent index exists, but check subcases
         } catch {
-          // No index, add to list
-          targetCases.push(casePath);
+          // No parent index, add to list
+          targetCases.push({ path: casePath, name: entry.name });
+        }
+
+        // Discover and add any unindexed subcases
+        const subcasePaths = await discoverSubcases(casePath);
+        for (const subcasePath of subcasePaths) {
+          const subcaseName = subcasePath.split('/').pop() || subcasePath;
+          const subcaseIndexPath = join(subcasePath, ".pi_tool", "document_index.json");
+          try {
+            await stat(subcaseIndexPath);
+            // Subcase already indexed, skip
+          } catch {
+            // No index, add to list
+            targetCases.push({
+              path: subcasePath,
+              name: subcaseName,
+              parentCase: { path: casePath, name: entry.name },
+            });
+          }
         }
       }
     } catch (error) {
@@ -1555,19 +1754,22 @@ app.post("/batch-index", async (c) => {
         data: JSON.stringify({
           type: "start",
           totalCases: targetCases.length,
-          cases: targetCases.map(p => ({ path: p, name: p.split('/').pop() }))
+          cases: targetCases.map(t => ({ path: t.path, name: t.name, isSubcase: !!t.parentCase }))
         })
       });
 
       // Index all cases in parallel using server-side Promise.all
       const results = await Promise.all(
-        targetCases.map(casePath =>
-          indexCase(casePath, async (event) => {
+        targetCases.map(target =>
+          indexCase(target.path, async (event) => {
             // Stream progress events to client
             await stream.writeSSE({
               data: JSON.stringify(event)
             });
-          }, { firmRoot: root })
+          }, {
+            firmRoot: root,
+            parentCase: target.parentCase,
+          })
         )
       );
 
