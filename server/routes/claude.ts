@@ -234,6 +234,61 @@ ${sections.join("\n\n---\n\n")}
       // No knowledge base - that's fine
     }
 
+    // Load DOI sibling summaries if this is a DOI case (WC multi-injury client)
+    let siblingContext = "";
+    if (indexData.is_doi_case && indexData.container) {
+      try {
+        const siblingCases: Array<{ name: string; dateOfInjury: string; summary: any }> = [];
+
+        // Find sibling DOI folders
+        if (indexData.related_cases && Array.isArray(indexData.related_cases)) {
+          for (const sibling of indexData.related_cases) {
+            if (sibling.type === "doi_sibling") {
+              try {
+                const siblingIndexPath = join(sibling.path, ".pi_tool", "document_index.json");
+                const siblingContent = await readFile(siblingIndexPath, "utf-8");
+                const siblingIndex = JSON.parse(siblingContent);
+
+                // Extract just the key summary fields for context
+                siblingCases.push({
+                  name: sibling.name,
+                  dateOfInjury: sibling.dateOfInjury || siblingIndex.injury_date || "Unknown",
+                  summary: {
+                    client: siblingIndex.summary?.client,
+                    incident_date: siblingIndex.summary?.incident_date,
+                    employer: siblingIndex.summary?.employer?.name,
+                    injury_description: siblingIndex.summary?.injury_description,
+                    body_parts: siblingIndex.summary?.body_parts,
+                    total_charges: siblingIndex.summary?.total_charges,
+                    case_phase: siblingIndex.case_phase,
+                    disability_status: siblingIndex.summary?.disability_status?.type,
+                    wc_carrier: siblingIndex.summary?.wc_carrier?.name,
+                  },
+                });
+              } catch {
+                // Sibling index not available
+              }
+            }
+          }
+        }
+
+        if (siblingCases.length > 0) {
+          siblingContext = `
+RELATED CLAIMS FOR THIS CLIENT (${indexData.container.clientName}):
+This client has multiple injury claims. The current case is for DOI ${indexData.injury_date}.
+
+Sibling claim summaries (for cross-reference only - keep analyses separate):
+${JSON.stringify(siblingCases, null, 2)}
+
+Note: Each claim has its own carrier, injury date, and treatment history. Reference sibling info when relevant but maintain separate case analyses.
+
+`;
+        }
+      } catch {
+        // Couldn't load sibling context - continue without it
+      }
+    }
+
     // Get current date for document generation
     const now = new Date();
     const dateStr = now.toLocaleDateString('en-US', {
@@ -245,7 +300,7 @@ ${sections.join("\n\n---\n\n")}
 
     caseContext = `
 TODAY'S DATE: ${dateStr}
-
+${siblingContext}
 CASE INDEX (use this to answer questions):
 ${indexJson}
 ${templatesContext}${knowledgeContext}

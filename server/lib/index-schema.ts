@@ -208,7 +208,30 @@ export const LinkedCaseSchema = z.object({
 export const RelatedCaseSchema = z.object({
   path: z.string(),
   name: z.string(),
-  type: z.enum(["subcase", "sibling"]),
+  type: z.enum(["subcase", "sibling", "doi_sibling"]),
+  dateOfInjury: z.string().optional(), // For DOI siblings: injury date from folder name
+});
+
+// =============================================================================
+// DOI CONTAINER SCHEMA (for multi-injury WC clients)
+// =============================================================================
+
+/**
+ * Container info for clients with multiple DOI subfolders.
+ * Stored in ClientName/.pi_tool/container_info.json
+ */
+export const ContainerInfoSchema = z.object({
+  clientName: z.string(),
+  practiceArea: PracticeAreaSchema.optional(),
+  contact: ContactSchema.optional(),
+  sharedFolders: z.array(z.string()).optional(), // Non-DOI folders that were indexed
+  doiCases: z.array(z.object({
+    path: z.string(),
+    dateOfInjury: z.string(), // YYYY-MM-DD from DOI folder name
+    indexed: z.boolean().optional(),
+  })).optional(),
+  createdAt: z.string(),
+  updatedAt: z.string().optional(),
 });
 
 // =============================================================================
@@ -270,6 +293,14 @@ export const DocumentIndexSchema = z.object({
   related_cases: z.array(RelatedCaseSchema).optional(),
   is_subcase: z.boolean().optional(),
 
+  // DOI container relationships (for WC multi-injury clients)
+  container: z.object({
+    path: z.string(),
+    clientName: z.string(),
+  }).optional(),
+  is_doi_case: z.boolean().optional(), // True if this case is a DOI subfolder
+  injury_date: z.string().optional(), // Date of injury from DOI folder name (YYYY-MM-DD)
+
   // WC-specific assessment fields
   compensability: CompensabilitySchema.nullable().optional(),
   claim_type: ClaimTypeSchema.nullable().optional(),
@@ -289,6 +320,7 @@ export type Folder = z.infer<typeof FolderSchema>;
 export type CasePhase = z.infer<typeof CasePhaseSchema>;
 export type LinkedCase = z.infer<typeof LinkedCaseSchema>;
 export type RelatedCase = z.infer<typeof RelatedCaseSchema>;
+export type ContainerInfo = z.infer<typeof ContainerInfoSchema>;
 export type Employer = z.infer<typeof EmployerSchema>;
 export type WCCarrier = z.infer<typeof WCCarrierSchema>;
 export type DisabilityStatus = z.infer<typeof DisabilityStatusSchema>;
@@ -1330,18 +1362,43 @@ export function normalizeIndex(raw: unknown, practiceArea?: string): DocumentInd
   }
   if (Array.isArray(input.related_cases) && input.related_cases.length > 0) {
     const filtered = input.related_cases.filter(
-      (rc): rc is { path: string; name: string; type: "subcase" | "sibling" } =>
+      (rc): rc is { path: string; name: string; type: "subcase" | "sibling" | "doi_sibling"; dateOfInjury?: string } =>
         rc && typeof rc === "object" &&
         typeof (rc as any).path === "string" &&
         typeof (rc as any).name === "string" &&
-        ["subcase", "sibling"].includes((rc as any).type)
-    );
+        ["subcase", "sibling", "doi_sibling"].includes((rc as any).type)
+    ).map((rc) => {
+      const result: RelatedCase = {
+        path: (rc as any).path,
+        name: (rc as any).name,
+        type: (rc as any).type,
+      };
+      // Include dateOfInjury for DOI siblings
+      if ((rc as any).dateOfInjury && typeof (rc as any).dateOfInjury === "string") {
+        result.dateOfInjury = (rc as any).dateOfInjury;
+      }
+      return result;
+    });
     if (filtered.length > 0) {
       normalized.related_cases = filtered;
     }
   }
   if (typeof input.is_subcase === "boolean") {
     normalized.is_subcase = input.is_subcase;
+  }
+
+  // DOI container relationships
+  if (input.container && typeof input.container === "object") {
+    const cont = input.container as Record<string, unknown>;
+    if (typeof cont.path === "string" && typeof cont.clientName === "string") {
+      normalized.container = { path: cont.path, clientName: cont.clientName };
+    }
+  }
+  if (typeof input.is_doi_case === "boolean") {
+    normalized.is_doi_case = input.is_doi_case;
+  }
+  if (typeof input.injury_date === "string" && input.injury_date.trim()) {
+    normalized.injury_date = input.injury_date.trim();
   }
 
   return normalized;

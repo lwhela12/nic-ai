@@ -481,6 +481,12 @@ interface CaseSummary {
   openHearings?: Array<{ case_number: string; type: string; next_date?: string; issue?: string }>;
   // Team assignments
   assignments?: Array<{ userId: string; assignedAt: string; assignedBy: string }>;
+  // DOI container fields (for WC multi-injury clients)
+  isContainer?: boolean;          // True for client containers (not a case itself)
+  containerPath?: string;         // Path to container (for DOI cases)
+  containerName?: string;         // Container display name
+  siblingCases?: Array<{ path: string; name: string; dateOfInjury: string }>;
+  injuryDate?: string;            // Parsed from DOI folder name (YYYY-MM-DD)
 }
 
 // Helper to parse amount values (handles both number and string formats like "$24,419.90")
@@ -639,6 +645,53 @@ async function discoverAndBuildSubcases(
   return subcases;
 }
 
+/**
+ * Build a container summary for a client folder with DOI subfolders.
+ * Containers are not cases themselves - they're grouping headers.
+ */
+function buildContainerSummary(
+  containerPath: string,
+  containerName: string,
+  doiCases: Array<{ path: string; name: string; dateOfInjury: string }>
+): CaseSummary {
+  return {
+    path: containerPath,
+    name: containerName,
+    clientName: containerName,
+    indexed: false, // Containers are never "indexed" as cases
+    isContainer: true,
+    siblingCases: doiCases,
+  };
+}
+
+/**
+ * Build a DOI case summary with container and sibling information.
+ */
+async function buildDOICaseSummary(
+  doiCase: { path: string; name: string; dateOfInjury: string },
+  containerPath: string,
+  containerName: string,
+  allSiblings: Array<{ path: string; name: string; dateOfInjury: string }>,
+  practiceArea?: string
+): Promise<CaseSummary> {
+  const summary = await buildCaseSummary(doiCase.path, doiCase.name, { practiceArea });
+
+  // Add DOI-specific fields
+  summary.containerPath = containerPath;
+  summary.containerName = containerName;
+  summary.injuryDate = doiCase.dateOfInjury;
+
+  // Add sibling cases (excluding self)
+  summary.siblingCases = allSiblings.filter(s => s.path !== doiCase.path);
+
+  // Override client name to be clearer (include injury date context)
+  if (!summary.clientName || summary.clientName === doiCase.name) {
+    summary.clientName = containerName;
+  }
+
+  return summary;
+}
+
 // Get all cases in a firm's root folder
 app.get("/cases", async (c) => {
   const root = c.req.query("root");
@@ -662,7 +715,38 @@ app.get("/cases", async (c) => {
 
       const casePath = join(root, entry.name);
 
-      // Build parent case summary
+      // For WC practice area, check for DOI subfolders
+      if (isWC) {
+        const doiDetection = await detectDOISubfolders(casePath);
+
+        if (doiDetection.isContainer) {
+          // This is a client container with DOI subfolders
+          // Add container as a grouping header (not a case)
+          const containerSummary = buildContainerSummary(
+            casePath,
+            entry.name,
+            doiDetection.doiCases
+          );
+          cases.push(containerSummary);
+
+          // Add each DOI subfolder as a separate case
+          for (const doiCase of doiDetection.doiCases) {
+            const doiSummary = await buildDOICaseSummary(
+              doiCase,
+              casePath,
+              entry.name,
+              doiDetection.doiCases,
+              practiceArea
+            );
+            cases.push(doiSummary);
+          }
+
+          // Skip regular subcase discovery for containers
+          continue;
+        }
+      }
+
+      // Regular case (non-container) - existing logic
       const caseSummary = await buildCaseSummary(casePath, entry.name, { practiceArea });
       cases.push(caseSummary);
 
@@ -671,39 +755,60 @@ app.get("/cases", async (c) => {
       cases.push(...subcases);
     }
 
-    // Sort by SOL (most urgent first), then by name
-    // Keep subcases immediately after their parent
-    const parentCases = cases.filter(c => !c.isSubcase);
-    parentCases.sort((a, b) => {
-      // Indexed cases first
-      if (a.indexed !== b.indexed) return a.indexed ? -1 : 1;
-      // Then by SOL urgency
-      if (a.solDaysRemaining !== undefined && b.solDaysRemaining !== undefined) {
-        return a.solDaysRemaining - b.solDaysRemaining;
+    // Sort cases with special handling for containers and DOI cases
+    // Containers and their DOI cases should stay together
+    const topLevelCases = cases.filter(c => !c.isSubcase && !c.containerPath);
+    topLevelCases.sort((a, b) => {
+      // Containers and indexed cases before unindexed regular cases
+      if (a.isContainer !== b.isContainer) return a.isContainer ? -1 : 1;
+      if (!a.isContainer && !b.isContainer) {
+        if (a.indexed !== b.indexed) return a.indexed ? -1 : 1;
       }
-      if (a.solDaysRemaining !== undefined) return -1;
-      if (b.solDaysRemaining !== undefined) return 1;
+      // Then by SOL urgency (for non-containers)
+      if (!a.isContainer && !b.isContainer) {
+        if (a.solDaysRemaining !== undefined && b.solDaysRemaining !== undefined) {
+          return a.solDaysRemaining - b.solDaysRemaining;
+        }
+        if (a.solDaysRemaining !== undefined) return -1;
+        if (b.solDaysRemaining !== undefined) return 1;
+      }
       // Then alphabetically
       return a.name.localeCompare(b.name);
     });
 
-    // Rebuild final list with subcases after their parents
+    // Rebuild final list with proper grouping
     const sortedCases: CaseSummary[] = [];
-    for (const parent of parentCases) {
+    for (const parent of topLevelCases) {
       sortedCases.push(parent);
-      // Add subcases for this parent
-      const subcases = cases.filter(c => c.isSubcase && c.parentPath === parent.path);
-      subcases.sort((a, b) => a.name.localeCompare(b.name));
-      sortedCases.push(...subcases);
+
+      if (parent.isContainer) {
+        // Add DOI cases for this container (sorted by injury date, most recent first)
+        const doiCases = cases.filter(c => c.containerPath === parent.path);
+        doiCases.sort((a, b) => (b.injuryDate || '').localeCompare(a.injuryDate || ''));
+        sortedCases.push(...doiCases);
+      } else {
+        // Add subcases for this parent (regular linked cases)
+        const subcases = cases.filter(c => c.isSubcase && c.parentPath === parent.path);
+        subcases.sort((a, b) => a.name.localeCompare(b.name));
+        sortedCases.push(...subcases);
+      }
     }
+
+    // Count indexed cases (DOI cases count, containers don't)
+    const indexedCount = sortedCases.filter(c => c.indexed && !c.isContainer).length;
+
+    // For WC, count open hearings instead of SOL urgency
+    const needsAttentionCount = isWC
+      ? sortedCases.filter(c => c.openHearings && c.openHearings.length > 0).length
+      : sortedCases.filter(c => c.solDaysRemaining !== undefined && c.solDaysRemaining <= 90).length;
 
     return c.json({
       root,
       cases: sortedCases,
       summary: {
-        total: sortedCases.length,
-        indexed: sortedCases.filter(c => c.indexed).length,
-        needsAttention: sortedCases.filter(c => c.solDaysRemaining !== undefined && c.solDaysRemaining <= 90).length,
+        total: sortedCases.filter(c => !c.isContainer).length, // Don't count containers
+        indexed: indexedCount,
+        needsAttention: needsAttentionCount,
       }
     });
   } catch (error) {
@@ -1710,6 +1815,158 @@ async function listCaseFiles(caseFolder: string): Promise<string[]> {
   return files;
 }
 
+// =============================================================================
+// DOI CONTAINER DETECTION (for WC multi-injury clients)
+// =============================================================================
+
+/**
+ * DOI folder pattern: DOI_YYYY-MM-DD (e.g., DOI_2024-01-15)
+ */
+const DOI_FOLDER_PATTERN = /^DOI_(\d{4}-\d{2}-\d{2})$/;
+
+/**
+ * Parse a DOI folder name to extract the date of injury.
+ * Returns the date string (YYYY-MM-DD) or null if not a valid DOI folder.
+ */
+function parseDOIFolderName(name: string): { date: string } | null {
+  const match = name.match(DOI_FOLDER_PATTERN);
+  if (match) {
+    return { date: match[1] };
+  }
+  return null;
+}
+
+interface DOIDetectionResult {
+  isContainer: boolean;
+  doiCases: Array<{ path: string; name: string; dateOfInjury: string }>;
+  sharedFolders: string[];
+}
+
+/**
+ * Detect if a folder contains DOI subfolders (making it a client container).
+ * Returns:
+ * - isContainer: true if any DOI_* folders found
+ * - doiCases: array of { path, name, dateOfInjury } for each DOI folder
+ * - sharedFolders: non-DOI folders (for container indexing)
+ */
+async function detectDOISubfolders(folderPath: string): Promise<DOIDetectionResult> {
+  const result: DOIDetectionResult = {
+    isContainer: false,
+    doiCases: [],
+    sharedFolders: [],
+  };
+
+  try {
+    const entries = await readdir(folderPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === '.pi_tool') continue;
+
+      const parsed = parseDOIFolderName(entry.name);
+      if (parsed) {
+        // This is a DOI folder
+        result.doiCases.push({
+          path: join(folderPath, entry.name),
+          name: entry.name,
+          dateOfInjury: parsed.date,
+        });
+      } else if (!entry.name.startsWith('.')) {
+        // Non-DOI, non-hidden folder (shared client info like "General Contact Info")
+        result.sharedFolders.push(entry.name);
+      }
+    }
+
+    result.isContainer = result.doiCases.length > 0;
+
+    // Sort DOI cases by date (most recent first)
+    result.doiCases.sort((a, b) => b.dateOfInjury.localeCompare(a.dateOfInjury));
+
+  } catch {
+    // Can't read folder
+  }
+
+  return result;
+}
+
+interface ContainerInfo {
+  clientName: string;
+  practiceArea?: string;
+  contact?: {
+    phone?: string;
+    email?: string;
+    address?: {
+      street?: string;
+      city?: string;
+      state?: string;
+      zip?: string;
+    };
+  };
+  sharedFolders: string[];
+  doiCases: Array<{ path: string; dateOfInjury: string; indexed?: boolean }>;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+/**
+ * Index a container's shared folders (non-DOI folders like "General Contact Info").
+ * Extracts shared client contact info and writes to container_info.json.
+ */
+async function indexContainer(
+  containerPath: string,
+  sharedFolders: string[],
+  doiCases: Array<{ path: string; name: string; dateOfInjury: string }>,
+  practiceArea?: string,
+  onProgress?: (event: { type: string; [key: string]: any }) => void
+): Promise<{ success: boolean; containerInfo?: ContainerInfo; error?: string }> {
+  const containerName = containerPath.split('/').pop() || containerPath;
+  const piToolDir = join(containerPath, '.pi_tool');
+  const containerInfoPath = join(piToolDir, 'container_info.json');
+
+  onProgress?.({ type: "status", message: `Indexing container: ${containerName}` });
+
+  try {
+    await mkdir(piToolDir, { recursive: true });
+
+    // Try to load existing container info
+    let existingInfo: ContainerInfo | null = null;
+    try {
+      const existing = await readFile(containerInfoPath, 'utf-8');
+      existingInfo = JSON.parse(existing);
+    } catch {
+      // No existing container info
+    }
+
+    // Build container info from shared folders (extract contact data)
+    // For now, we just record the structure; full extraction could be added later
+    const containerInfo: ContainerInfo = {
+      clientName: containerName,
+      practiceArea: practiceArea === PRACTICE_AREAS.WC || practiceArea === "WC"
+        ? PRACTICE_AREAS.WC
+        : undefined,
+      contact: existingInfo?.contact, // Preserve existing contact if we have it
+      sharedFolders,
+      doiCases: doiCases.map(dc => ({
+        path: dc.path,
+        dateOfInjury: dc.dateOfInjury,
+        indexed: false, // Will be updated when DOI cases are indexed
+      })),
+      createdAt: existingInfo?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    // Write container info
+    await writeFile(containerInfoPath, JSON.stringify(containerInfo, null, 2));
+    onProgress?.({ type: "status", message: `Container info written: ${containerName}` });
+
+    return { success: true, containerInfo };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    onProgress?.({ type: "error", message: `Failed to index container: ${error}` });
+    return { success: false, error };
+  }
+}
+
 // Discover dot-prefixed subfolders that represent linked cases (e.g., .ClientB Spouse)
 async function discoverSubcases(casePath: string): Promise<string[]> {
   const subcases: string[] = [];
@@ -1747,6 +2004,13 @@ async function indexCase(
     firmRoot?: string;
     parentCase?: { path: string; name: string };
     practiceArea?: string;
+    // DOI container info (for WC multi-injury clients)
+    containerInfo?: {
+      path: string;
+      clientName: string;
+      injuryDate: string;
+      siblingCases?: Array<{ path: string; name: string; dateOfInjury: string }>;
+    };
   }
 ): Promise<{ success: boolean; error?: string }> {
   const caseName = caseFolder.split('/').pop() || caseFolder;
@@ -1976,6 +2240,27 @@ async function indexCase(
       initialIndex.parent_case = options.parentCase;
       initialIndex.is_subcase = true;
     }
+
+    // Add DOI container fields if this is a DOI case (WC multi-injury client)
+    if (options?.containerInfo) {
+      initialIndex.container = {
+        path: options.containerInfo.path,
+        clientName: options.containerInfo.clientName,
+      };
+      initialIndex.is_doi_case = true;
+      initialIndex.injury_date = options.containerInfo.injuryDate;
+
+      // Add DOI siblings as related cases
+      if (options.containerInfo.siblingCases && options.containerInfo.siblingCases.length > 0) {
+        initialIndex.related_cases = options.containerInfo.siblingCases.map(sibling => ({
+          path: sibling.path,
+          name: sibling.name,
+          type: "doi_sibling" as const,
+          dateOfInjury: sibling.dateOfInjury,
+        }));
+      }
+    }
+
     await writeFile(indexPath, JSON.stringify(initialIndex, null, 2));
     console.log(`[Index] Wrote initial document_index.json`);
 
@@ -2182,6 +2467,21 @@ interface BatchIndexTarget {
   path: string;
   name: string;
   parentCase?: { path: string; name: string };
+  // DOI container info (for WC multi-injury clients)
+  containerInfo?: {
+    path: string;
+    clientName: string;
+    injuryDate: string;
+    siblingCases?: Array<{ path: string; name: string; dateOfInjury: string }>;
+  };
+}
+
+// Track containers that need to be indexed first
+interface ContainerToIndex {
+  path: string;
+  name: string;
+  doiCases: Array<{ path: string; name: string; dateOfInjury: string }>;
+  sharedFolders: string[];
 }
 
 app.post("/batch-index", async (c) => {
@@ -2191,25 +2491,95 @@ app.post("/batch-index", async (c) => {
     return c.json({ error: "root is required" }, 400);
   }
 
-  // Build list of cases to index (including subcases)
+  // Accept both short code ("WC") and full name ("Workers' Compensation")
+  const isWC = practiceArea === PRACTICE_AREAS.WC || practiceArea === "WC";
+
+  // Build list of cases to index (including subcases and DOI cases)
   let targetCases: BatchIndexTarget[] = [];
+  let containersToIndex: ContainerToIndex[] = [];
 
   if (casesToIndex && casesToIndex.length > 0) {
-    // Specific cases provided - check if any are subcases by looking for parent
+    // Specific cases provided - check type of each
     for (const casePath of casesToIndex) {
       const caseName = casePath.split('/').pop() || casePath;
-      // Check if this is a subcase (dot-prefixed name inside a parent folder)
       const parentPath = dirname(casePath);
       const parentName = parentPath.split('/').pop() || '';
 
-      // It's a subcase if the case name starts with '.' and parent is not the root
-      if (caseName.startsWith('.') && parentPath !== root) {
+      // Check if this is a DOI case (folder name matches DOI_YYYY-MM-DD)
+      const doiParsed = parseDOIFolderName(caseName);
+      if (doiParsed && parentPath !== root) {
+        // This is a DOI case - need to also check siblings
+        const parentDoiDetection = await detectDOISubfolders(parentPath);
+        if (parentDoiDetection.isContainer) {
+          // Find sibling DOI cases (excluding self)
+          const siblings = parentDoiDetection.doiCases.filter(d => d.path !== casePath);
+
+          // Add container if not already tracked
+          if (!containersToIndex.find(c => c.path === parentPath)) {
+            containersToIndex.push({
+              path: parentPath,
+              name: parentName,
+              doiCases: parentDoiDetection.doiCases,
+              sharedFolders: parentDoiDetection.sharedFolders,
+            });
+          }
+
+          targetCases.push({
+            path: casePath,
+            name: caseName,
+            containerInfo: {
+              path: parentPath,
+              clientName: parentName,
+              injuryDate: doiParsed.date,
+              siblingCases: siblings,
+            },
+          });
+        }
+      } else if (caseName.startsWith('.') && parentPath !== root) {
+        // It's a subcase (dot-prefixed)
         targetCases.push({
           path: casePath,
           name: caseName,
           parentCase: { path: parentPath, name: parentName },
         });
       } else {
+        // Regular case or container - check for DOI subfolders if WC
+        if (isWC) {
+          const doiDetection = await detectDOISubfolders(casePath);
+          if (doiDetection.isContainer) {
+            // This is a container - queue container and all its DOI cases
+            containersToIndex.push({
+              path: casePath,
+              name: caseName,
+              doiCases: doiDetection.doiCases,
+              sharedFolders: doiDetection.sharedFolders,
+            });
+
+            for (const doiCase of doiDetection.doiCases) {
+              const doiIndexPath = join(doiCase.path, ".pi_tool", "document_index.json");
+              try {
+                await stat(doiIndexPath);
+                // DOI case already indexed, skip
+              } catch {
+                // Not indexed, add to list
+                const siblings = doiDetection.doiCases.filter(d => d.path !== doiCase.path);
+                targetCases.push({
+                  path: doiCase.path,
+                  name: doiCase.name,
+                  containerInfo: {
+                    path: casePath,
+                    clientName: caseName,
+                    injuryDate: doiCase.dateOfInjury,
+                    siblingCases: siblings,
+                  },
+                });
+              }
+            }
+            continue; // Skip regular subcase discovery for containers
+          }
+        }
+
+        // Regular case
         targetCases.push({ path: casePath, name: caseName });
 
         // Also discover and add any unindexed subcases
@@ -2232,7 +2602,7 @@ app.post("/batch-index", async (c) => {
       }
     }
   } else {
-    // No specific cases provided - find all unindexed ones (including subcases)
+    // No specific cases provided - find all unindexed ones (including subcases and DOI cases)
     try {
       const entries = await readdir(root, { withFileTypes: true });
       for (const entry of entries) {
@@ -2240,8 +2610,45 @@ app.post("/batch-index", async (c) => {
         if (entry.name.startsWith('.')) continue; // Skip dot-prefixed at root
 
         const casePath = join(root, entry.name);
-        const indexPath = join(casePath, ".pi_tool", "document_index.json");
 
+        // For WC, check for DOI subfolders first
+        if (isWC) {
+          const doiDetection = await detectDOISubfolders(casePath);
+          if (doiDetection.isContainer) {
+            // This is a container - queue container and all its unindexed DOI cases
+            containersToIndex.push({
+              path: casePath,
+              name: entry.name,
+              doiCases: doiDetection.doiCases,
+              sharedFolders: doiDetection.sharedFolders,
+            });
+
+            for (const doiCase of doiDetection.doiCases) {
+              const doiIndexPath = join(doiCase.path, ".pi_tool", "document_index.json");
+              try {
+                await stat(doiIndexPath);
+                // DOI case already indexed, skip
+              } catch {
+                // Not indexed, add to list
+                const siblings = doiDetection.doiCases.filter(d => d.path !== doiCase.path);
+                targetCases.push({
+                  path: doiCase.path,
+                  name: doiCase.name,
+                  containerInfo: {
+                    path: casePath,
+                    clientName: entry.name,
+                    injuryDate: doiCase.dateOfInjury,
+                    siblingCases: siblings,
+                  },
+                });
+              }
+            }
+            continue; // Skip regular case handling for containers
+          }
+        }
+
+        // Regular case
+        const indexPath = join(casePath, ".pi_tool", "document_index.json");
         try {
           await stat(indexPath);
           // Parent index exists, but check subcases
@@ -2283,11 +2690,37 @@ app.post("/batch-index", async (c) => {
         data: JSON.stringify({
           type: "start",
           totalCases: targetCases.length,
-          cases: targetCases.map(t => ({ path: t.path, name: t.name, isSubcase: !!t.parentCase }))
+          containersToIndex: containersToIndex.length,
+          cases: targetCases.map(t => ({
+            path: t.path,
+            name: t.name,
+            isSubcase: !!t.parentCase,
+            isDOICase: !!t.containerInfo,
+          }))
         })
       });
 
-      // Index all cases in parallel using server-side Promise.all
+      // Step 1: Index containers first (if any)
+      for (const container of containersToIndex) {
+        await stream.writeSSE({
+          data: JSON.stringify({
+            type: "status",
+            message: `Indexing container: ${container.name}`,
+          })
+        });
+
+        await indexContainer(
+          container.path,
+          container.sharedFolders,
+          container.doiCases,
+          practiceArea,
+          async (event) => {
+            await stream.writeSSE({ data: JSON.stringify(event) });
+          }
+        );
+      }
+
+      // Step 2: Index all DOI cases and regular cases in parallel
       const results = await Promise.all(
         targetCases.map(target =>
           indexCase(target.path, async (event) => {
@@ -2299,6 +2732,7 @@ app.post("/batch-index", async (c) => {
             firmRoot: root,
             parentCase: target.parentCase,
             practiceArea,
+            containerInfo: target.containerInfo,
           })
         )
       );

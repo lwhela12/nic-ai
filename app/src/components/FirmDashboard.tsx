@@ -81,6 +81,12 @@ interface CaseSummary {
   openHearings?: Array<{ case_number: string; type: string; next_date?: string; issue?: string }>
   // Team assignments
   assignments?: CaseAssignment[]
+  // DOI container fields (for WC multi-injury clients)
+  isContainer?: boolean          // True for client containers (not a case itself)
+  containerPath?: string         // Path to container (for DOI cases)
+  containerName?: string         // Container display name
+  siblingCases?: Array<{ path: string; name: string; dateOfInjury: string }>
+  injuryDate?: string            // Parsed from DOI folder name (YYYY-MM-DD)
 }
 
 interface FirmData {
@@ -177,6 +183,18 @@ const XMarkIcon = () => (
 const ChevronRightIcon = () => (
   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+  </svg>
+)
+
+const ChevronDownIcon = () => (
+  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+  </svg>
+)
+
+const UsersIcon = () => (
+  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
   </svg>
 )
 
@@ -284,18 +302,42 @@ export default function FirmDashboard({
   const [settingsTab, setSettingsTab] = useState<'firm' | 'team'>('firm')
   const [assignmentFilter, setAssignmentFilter] = useState<AssignmentFilter>('all')
 
-  const toggleCase = (path: string) => {
+  // Container expand/collapse state (for DOI multi-injury clients)
+  const [expandedContainers, setExpandedContainers] = useState<Set<string>>(new Set())
+
+  const toggleContainer = (containerPath: string) => {
+    setExpandedContainers(prev => {
+      const next = new Set(prev)
+      if (next.has(containerPath)) next.delete(containerPath)
+      else next.add(containerPath)
+      return next
+    })
+  }
+
+  const toggleCase = (path: string, isContainer?: boolean, siblingCases?: Array<{ path: string }>) => {
     setSelectedCases(prev => {
       const next = new Set(prev)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
+      if (isContainer && siblingCases) {
+        // Selecting a container selects/deselects all its DOI cases
+        const doiPaths = siblingCases.map(s => s.path)
+        const allSelected = doiPaths.every(p => prev.has(p))
+        if (allSelected) {
+          doiPaths.forEach(p => next.delete(p))
+        } else {
+          doiPaths.forEach(p => next.add(p))
+        }
+      } else {
+        if (next.has(path)) next.delete(path)
+        else next.add(path)
+      }
       return next
     })
   }
 
   const toggleAllVisible = () => {
     setSelectedCases(prev => {
-      const visiblePaths = sortedCases.map(c => c.path)
+      // Exclude containers from selection (only select actual cases)
+      const visiblePaths = sortedCases.filter(c => !c.isContainer).map(c => c.path)
       const allSelected = visiblePaths.every(p => prev.has(p))
       if (allSelected) {
         const next = new Set(prev)
@@ -604,7 +646,8 @@ export default function FirmDashboard({
     }
   }
 
-  const unindexedCases = firmData?.cases.filter(c => !c.indexed) || []
+  // Filter out containers when counting unindexed cases (containers are never indexed themselves)
+  const unindexedCases = firmData?.cases.filter(c => !c.indexed && !c.isContainer) || []
 
   const formatCurrency = (amount?: number) => {
     if (amount === undefined) return '—'
@@ -1111,7 +1154,7 @@ export default function FirmDashboard({
               </div>
             )}
             <div className="ml-auto text-sm text-brand-500">
-              {sortedCases.length} case{sortedCases.length !== 1 ? 's' : ''}
+              {sortedCases.filter(c => !c.isContainer).length} case{sortedCases.filter(c => !c.isContainer).length !== 1 ? 's' : ''}
             </div>
           </div>
 
@@ -1124,7 +1167,7 @@ export default function FirmDashboard({
                 <th className="px-4 py-4 w-10">
                   <input
                     type="checkbox"
-                    checked={sortedCases.length > 0 && sortedCases.every(c => selectedCases.has(c.path))}
+                    checked={sortedCases.filter(c => !c.isContainer).length > 0 && sortedCases.filter(c => !c.isContainer).every(c => selectedCases.has(c.path))}
                     onChange={toggleAllVisible}
                     className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
                   />
@@ -1155,104 +1198,167 @@ export default function FirmDashboard({
               </tr>
             </thead>
             <tbody className="divide-y divide-surface-100">
-              {sortedCases.map((c) => (
-                <tr
-                  key={c.path}
-                  onClick={() => c.indexed && onSelectCase(c.path)}
-                  className={`group ${c.indexed
-                    ? 'hover:bg-surface-50 cursor-pointer border-l-2 border-l-transparent hover:border-l-accent-500'
-                    : 'bg-surface-50/50 opacity-60'} ${c.isSubcase ? 'bg-surface-25' : ''} transition-all`}
-                >
-                  <td className="px-4 py-4 w-10" onClick={e => e.stopPropagation()}>
-                    <input
-                      type="checkbox"
-                      checked={selectedCases.has(c.path)}
-                      onChange={() => toggleCase(c.path)}
-                      className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
-                    />
-                  </td>
-                  <td className={`py-4 ${c.isSubcase ? 'pl-10 pr-6' : 'px-6'}`}>
-                    <div className="flex items-center gap-3">
-                      {c.isSubcase && (
-                        <span className="text-brand-300 mr-1 -ml-4">└</span>
-                      )}
-                      <div>
-                        <div className="font-medium text-brand-900">{c.clientName || c.name}</div>
-                        {c.isSubcase ? (
-                          <div className="text-xs text-brand-400 mt-0.5">
-                            Linked to: {c.parentName}
-                          </div>
-                        ) : (
-                          <div className="text-xs text-brand-400 mt-0.5">{c.name}</div>
-                        )}
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4">{getPhaseBadge(c.casePhase)}</td>
-                  <td className="px-6 py-4 text-sm text-brand-600">{formatDate(c.dateOfLoss)}</td>
-                  {isWC ? (
-                    <>
-                      <td className="px-6 py-4 text-sm text-brand-600">{c.employer || '—'}</td>
-                      <td className="px-6 py-4">{getTTDStatusBadge(c.ttdStatus)}</td>
-                      <td className="px-6 py-4 text-sm text-brand-600 tabular-nums">{formatAWW(c.aww, c.compensationRate)}</td>
-                      <td className="px-6 py-4 text-sm text-brand-600">{formatHearings(c.openHearings)}</td>
-                    </>
-                  ) : (
-                    <>
-                      <td className="px-6 py-4 text-sm text-brand-900 text-right font-semibold tabular-nums">
-                        {formatCurrency(c.totalSpecials)}
+              {sortedCases.map((c) => {
+                // Check if this is a DOI case that should be hidden (container collapsed)
+                const isDOICase = !!c.containerPath
+                const isContainerExpanded = c.containerPath ? expandedContainers.has(c.containerPath) : true
+                if (isDOICase && !isContainerExpanded) return null
+
+                // Container row rendering
+                if (c.isContainer) {
+                  const isExpanded = expandedContainers.has(c.path)
+                  const doiCaseCount = c.siblingCases?.length || 0
+                  const allDoiCasesSelected = c.siblingCases?.every(s => selectedCases.has(s.path)) || false
+                  const someDoiCasesSelected = c.siblingCases?.some(s => selectedCases.has(s.path)) || false
+
+                  return (
+                    <tr
+                      key={c.path}
+                      onClick={() => toggleContainer(c.path)}
+                      className="bg-brand-50 hover:bg-brand-100 cursor-pointer transition-colors"
+                    >
+                      <td className="px-4 py-3 w-10" onClick={e => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={allDoiCasesSelected}
+                          ref={(el) => { if (el) el.indeterminate = someDoiCasesSelected && !allDoiCasesSelected }}
+                          onChange={() => toggleCase(c.path, true, c.siblingCases)}
+                          className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
+                        />
                       </td>
-                      <td className="px-6 py-4 text-sm text-brand-600">{formatPolicyLimits(c.policyLimits)}</td>
-                      <td className="px-6 py-4">{getSolBadge(c.solDaysRemaining)}</td>
-                    </>
-                  )}
-                  {teamMembers.length > 0 && (
-                    <td className="px-6 py-4" onClick={e => e.stopPropagation()}>
-                      <CaseAssignmentDropdown
-                        casePath={c.path}
-                        assignments={c.assignments || []}
-                        teamMembers={teamMembers}
-                        userEmail={userEmail || ''}
-                        canAssign={teamContext?.permissions?.canAssignCases || false}
-                        onAssignmentChange={(newAssignments) => {
-                          // Update the case in firmData
-                          if (firmData) {
-                            setFirmData({
-                              ...firmData,
-                              cases: firmData.cases.map(cs =>
-                                cs.path === c.path ? { ...cs, assignments: newAssignments } : cs
-                              )
-                            })
-                          }
-                        }}
-                        compact
+                      <td className="px-6 py-3" colSpan={isWC ? 9 : 7}>
+                        <div className="flex items-center gap-3">
+                          <span className={`text-brand-600 transition-transform ${isExpanded ? 'rotate-0' : '-rotate-90'}`}>
+                            <ChevronDownIcon />
+                          </span>
+                          <span className="text-brand-500">
+                            <UsersIcon />
+                          </span>
+                          <div>
+                            <div className="font-semibold text-brand-900">{c.clientName || c.name}</div>
+                            <div className="text-xs text-brand-500 mt-0.5">
+                              {doiCaseCount} injury claim{doiCaseCount !== 1 ? 's' : ''}
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                }
+
+                // Regular case row or DOI case row
+                return (
+                  <tr
+                    key={c.path}
+                    onClick={() => c.indexed && onSelectCase(c.path)}
+                    className={`group ${c.indexed
+                      ? 'hover:bg-surface-50 cursor-pointer border-l-2 border-l-transparent hover:border-l-accent-500'
+                      : 'bg-surface-50/50 opacity-60'} ${c.isSubcase || isDOICase ? 'bg-surface-25' : ''} transition-all`}
+                  >
+                    <td className="px-4 py-4 w-10" onClick={e => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selectedCases.has(c.path)}
+                        onChange={() => toggleCase(c.path)}
+                        className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
                       />
                     </td>
-                  )}
-                  <td className="px-6 py-4">
-                    <div className="flex items-center justify-center">
-                      {!c.indexed ? (
-                        <span className="text-xs text-brand-400">Not indexed</span>
-                      ) : c.needsReindex ? (
-                        <span className="inline-flex items-center gap-1.5 text-amber-600">
-                          <span className="w-2 h-2 bg-amber-400 rounded-full"></span>
-                          <span className="text-xs font-medium">Update</span>
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1.5 text-emerald-600">
-                          <span className="w-2 h-2 bg-emerald-400 rounded-full"></span>
-                          <span className="text-xs font-medium">Current</span>
-                        </span>
-                      )}
-                    </div>
-                  </td>
-                  {c.indexed && (
-                    <td className="px-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <ChevronRightIcon />
+                    <td className={`py-4 ${c.isSubcase || isDOICase ? 'pl-10 pr-6' : 'px-6'}`}>
+                      <div className="flex items-center gap-3">
+                        {(c.isSubcase || isDOICase) && (
+                          <span className="text-brand-300 mr-1 -ml-4">└</span>
+                        )}
+                        <div>
+                          <div className="font-medium text-brand-900">
+                            {isDOICase ? (
+                              <>
+                                {c.clientName || c.containerName}
+                                <span className="ml-2 text-xs font-normal text-brand-500">
+                                  DOI: {c.injuryDate}
+                                </span>
+                              </>
+                            ) : (
+                              c.clientName || c.name
+                            )}
+                          </div>
+                          {c.isSubcase ? (
+                            <div className="text-xs text-brand-400 mt-0.5">
+                              Linked to: {c.parentName}
+                            </div>
+                          ) : !isDOICase && (
+                            <div className="text-xs text-brand-400 mt-0.5">{c.name}</div>
+                          )}
+                        </div>
+                      </div>
                     </td>
-                  )}
-                </tr>
-              ))}
+                    <td className="px-6 py-4">{getPhaseBadge(c.casePhase)}</td>
+                    <td className="px-6 py-4 text-sm text-brand-600">
+                      {isDOICase ? c.injuryDate : formatDate(c.dateOfLoss)}
+                    </td>
+                    {isWC ? (
+                      <>
+                        <td className="px-6 py-4 text-sm text-brand-600">{c.employer || '—'}</td>
+                        <td className="px-6 py-4">{getTTDStatusBadge(c.ttdStatus)}</td>
+                        <td className="px-6 py-4 text-sm text-brand-600 tabular-nums">{formatAWW(c.aww, c.compensationRate)}</td>
+                        <td className="px-6 py-4 text-sm text-brand-600">{formatHearings(c.openHearings)}</td>
+                      </>
+                    ) : (
+                      <>
+                        <td className="px-6 py-4 text-sm text-brand-900 text-right font-semibold tabular-nums">
+                          {formatCurrency(c.totalSpecials)}
+                        </td>
+                        <td className="px-6 py-4 text-sm text-brand-600">{formatPolicyLimits(c.policyLimits)}</td>
+                        <td className="px-6 py-4">{getSolBadge(c.solDaysRemaining)}</td>
+                      </>
+                    )}
+                    {teamMembers.length > 0 && (
+                      <td className="px-6 py-4" onClick={e => e.stopPropagation()}>
+                        <CaseAssignmentDropdown
+                          casePath={c.path}
+                          assignments={c.assignments || []}
+                          teamMembers={teamMembers}
+                          userEmail={userEmail || ''}
+                          canAssign={teamContext?.permissions?.canAssignCases || false}
+                          onAssignmentChange={(newAssignments) => {
+                            // Update the case in firmData
+                            if (firmData) {
+                              setFirmData({
+                                ...firmData,
+                                cases: firmData.cases.map(cs =>
+                                  cs.path === c.path ? { ...cs, assignments: newAssignments } : cs
+                                )
+                              })
+                            }
+                          }}
+                          compact
+                        />
+                      </td>
+                    )}
+                    <td className="px-6 py-4">
+                      <div className="flex items-center justify-center">
+                        {!c.indexed ? (
+                          <span className="text-xs text-brand-400">Not indexed</span>
+                        ) : c.needsReindex ? (
+                          <span className="inline-flex items-center gap-1.5 text-amber-600">
+                            <span className="w-2 h-2 bg-amber-400 rounded-full"></span>
+                            <span className="text-xs font-medium">Update</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-emerald-600">
+                            <span className="w-2 h-2 bg-emerald-400 rounded-full"></span>
+                            <span className="text-xs font-medium">Current</span>
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    {c.indexed && (
+                      <td className="px-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <ChevronRightIcon />
+                      </td>
+                    )}
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
 

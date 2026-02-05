@@ -300,6 +300,34 @@ Detailed practice knowledge is provided in your context under "PI PRACTICE KNOWL
 
 This knowledge is firm-specific and editable by the client.
 
+## Workers' Compensation Multi-Claim Clients
+
+When working with a **DOI case** (indicated by `is_doi_case: true` in the index), the client has multiple injury claims organized under a single container folder.
+
+**What you'll see in context:**
+- `container`: The parent client folder path and name
+- `injury_date`: This claim's date of injury (from the DOI_YYYY-MM-DD folder name)
+- `related_cases`: Array of `doi_sibling` entries with summaries of other claims
+
+**Key principles:**
+1. **Each claim is independent** - Different carrier, different injury, different treatment timeline
+2. **Cross-reference when relevant** - If the user asks about patterns, history, or the client overall
+3. **Keep analyses separate** - Don't mix up medical records, charges, or status between claims
+4. **Be clear about which claim** - When discussing specifics, reference the injury date
+
+**Example questions spanning claims:**
+- "What's the total medical across all claims?" → Sum charges from index + siblings
+- "When was the earliest injury?" → Compare injury_dates
+- "Is there overlap in treatment?" → Check service dates across claims
+
+**Sibling summaries** (in RELATED CLAIMS FOR THIS CLIENT section) contain:
+- Client name, date of injury, employer
+- Injury description, body parts
+- Total charges, case phase, disability status
+- WC carrier name
+
+These are for context only — for detailed sibling data, read the sibling's `.pi_tool/document_index.json` directly.
+
 ## Error Handling
 
 If you can't find information:
