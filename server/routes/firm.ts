@@ -2143,51 +2143,60 @@ async function indexCase(
       return { success: false, error: "No files found in case folder" };
     }
 
-    // Step 2: Extract files with concurrency limit
-    // Reduced from 15 to 8 to prevent connection pool exhaustion on constrained systems
-    const CONCURRENCY_LIMIT = 8;
-    console.log(`\n========== EXTRACTING ${files.length} FILES (max ${CONCURRENCY_LIMIT} concurrent) ==========`);
-    onProgress({ type: "status", caseName, message: `Extracting ${files.length} files (${CONCURRENCY_LIMIT} at a time)...` });
+    // Step 2: Extract files in batches with GC pauses
+    const BATCH_SIZE = 8;
+    console.log(`\n========== EXTRACTING ${files.length} FILES (batches of ${BATCH_SIZE} with GC) ==========`);
+    onProgress({ type: "status", caseName, message: `Extracting ${files.length} files (${BATCH_SIZE} at a time)...` });
 
-    // Concurrency-limited extraction
+    // Batch-based extraction with forced GC between batches to prevent memory accumulation
     const extractions: FileExtraction[] = [];
     let completedCount = 0;
 
-    async function processWithLimit<T>(
+    async function processInBatches<T>(
       items: T[],
-      limit: number,
+      batchSize: number,
       processor: (item: T, index: number) => Promise<FileExtraction>
     ): Promise<FileExtraction[]> {
-      const results: FileExtraction[] = new Array(items.length);
-      let currentIndex = 0;
+      const results: FileExtraction[] = [];
+      const totalBatches = Math.ceil(items.length / batchSize);
 
-      async function worker() {
-        while (currentIndex < items.length) {
-          const index = currentIndex++;
-          try {
-            results[index] = await processor(items[index], index);
-          } catch (err) {
-            // Ensure a single file failure never kills the whole batch
-            const item = items[index];
-            const filename = typeof item === 'string' ? (item as string).split('/').pop() || String(item) : String(item);
-            const folder = typeof item === 'string' ? (item as string).split('/')[0] || 'root' : 'root';
-            console.error(`[${index + 1}/${items.length}] Unhandled error for ${filename}:`, err);
-            results[index] = {
-              filename,
-              folder,
-              type: 'other',
-              key_info: 'Failed to extract',
-              error: err instanceof Error ? err.message : String(err),
-            };
-          }
-          completedCount++;
-          console.log(`--- Progress: ${completedCount}/${items.length} files complete ---`);
+      for (let batchNum = 0; batchNum < totalBatches; batchNum++) {
+        const start = batchNum * batchSize;
+        const end = Math.min(start + batchSize, items.length);
+        const batch = items.slice(start, end);
+
+        // Process batch concurrently
+        const batchResults = await Promise.all(
+          batch.map(async (item, batchIndex) => {
+            const globalIndex = start + batchIndex;
+            try {
+              return await processor(item, globalIndex);
+            } catch (err) {
+              const filename = typeof item === 'string' ? (item as string).split('/').pop() || String(item) : String(item);
+              const folder = typeof item === 'string' ? (item as string).split('/')[0] || 'root' : 'root';
+              console.error(`[${globalIndex + 1}/${items.length}] Unhandled error for ${filename}:`, err);
+              return {
+                filename,
+                folder,
+                type: 'other' as const,
+                key_info: 'Failed to extract',
+                error: err instanceof Error ? err.message : String(err),
+              };
+            }
+          })
+        );
+
+        results.push(...batchResults);
+        completedCount += batch.length;
+        console.log(`--- Progress: ${completedCount}/${items.length} files complete (batch ${batchNum + 1}/${totalBatches}) ---`);
+
+        // Force garbage collection between batches to prevent memory accumulation
+        if (typeof Bun !== 'undefined' && Bun.gc) {
+          Bun.gc(true);
+          console.log(`[gc] Forced garbage collection after batch ${batchNum + 1}`);
         }
       }
 
-      // Start workers up to the limit
-      const workers = Array(Math.min(limit, items.length)).fill(null).map(() => worker());
-      await Promise.all(workers);
       return results;
     }
 
@@ -2195,9 +2204,9 @@ async function indexCase(
     const sdkCliOpts = getSDKCliOptions();
     const cachedSystemPrompt = getFileExtractionSystemPromptWithTools(options?.practiceArea);
 
-    const extractionResults = await processWithLimit(
+    const extractionResults = await processInBatches(
       files,
-      CONCURRENCY_LIMIT,
+      BATCH_SIZE,
       (filePath, index) => extractFile(
         caseFolder,
         filePath,
