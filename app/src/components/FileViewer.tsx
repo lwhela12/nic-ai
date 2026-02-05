@@ -1,6 +1,12 @@
 import { useState, useMemo } from 'react'
 import type { DocumentIndex, NeedsReviewItem, DocumentFile, DocumentFolder, GeneratedDoc } from '../App'
 
+interface IndexStatus {
+  needsIndex: boolean
+  newFiles: string[]
+  modifiedFiles: string[]
+}
+
 interface Props {
   documentIndex: DocumentIndex | null
   generatedDocs: GeneratedDoc[]
@@ -8,6 +14,7 @@ interface Props {
   apiUrl: string
   onDocSelect: (content: string, docPath?: string) => void
   onFileView: (url: string, filename: string) => void
+  indexStatus?: IndexStatus | null
 }
 
 type SortOption = 'folder' | 'date' | 'type'
@@ -51,7 +58,7 @@ const WarningIcon = () => (
   </svg>
 )
 
-export default function FileViewer({ documentIndex, generatedDocs, caseFolder, apiUrl, onDocSelect, onFileView }: Props) {
+export default function FileViewer({ documentIndex, generatedDocs, caseFolder, apiUrl, onDocSelect, onFileView, indexStatus }: Props) {
   const [sort, setSort] = useState<SortOption>('folder')
   const [filter, setFilter] = useState<FilterOption>('all')
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
@@ -79,6 +86,27 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
     }
     return reviewMap
   }, [documentIndex])
+
+  // Build a lookup map of modified files needing reindex (MOD badge on existing files)
+  const filesNeedingReindex = useMemo(() => {
+    const map = new Map<string, 'NEW' | 'MOD'>()
+    if (!indexStatus?.needsIndex) return map
+    for (const f of indexStatus.modifiedFiles || []) {
+      const basename = f.split('/').pop()?.toLowerCase()
+      if (basename) map.set(basename, 'MOD')
+    }
+    return map
+  }, [indexStatus])
+
+  // Pending (unindexed) files — these don't appear in the indexed file tree
+  const pendingFiles = useMemo(() => {
+    if (!indexStatus?.needsIndex || !indexStatus.newFiles?.length) return []
+    return indexStatus.newFiles.map(path => ({
+      path,
+      folder: path.includes('/') ? path.split('/').slice(0, -1).join('/') : '.',
+      filename: path.split('/').pop() || path,
+    }))
+  }, [indexStatus])
 
   const toggleFolder = (folder: string) => {
     setCollapsedFolders((prev) => {
@@ -214,6 +242,7 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
                   const fileData = isStringFile ? undefined : file
                   const reviewInfo = filesNeedingReview.get(fileName.toLowerCase())
                   const needsReview = !!reviewInfo
+                  const reindexStatus = filesNeedingReindex.get(fileName.toLowerCase())
                   return (
                     <div key={i} className={`flex items-center gap-1 group ${needsReview ? 'bg-amber-50 rounded-lg' : ''}`}>
                       <button
@@ -253,6 +282,15 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
                           </span>
                         )}
                         <span className="truncate">{fileName}</span>
+                        {reindexStatus && (
+                          <span className={`flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded ${
+                            reindexStatus === 'NEW'
+                              ? 'bg-emerald-100 text-emerald-700'
+                              : 'bg-amber-100 text-amber-700'
+                          }`}>
+                            {reindexStatus}
+                          </span>
+                        )}
                       </button>
                       <button
                         onClick={() => onFileView(getFileUrl(folder, fileName), fileName)}
@@ -277,6 +315,48 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
             </div>
             <p className="text-sm text-brand-500">No files found</p>
             <p className="text-xs text-brand-400 mt-1">Try adjusting filters</p>
+          </div>
+        )}
+
+        {/* Pending (unindexed) files */}
+        {pendingFiles.length > 0 && (
+          <div className="mt-4 pt-3 border-t border-amber-200">
+            <div className="flex items-center justify-between px-2 py-1.5 mb-2">
+              <span className="text-xs font-semibold text-amber-600 uppercase tracking-wide">
+                Pending
+              </span>
+              <span className="text-xs text-amber-500">{pendingFiles.length}</span>
+            </div>
+
+            {pendingFiles.map((file, i) => (
+              <div key={i} className="flex items-center gap-1 group">
+                <div className="flex-1 flex items-center gap-2 px-2 py-1.5 text-sm text-amber-700 truncate">
+                  <span className="text-amber-400">
+                    <DocumentIcon />
+                  </span>
+                  <span className="truncate">{file.filename}</span>
+                  <span className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-emerald-100 text-emerald-700">
+                    NEW
+                  </span>
+                </div>
+                <button
+                  onClick={() => {
+                    const url = `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(file.path)}`
+                    const viewUrl = file.filename.toLowerCase().endsWith('.pdf') ? `${url}#view=FitH` : url
+                    onFileView(viewUrl, file.filename)
+                  }}
+                  className="p-1.5 text-brand-300 hover:text-accent-600 hover:bg-accent-50
+                             rounded-md opacity-0 group-hover:opacity-100 transition-all"
+                  title="View file"
+                >
+                  <EyeIcon />
+                </button>
+              </div>
+            ))}
+
+            <p className="px-2 mt-2 text-[11px] text-amber-500 italic">
+              Update index to include these files
+            </p>
           </div>
         )}
 

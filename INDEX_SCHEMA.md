@@ -158,7 +158,7 @@ The index schema supports two practice areas:
 - Summary fields:
   - `employer` (object): `name`, `address`, `phone`, `contact_name`
   - `wc_carrier` (object): `name`, `claim_number`, `adjuster_name`, `adjuster_phone`, `tpa_name`
-  - `disability_status` (object): `type` (TTD/TPD/PPD/PTD), `aww`, `compensation_rate`, `mmi_date`, `ppd_rating`
+  - `disability_status` (object): `type` (TTD/TPD/PPD/PTD), `amw`, `compensation_rate`, `mmi_date`, `ppd_rating`
   - `job_title`, `injury_description`, `body_parts`
   - `doi` (date of injury) → normalized to `incident_date`
 - Case phases: `Intake`, `Investigation`, `Treatment`, `MMI Evaluation`, `Benefits Resolution`, `Settlement/Hearing`, `Closed`
@@ -187,7 +187,7 @@ The index schema supports two practice areas:
 
 #### disability_status
 - `type` (string): One of `TTD` (Temporary Total), `TPD` (Temporary Partial), `PPD` (Permanent Partial), `PTD` (Permanent Total)
-- `aww` (number): Average Weekly Wage in dollars
+- `amw` (number): Average Monthly Wage in dollars
 - `compensation_rate` (number): Weekly compensation rate in dollars
 - `mmi_date` (string): Maximum Medical Improvement date
 - `ppd_rating` (number): Permanent Partial Disability rating percentage

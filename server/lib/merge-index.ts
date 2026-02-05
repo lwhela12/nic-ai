@@ -52,7 +52,10 @@ export interface ErrataItem {
   field: string;
   decision: string;
   evidence: string;
-  confidence: "high" | "medium" | "low";
+  confidence: "high" | "medium" | "low" | string;
+  resolution_type?: "user_decision" | "batch_review" | "auto";
+  resolved_at?: string;
+  rejected_values?: string[];
 }
 
 // Policy limit detail structure (matches canonical schema)
@@ -109,7 +112,7 @@ export interface CaseSummary {
   };
   disability_status?: {
     type?: string;  // TTD, TPD, PPD, PTD
-    aww?: number;   // Average Weekly Wage
+    amw?: number;   // Average Monthly Wage
     compensation_rate?: number;
     mmi_date?: string;
     ppd_rating?: number;
@@ -510,6 +513,17 @@ export function mergeToIndex(
     return f.consensus;
   };
 
+  // Get best available value even when UNCERTAIN (use highest-count value).
+  // For critical fields like DOI where showing approximate data beats showing nothing.
+  const getBestValue = (field: string): string => {
+    const f = hg[field];
+    if (!f || !f.values || f.values.length === 0) return "";
+    if (f.consensus && f.consensus !== "UNCERTAIN") return f.consensus;
+    // Pick the value with the highest document count
+    const sorted = [...f.values].sort((a, b) => b.count - a.count);
+    return sorted[0]?.value || "";
+  };
+
   // Parse amount from string (handles "$1,234.56" format)
   const parseAmount = (val: string): number | undefined => {
     if (!val) return undefined;
@@ -519,9 +533,10 @@ export function mergeToIndex(
   };
 
   // Get incident date - WC uses doi (date_of_injury), PI uses dol (date_of_loss)
+  // Use getBestValue for dates since showing approximate data is better than "Unknown"
   const incidentDate = isWC
-    ? (getConsensus("date_of_injury") || getConsensus("doi"))
-    : (getConsensus("date_of_loss") || getConsensus("dol"));
+    ? (getConsensus("date_of_injury") || getConsensus("doi") || getBestValue("date_of_injury") || getBestValue("doi"))
+    : (getConsensus("date_of_loss") || getConsensus("dol") || getBestValue("date_of_loss") || getBestValue("dol"));
 
   // Build summary object with common fields
   const summary: CaseSummary = {
@@ -578,17 +593,17 @@ export function mergeToIndex(
 
     // Disability status
     const disabilityType = getConsensus("disability_type");
-    const awwStr = getConsensus("aww") || getConsensus("average_weekly_wage");
+    const amwStr = getConsensus("amw") || getConsensus("average_monthly_wage") || getConsensus("aww");
     const compRateStr = getConsensus("compensation_rate") || getConsensus("weekly_compensation_rate");
     const mmiDate = getConsensus("mmi_date");
     const ppdRatingStr = getConsensus("ppd_rating");
-    const aww = parseAmount(awwStr);
+    const amw = parseAmount(amwStr);
     const compRate = parseAmount(compRateStr);
     const ppdRating = parseAmount(ppdRatingStr);
-    if (disabilityType || aww || compRate || mmiDate || ppdRating) {
+    if (disabilityType || amw || compRate || mmiDate || ppdRating) {
       summary.disability_status = {
         type: disabilityType || undefined,
-        aww: aww,
+        amw: amw,
         compensation_rate: compRate,
         mmi_date: mmiDate || undefined,
         ppd_rating: ppdRating,
@@ -638,26 +653,226 @@ export function mergeToIndex(
   if (summary.wc_carrier && !summary.wc_carrier.carrier && !summary.wc_carrier.claim_number && !summary.wc_carrier.adjuster && !summary.wc_carrier.tpa) {
     delete summary.wc_carrier;
   }
-  if (summary.disability_status && !summary.disability_status.type && !summary.disability_status.aww && !summary.disability_status.compensation_rate) {
+  if (summary.disability_status && !summary.disability_status.type && !summary.disability_status.amw && !summary.disability_status.compensation_rate) {
     delete summary.disability_status;
   }
 
-  // Build needs_review and errata
-  const needsReview = buildNeedsReview(hypergraphResult);
-  const errata = buildErrata(hypergraphResult);
+  // Build needs_review and errata from fresh hypergraph analysis
+  const freshNeedsReview = buildNeedsReview(hypergraphResult);
+  const freshErrata = buildErrata(hypergraphResult);
+
+  // Reconcile with existing user resolutions — user decisions survive reindexing
+  const existingErrata: ErrataItem[] = existingIndex.errata || [];
+  const userResolutions = existingErrata.filter(
+    (e: ErrataItem) => e.resolution_type === "user_decision" || e.resolution_type === "batch_review"
+  );
+
+  // Build set of fields that users have already resolved
+  const resolvedFields = new Set(userResolutions.map((r: ErrataItem) => r.field));
+
+  // Filter out needs_review items for fields that have user resolutions
+  const reconciledNeedsReview = freshNeedsReview.filter(
+    (item) => !resolvedFields.has(item.field)
+  );
+
+  // Merge errata: user resolutions first, then fresh auto-errata for non-resolved fields
+  const reconciledErrata: ErrataItem[] = [
+    ...userResolutions,
+    ...freshErrata.filter((e) => !resolvedFields.has(e.field)),
+  ];
+
+  // Apply user resolution overrides to summary values
+  const fieldToSummaryKey: Record<string, string> = {
+    date_of_loss: "dol",
+    dol: "dol",
+    date_of_injury: "dol",
+    doi: "dol",
+    client_name: "client",
+    claimant_name: "client",
+    date_of_birth: "dob",
+    dob: "dob",
+    incident_date: "incident_date",
+  };
+
+  for (const resolution of userResolutions) {
+    const summaryKey = fieldToSummaryKey[resolution.field];
+    if (summaryKey && resolution.decision) {
+      (summary as Record<string, any>)[summaryKey] = resolution.decision;
+      // Also set incident_date when dol is overridden
+      if (summaryKey === "dol") {
+        summary.incident_date = resolution.decision;
+      }
+    }
+  }
+
+  // Aggregate open_hearings from per-file extracted_data (WC only)
+  let openHearings: Array<{ case_number: string; hearing_level: "H.O." | "A.O."; next_date?: string; issue?: string }> | undefined;
+  if (isWC && existingIndex.folders) {
+    const hearingMap = new Map<string, { hearing_level: "H.O." | "A.O."; next_date?: string; issue?: string }>();
+    for (const folder of Object.values(existingIndex.folders as Record<string, { files: any[] }>)) {
+      for (const file of folder.files || []) {
+        const ed = file.extracted_data;
+        if (!ed?.hearing_case_number) continue;
+        // Handle semicolon-separated case numbers (e.g., "2680493-RA; 2680501-RA")
+        const caseNumbers = (ed.hearing_case_number as string).split(/[;,]/).map((s: string) => s.trim()).filter(Boolean);
+        for (const rawCn of caseNumbers) {
+          // Normalize: strip HO-/AO- prefixes for dedup
+          const cn = rawCn.replace(/^(HO|AO)-/i, "");
+          const level: "H.O." | "A.O." = ed.hearing_level === "A.O." ? "A.O." : "H.O.";
+          const existing = hearingMap.get(cn);
+          if (!existing) {
+            hearingMap.set(cn, { hearing_level: level, next_date: ed.next_hearing_date, issue: ed.hearing_issue });
+          } else if (level === "A.O.") {
+            // Escalate to A.O. if any document marks it as appeal-level
+            existing.hearing_level = "A.O.";
+          }
+        }
+      }
+    }
+    if (hearingMap.size > 0) {
+      openHearings = Array.from(hearingMap.entries()).map(([cn, info]) => ({
+        case_number: cn,
+        hearing_level: info.hearing_level,
+        ...(info.next_date ? { next_date: info.next_date } : {}),
+        ...(info.issue ? { issue: info.issue } : {}),
+      }));
+    }
+  }
 
   // Merge into final index
-  return {
+  const result: Record<string, any> = {
     ...existingIndex,
     indexed_at: new Date().toISOString(),
     case_name: formatCaseName(summary.client),
     case_phase: caseSummaryResult.case_phase,
     summary,
-    needs_review: needsReview,
-    errata,
+    needs_review: reconciledNeedsReview,
+    errata: reconciledErrata,
     // Preserve these from existing if present
     reconciled_values: existingIndex.reconciled_values || {},
     case_notes: existingIndex.case_notes || [],
     chat_archives: existingIndex.chat_archives || []
   };
+
+  if (openHearings && openHearings.length > 0) {
+    result.open_hearings = openHearings;
+  }
+
+  return result;
+}
+
+/**
+ * Diff result from comparing old vs new index after reindexing.
+ */
+export interface IndexDiff {
+  newFilesIndexed: string[];
+  newProviders: string[];
+  chargesChange: { old: number; new: number } | null;
+  newConflicts: number;
+  resolvedConflictsPreserved: number;
+  summary: string;
+}
+
+/**
+ * Compare old vs new index and produce a human-readable diff.
+ */
+export function diffIndexes(
+  oldIndex: Record<string, any> | null,
+  newIndex: Record<string, any>
+): IndexDiff {
+  // Find new files indexed
+  const oldFiles = new Set<string>();
+  if (oldIndex?.folders) {
+    for (const [folder, data] of Object.entries(oldIndex.folders)) {
+      const files = extractFileNames(data);
+      for (const f of files) {
+        oldFiles.add(`${folder}/${f}`);
+      }
+    }
+  }
+
+  const newFilesIndexed: string[] = [];
+  if (newIndex?.folders) {
+    for (const [folder, data] of Object.entries(newIndex.folders)) {
+      const files = extractFileNames(data);
+      for (const f of files) {
+        if (!oldFiles.has(`${folder}/${f}`)) {
+          newFilesIndexed.push(f);
+        }
+      }
+    }
+  }
+
+  // Find new providers
+  const oldProviders = new Set(oldIndex?.summary?.providers || []);
+  const newProviders = (newIndex?.summary?.providers || []).filter(
+    (p: string) => !oldProviders.has(p)
+  );
+
+  // Charges change
+  const oldCharges = parseChargesNumber(oldIndex?.summary?.total_charges);
+  const newCharges = parseChargesNumber(newIndex?.summary?.total_charges);
+  const chargesChange = oldCharges !== newCharges
+    ? { old: oldCharges, new: newCharges }
+    : null;
+
+  // Count new conflicts (needs_review items)
+  const newConflicts = (newIndex?.needs_review || []).length;
+
+  // Count preserved user resolutions
+  const resolvedConflictsPreserved = (newIndex?.errata || []).filter(
+    (e: ErrataItem) => e.resolution_type === "user_decision" || e.resolution_type === "batch_review"
+  ).length;
+
+  // Build summary string
+  const parts: string[] = [];
+  if (newFilesIndexed.length > 0) {
+    parts.push(`${newFilesIndexed.length} new file${newFilesIndexed.length > 1 ? "s" : ""} indexed`);
+  }
+  if (newProviders.length > 0) {
+    parts.push(`${newProviders.length} new provider${newProviders.length > 1 ? "s" : ""}: ${newProviders.join(", ")}`);
+  }
+  if (chargesChange) {
+    parts.push(`charges updated: $${chargesChange.old.toLocaleString()} → $${chargesChange.new.toLocaleString()}`);
+  }
+  if (newConflicts > 0) {
+    parts.push(`${newConflicts} conflict${newConflicts > 1 ? "s" : ""} to review`);
+  }
+  if (resolvedConflictsPreserved > 0) {
+    parts.push(`${resolvedConflictsPreserved} user resolution${resolvedConflictsPreserved > 1 ? "s" : ""} preserved`);
+  }
+
+  const summary = parts.length > 0
+    ? parts.join("; ")
+    : "Index updated (no significant changes)";
+
+  return {
+    newFilesIndexed,
+    newProviders,
+    chargesChange,
+    newConflicts,
+    resolvedConflictsPreserved,
+    summary,
+  };
+}
+
+/** Extract filenames from a folder data structure (handles all formats). */
+function extractFileNames(data: any): string[] {
+  const files: any[] = Array.isArray(data)
+    ? data
+    : data?.files || data?.documents || [];
+  return files.map((f: any) =>
+    typeof f === "string" ? f : f?.filename || f?.file || ""
+  ).filter(Boolean);
+}
+
+/** Parse charges from various formats to a number. */
+function parseChargesNumber(val: any): number {
+  if (typeof val === "number") return val;
+  if (typeof val === "string") {
+    const cleaned = val.replace(/[$,]/g, "");
+    const num = parseFloat(cleaned);
+    return isNaN(num) ? 0 : num;
+  }
+  return 0;
 }

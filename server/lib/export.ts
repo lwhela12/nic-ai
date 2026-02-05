@@ -182,7 +182,7 @@ function generateLetterheadHtml(firmInfo: FirmInfo): string {
 
 // Convert markdown to HTML with legal document styling
 export function markdownToHtml(markdown: string, options: ExportOptions = {}): string {
-  const html = marked.parse(markdown, { async: false }) as string;
+  const html = marked.parse(markdown, { async: false, breaks: true, gfm: true }) as string;
   const styles = options.templateStyles;
 
   const showLetterhead = options.showLetterhead && options.firmInfo;
@@ -254,26 +254,32 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
   const isLetter = options.documentType === "letter";
   const letterCss = isLetter
     ? `
-    /* Letter-specific overrides: no formal headers, no dividers */
+    /* Letter-specific overrides: no formal headers, no dividers, clean business letter look */
     h1 {
-      font-size: ${fontSize}pt;
+      font-size: 14pt;
       font-weight: bold;
-      text-align: left;
-      margin-top: 12pt;
-      margin-bottom: 6pt;
+      text-align: center;
+      text-transform: uppercase;
+      font-variant: normal;
+      margin-top: 0;
+      margin-bottom: 12pt;
+      border-bottom: none;
     }
     h2 {
       font-size: ${fontSize}pt;
       font-weight: bold;
       font-variant: normal;
+      text-transform: none;
       border-bottom: none;
       padding-bottom: 0;
-      margin-top: 12pt;
+      margin-top: 18pt;
       margin-bottom: 6pt;
     }
     h3 {
       font-size: ${fontSize}pt;
       font-weight: bold;
+      font-variant: normal;
+      text-transform: none;
       margin-top: 12pt;
       margin-bottom: 6pt;
     }
@@ -283,6 +289,7 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
     p {
       text-indent: 0;
       margin: 6pt 0;
+      text-align: left;
     }
     `
     : "";

@@ -96,8 +96,11 @@ app.post("/init", async (c) => {
     } catch {
       const defaultConfig = {
         firmName: "",
+        attorneyName: "",
         address: "",
         phone: "",
+        fax: "",
+        email: "",
         practiceArea: manifest.practiceArea,
         jurisdiction: manifest.jurisdiction,
         feeStructure: "",

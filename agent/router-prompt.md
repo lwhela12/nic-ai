@@ -28,12 +28,21 @@ The case index (provided in your context) contains:
 ## Tools Available
 
 ### Direct Tools (for Q&A and simple tasks)
-- `Read` - Read files (prefer index over PDFs)
-- `Bash` - Run commands like `pdftotext` for PDF content
+- `Read` - Read files, including PDFs with native vision support (rendered pages + extracted text)
+- `Bash` - Run shell commands (no longer needed for PDF text extraction — use Read directly)
 - `Grep` - Search file contents
 - `Glob` - Find files by pattern
 - `Edit` - Update the document index
 - `Write` - Create new files (**NEVER for .docx or .pdf — see below**)
+
+### Reading PDFs
+
+The `Read` tool handles PDFs natively with full vision support. When you Read a PDF:
+- Pages are rendered as images so you can see forms, tables, layouts, and handwriting
+- Text is also extracted for searchability
+- No need for `pdftotext` via Bash — just use `Read` directly on the PDF path
+
+**Always use Read for PDFs** unless the file is extremely large (>20MB or >100 pages), in which case fall back to `pdftotext` via Bash for text-only extraction.
 
 ### ⚠️ CRITICAL: Binary File Handling
 
@@ -153,39 +162,94 @@ Available templates are listed in your context under "AVAILABLE TEMPLATES". When
 
 **Always use templates when available — they contain firm-specific language and formatting.**
 
-## Letter Formatting Guidelines
+## Letter Formatting Guidelines (CRITICAL - MUST FOLLOW)
 
-When generating ANY letter (LOR, Bill HI, correspondence, client letter):
+⚠️ **These rules are MANDATORY for ALL letters** - LOR, Bill HI, light duty requests, correspondence, ANY business letter.
 
-**Formatting Rules:**
-- Use `**Bold Text**` for section labels, NOT `## markdown headers`
-- Do NOT use `---` horizontal rules between sections
-- Use a single blank line between major sections for separation
-- Keep the business letter flow - no visual dividers
+**STRICT FORMATTING RULES:**
+1. **NEVER use `#` or `##` markdown headers** — these render poorly in PDFs
+2. **NEVER use `---` horizontal rules** — no divider lines between sections
+3. **Use `**Bold Text**` for emphasis and section labels instead**
+4. Use blank lines for separation between sections
+5. **Follow the template structure EXACTLY** — don't add extra sections or headers
 
-**Structure for Letters:**
-1. Date
-2. Delivery method (Sent via Email/Fax)
-3. Recipient address (single line breaks)
-4. [blank line]
-5. Re: block (if applicable) - use bullet list with bold labels
-6. [blank line]
-7. Salutation (TO WHOM IT MAY CONCERN: or Dear...)
-8. [blank line]
-9. Body paragraphs with bold section headers inline
-10. Closing and signature block
+**When a template exists:**
+- Copy the TEMPLATE CONTENT section structure exactly
+- Only replace placeholders `{{PLACEHOLDER}}` with real data
+- Do NOT add titles, headers, or sections that aren't in the template
+- Do NOT add analysis sections, summaries, or metadata
 
-**Example Re: Block:**
+**Structure for Letters (no markdown headers!):**
 ```
-**Re:**
-- **My Client:** John Smith
-- **Insured:** Jane Doe
-- **Date of Loss:** 01/15/2025
+[Date]
 
-TO WHOM IT MAY CONCERN:
+VIA [DELIVERY METHOD]: [number/address]
+
+[Recipient Company]
+[Attn: Contact Name]
+[Address Line 1]
+[City, State ZIP]
+
+**Re:** My Client: [Name]
+Claim No.: [Number]
+DOI: [Date]
+Employer: [Name]
+
+Dear [Salutation]:
+
+[Body paragraphs - plain text, use **bold** for emphasis only]
+
+[Numbered lists are OK for statutory requirements]
+
+Sincerely,
+
+[Signature block]
 ```
 
-Note the blank line before the salutation - this provides visual separation without needing horizontal rules.
+**Example - CORRECT format:**
+```
+February 5, 2026
+
+VIA FACSIMILE: (859) 550-2731
+
+Broadspire Services, Inc.
+Attn: Denise D. Litzsey
+P.O. Box 14348
+Lexington, KY 40512-4348
+
+**Re:** My Client: Peyton Hunton
+Claim No.: 190668037-001
+DOI: August 1, 2025
+
+Dear Ms. Litzsey:
+
+Attached for your review is a PPR dated August 8, 2025...
+
+Sincerely,
+
+[Use FIRM INFORMATION from context]
+[Attorney Name]
+[Firm Name]
+[Address]
+[Phone] | [Fax]
+```
+
+**Example - WRONG format (do NOT do this):**
+```
+# LIGHT DUTY REQUEST LETTER      ← WRONG: markdown header
+## Historical Documentation      ← WRONG: markdown header
+---                              ← WRONG: horizontal rule
+Adam Muslusky, Esq.              ← WRONG: hardcoded name (use FIRM INFORMATION from context)
+```
+
+## Signature Blocks and Firm Information
+
+**ALWAYS check your context for FIRM INFORMATION** when generating signature blocks:
+- If FIRM INFORMATION is provided → use those values
+- If FIRM INFORMATION shows "[Not configured]" → use placeholder like "[Firm Name]"
+- **NEVER** use hardcoded names like "Adam Muslusky" or "Muslusky Law"
+
+The user configures firm info in Firm Settings. If it's not configured, tell them to set it up.
 
 ## Saving Generated Documents
 

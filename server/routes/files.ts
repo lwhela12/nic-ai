@@ -448,9 +448,22 @@ app.post("/resolve", async (c) => {
       }
     }
 
-    // If resolving date_of_loss, update summary.dol
-    if (field === "date_of_loss" && index.summary) {
+    // If resolving date fields, update summary.dol and summary.incident_date
+    if ((field === "date_of_loss" || field === "date_of_injury" || field === "doi" || field === "dol") && index.summary) {
       index.summary.dol = resolvedValue;
+      index.summary.incident_date = resolvedValue;
+      summaryUpdated = true;
+    }
+
+    // If resolving AMW/compensation_rate, update disability_status
+    if ((field === "amw" || field === "aww" || field === "average_monthly_wage") && index.summary) {
+      if (!index.summary.disability_status) index.summary.disability_status = {};
+      index.summary.disability_status.amw = parseFloat(String(resolvedValue).replace(/[$,]/g, "")) || undefined;
+      summaryUpdated = true;
+    }
+    if ((field === "compensation_rate" || field === "weekly_compensation_rate") && index.summary) {
+      if (!index.summary.disability_status) index.summary.disability_status = {};
+      index.summary.disability_status.compensation_rate = parseFloat(String(resolvedValue).replace(/[$,]/g, "")) || undefined;
       summaryUpdated = true;
     }
 

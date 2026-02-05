@@ -234,6 +234,49 @@ ${sections.join("\n\n---\n\n")}
       // No knowledge base - that's fine
     }
 
+    // Load firm configuration for signature blocks and letterhead
+    let firmInfoContext = "";
+    try {
+      const firmRoot = dirname(caseFolder);
+      const firmConfigPath = join(firmRoot, ".pi_tool", "firm-config.json");
+      const firmConfigContent = await readFile(firmConfigPath, "utf-8");
+      const firmConfig = JSON.parse(firmConfigContent);
+
+      // Check if firm info is actually configured (not just empty strings)
+      const hasConfig = firmConfig.firmName || firmConfig.attorneyName;
+
+      if (hasConfig) {
+        firmInfoContext = `
+FIRM INFORMATION (use this for signature blocks and letterhead):
+- Firm Name: ${firmConfig.firmName || "[Not configured]"}
+- Attorney Name: ${firmConfig.attorneyName || "[Not configured]"}
+- Address: ${firmConfig.address || "[Not configured]"}
+- Phone: ${firmConfig.phone || "[Not configured]"}
+- Fax: ${firmConfig.fax || "[Not configured]"}
+- Email: ${firmConfig.email || "[Not configured]"}
+
+⚠️ ALWAYS use the firm information above for signature blocks. NEVER use hardcoded names like "Adam Muslusky" or "Muslusky Law" - use the configured firm info.
+
+`;
+      } else {
+        firmInfoContext = `
+⚠️ FIRM INFORMATION NOT CONFIGURED
+The firm settings have not been filled in. When generating letters:
+- Use placeholder text like "[Firm Name]", "[Attorney Name]", "[Address]", etc.
+- Tell the user they need to configure firm settings in the Firm Settings panel
+- NEVER use hardcoded names like "Adam Muslusky" or "Muslusky Law"
+
+`;
+      }
+    } catch {
+      // No firm config file - agent will use placeholders
+      firmInfoContext = `
+⚠️ FIRM INFORMATION NOT CONFIGURED
+No firm configuration found. When generating letters, use placeholder text and tell the user to configure firm settings.
+
+`;
+    }
+
     // Load DOI sibling summaries if this is a DOI case (WC multi-injury client)
     let siblingContext = "";
     if (indexData.is_doi_case && indexData.container) {
@@ -303,7 +346,7 @@ TODAY'S DATE: ${dateStr}
 ${siblingContext}
 CASE INDEX (use this to answer questions):
 ${indexJson}
-${templatesContext}${knowledgeContext}
+${templatesContext}${knowledgeContext}${firmInfoContext}
 WORKING DIRECTORY: ${caseFolder}
 
 USER REQUEST: `;
@@ -670,9 +713,17 @@ app.post("/init", async (c) => {
       // Pass incrementalFiles if provided for incremental indexing
       // Derive firmRoot as parent directory of caseFolder
       const firmRoot = dirname(caseFolder);
+      // Detect practice area from existing index so reindex preserves it
+      let practiceArea: string | undefined;
+      try {
+        const existingIndex = JSON.parse(await readFile(join(caseFolder, '.pi_tool', 'document_index.json'), 'utf-8'));
+        practiceArea = existingIndex.practice_area;
+      } catch {
+        // No existing index
+      }
       const options = files?.length
-        ? { incrementalFiles: files, firmRoot }
-        : { firmRoot };
+        ? { incrementalFiles: files, firmRoot, practiceArea }
+        : { firmRoot, practiceArea };
       const result = await indexCase(caseFolder, async (event) => {
         await log(`[${((Date.now() - startTime) / 1000).toFixed(1)}s] ${event.type}: ${JSON.stringify(event)}`);
         await stream.writeSSE({
@@ -688,6 +739,7 @@ app.post("/init", async (c) => {
           type: "done",
           success: result.success,
           error: result.error,
+          diff: result.diff,
           durationSeconds: ((Date.now() - startTime) / 1000).toFixed(1),
         }),
       });
@@ -1248,6 +1300,20 @@ app.post("/errata-correct", async (c) => {
     // Remove from errata since it's now user-verified
     if (index.errata) {
       index.errata = index.errata.filter((e: any) => e.field !== field);
+    }
+
+    // Propagate correction to summary fields so dashboard reflects it immediately
+    if ((field === "date_of_loss" || field === "date_of_injury" || field === "doi" || field === "dol") && index.summary) {
+      index.summary.dol = correctedValue;
+      index.summary.incident_date = correctedValue;
+    }
+    if ((field === "amw" || field === "aww" || field === "average_monthly_wage") && index.summary) {
+      if (!index.summary.disability_status) index.summary.disability_status = {};
+      index.summary.disability_status.amw = parseFloat(String(correctedValue).replace(/[$,]/g, "")) || undefined;
+    }
+    if ((field === "compensation_rate" || field === "weekly_compensation_rate") && index.summary) {
+      if (!index.summary.disability_status) index.summary.disability_status = {};
+      index.summary.disability_status.compensation_rate = parseFloat(String(correctedValue).replace(/[$,]/g, "")) || undefined;
     }
 
     await writeFile(indexPath, JSON.stringify(index, null, 2));

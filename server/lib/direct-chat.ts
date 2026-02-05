@@ -13,6 +13,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { readFile, writeFile } from "fs/promises";
 import { join, dirname } from "path";
 import { generateDocument, type DocumentType } from "./doc-agent";
+import { readDocument } from "./doc-reader";
 
 // Client creation - recreated when API key changes
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -122,6 +123,24 @@ const TOOLS: Anthropic.Tool[] = [
     }
   },
   {
+    name: "read_document",
+    description: "Read a document with full vision support, especially useful for PDFs. Spawns a specialist that can see rendered pages (forms, tables, handwriting, images) not just extracted text. Use this when you need to analyze a specific document in detail — especially PDFs with complex layouts, medical forms, billing statements, or scanned documents. Do NOT use for simple text/JSON file lookups (use read_file for those).",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        path: {
+          type: "string",
+          description: "Relative path from case folder (e.g., 'Intake/Intake.pdf', 'Medical/MRI_Report.pdf')"
+        },
+        question: {
+          type: "string",
+          description: "What you want to know about the document (e.g., 'What injuries are documented?', 'What are the total charges?')"
+        }
+      },
+      required: ["path", "question"]
+    }
+  },
+  {
     name: "get_conflicts",
     description: "Get all document conflicts that need review. Returns all needs_review items with their conflicting values and sources. Use this when the user wants to review conflicts. After reviewing, present your recommendations in batches - group easy ones together, flag complex ones for individual review.",
     input_schema: {
@@ -176,6 +195,33 @@ const TOOLS: Anthropic.Tool[] = [
     }
   }
 ];
+
+// Fuzzy field matching - handles casing, whitespace, and punctuation variations
+function findFieldIndex(needsReview: any[], field: string): number {
+  // Tier 1: Exact match
+  const exact = needsReview.findIndex((item: any) => item.field === field);
+  if (exact !== -1) return exact;
+
+  // Tier 2: Case-insensitive + trimmed
+  const normalizedField = field.trim().toLowerCase();
+  const ci = needsReview.findIndex((item: any) =>
+    item.field?.trim().toLowerCase() === normalizedField
+  );
+  if (ci !== -1) return ci;
+
+  // Tier 3: Normalize punctuation (underscores, colons, apostrophe variants)
+  const normalize = (s: string) => s.trim().toLowerCase()
+    .replace(/[_:]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/[''`]/g, "'");
+  const norm = normalize(field);
+  const normMatch = needsReview.findIndex((item: any) =>
+    normalize(item.field || '') === norm
+  );
+  if (normMatch !== -1) return normMatch;
+
+  return -1;
+}
 
 // Execute a tool and return result
 async function executeTool(
@@ -331,7 +377,7 @@ async function executeTool(
 
         for (const resolution of resolutions) {
           const { field, resolved_value, evidence } = resolution;
-          const itemIndex = needsReview.findIndex((item: any) => item.field === field);
+          const itemIndex = findFieldIndex(needsReview, field);
 
           if (itemIndex === -1) {
             failed.push(field);
@@ -386,8 +432,17 @@ async function executeTool(
               }
             }
           }
-          if (field === "date_of_loss" && index.summary) {
+          if ((field === "date_of_loss" || field === "date_of_injury" || field === "doi" || field === "dol") && index.summary) {
             index.summary.dol = resolved_value;
+            index.summary.incident_date = resolved_value;
+          }
+          if ((field === "amw" || field === "aww" || field === "average_monthly_wage") && index.summary) {
+            if (!index.summary.disability_status) index.summary.disability_status = {};
+            index.summary.disability_status.amw = parseFloat(String(resolved_value).replace(/[$,]/g, "")) || undefined;
+          }
+          if ((field === "compensation_rate" || field === "weekly_compensation_rate") && index.summary) {
+            if (!index.summary.disability_status) index.summary.disability_status = {};
+            index.summary.disability_status.compensation_rate = parseFloat(String(resolved_value).replace(/[$,]/g, "")) || undefined;
           }
           if (field.startsWith("claim_numbers:") && index.summary) {
             const claimKey = field.replace("claim_numbers:", "");
@@ -411,7 +466,10 @@ async function executeTool(
           failed_fields: failed,
           message: failed.length > 0
             ? `WARNING: ${failed.length} field(s) not found in needs_review: ${failed.join(', ')}. Make sure to use exact field names from get_conflicts.`
-            : `Successfully resolved ${resolved.length} conflicts`
+            : `Successfully resolved ${resolved.length} conflicts`,
+          ...(needsReview.length > 0 ? {
+            action_required: `${needsReview.length} conflict(s) still remain. You MUST call get_conflicts now to retrieve and resolve the remaining items before reporting completion.`
+          } : {})
         });
       }
 
@@ -423,7 +481,7 @@ async function executeTool(
 
         // Find the item in needs_review
         const needsReview: any[] = index.needs_review || [];
-        const itemIndex = needsReview.findIndex((item: any) => item.field === field);
+        const itemIndex = findFieldIndex(needsReview, field);
 
         if (itemIndex === -1) {
           return JSON.stringify({
@@ -495,9 +553,22 @@ async function executeTool(
           }
         }
 
-        // For date_of_loss, update summary.dol
-        if (field === "date_of_loss" && index.summary) {
+        // For date_of_loss or date_of_injury, update summary date fields
+        if ((field === "date_of_loss" || field === "date_of_injury" || field === "doi" || field === "dol") && index.summary) {
           index.summary.dol = resolved_value;
+          index.summary.incident_date = resolved_value;
+          summaryUpdated = true;
+        }
+
+        // For AMW/compensation_rate, update disability_status
+        if ((field === "amw" || field === "aww" || field === "average_monthly_wage") && index.summary) {
+          if (!index.summary.disability_status) index.summary.disability_status = {};
+          index.summary.disability_status.amw = parseFloat(String(resolved_value).replace(/[$,]/g, "")) || undefined;
+          summaryUpdated = true;
+        }
+        if ((field === "compensation_rate" || field === "weekly_compensation_rate") && index.summary) {
+          if (!index.summary.disability_status) index.summary.disability_status = {};
+          index.summary.disability_status.compensation_rate = parseFloat(String(resolved_value).replace(/[$,]/g, "")) || undefined;
           summaryUpdated = true;
         }
 
@@ -640,7 +711,7 @@ const BASE_SYSTEM_PROMPT = `You are a helpful legal assistant for a Personal Inj
 
 1. **Answer Questions**: Use the case index and your knowledge to answer questions about cases, injuries, treatments, and PI law.
 
-2. **Read Documents**: Use read_file to review specific documents when you need more detail than the index provides.
+2. **Read Files**: Use read_file for quick text lookups — reading the index, checking a text/JSON file, or grabbing a snippet. For PDFs this uses basic text extraction only.
 
 3. **Update Case Data**: Use update_index when the user provides corrections or new information about a case.
 
@@ -659,7 +730,22 @@ Do NOT use it for:
 - Reviewing existing documents
 - Simple notes or quick responses
 
-5. **Review Document Conflicts**: When the user wants to review conflicts, use get_conflicts to get all items, analyze them, make recommendations, and present them in batches for approval.
+5. **Read Documents with Vision**: Use read_document to analyze specific documents in detail, especially PDFs. This spawns a vision-capable reader that sees rendered pages — form layouts, tables, handwriting, checkboxes, images — not just extracted text. Much better than read_file for PDFs with complex formatting.
+
+## WHEN TO USE read_document
+
+Use read_document when the user asks about a specific document's contents, especially PDFs:
+- "What does the MRI report say?"
+- "What are the charges on the billing statement?"
+- "What injuries are listed in the intake form?"
+- "Can you read the police report?"
+
+Use read_file instead for:
+- Reading the document index (.pi_tool/document_index.json)
+- Quick lookups on text or JSON files
+- Files you already know are simple text
+
+6. **Review Document Conflicts**: When the user wants to review conflicts, use get_conflicts to get all items, analyze them, make recommendations, and present them in batches for approval.
 
 ## DOCUMENT REVIEW MODE
 
@@ -689,7 +775,7 @@ Use this when the user says things like:
 
 4. **Batch resolve** - When user approves, call batch_resolve_conflicts with all approved resolutions at once
 
-5. **Handle remaining** - For items needing discussion, work through them with the user
+5. **Verify and continue** - After batch_resolve_conflicts, if any conflicts remain (check the "remaining" count in the response), call get_conflicts again and resolve them. Do NOT report completion until remaining is 0. Keep going until every conflict is resolved or explicitly deferred by the user.
 
 ### Example flow:
 
@@ -753,67 +839,83 @@ export async function* directChat(
     content: message
   });
 
-  // Initial API call - context is in system prompt, available on every turn
-  const response = await getClient().messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 4096,
-    system: systemPrompt,
-    messages,
-    tools: TOOLS,
-    stream: true
-  });
+  // Agentic loop - supports multiple rounds of tool calls
+  const MAX_TOOL_ITERATIONS = 8;
+  let iterations = 0;
+  let generatedFilePath: string | undefined;
 
-  let fullText = "";
-  let toolUseBlocks: Array<{ id: string; name: string; input: any }> = [];
-  let currentToolUse: { id: string; name: string; input: string } | null = null;
-  let stopReason: string | null = null;
+  while (iterations < MAX_TOOL_ITERATIONS) {
+    iterations++;
 
-  // Process streaming response
-  for await (const event of response) {
-    if (event.type === "content_block_start") {
-      if (event.content_block.type === "tool_use") {
-        currentToolUse = {
-          id: event.content_block.id,
-          name: event.content_block.name,
-          input: ""
-        };
-        yield { type: "tool", tool: event.content_block.name };
-      }
-    } else if (event.type === "content_block_delta") {
-      if (event.delta.type === "text_delta") {
-        fullText += event.delta.text;
-        yield { type: "text", content: event.delta.text };
-      } else if (event.delta.type === "input_json_delta" && currentToolUse) {
-        currentToolUse.input += event.delta.partial_json;
-      }
-    } else if (event.type === "content_block_stop") {
-      if (currentToolUse) {
-        try {
-          // Handle empty input (tools with no parameters)
-          const parsedInput = currentToolUse.input.trim() === ""
-            ? {}
-            : JSON.parse(currentToolUse.input);
-          toolUseBlocks.push({
-            id: currentToolUse.id,
-            name: currentToolUse.name,
-            input: parsedInput
-          });
-        } catch (e) {
-          console.error(`Failed to parse tool input for ${currentToolUse.name}:`, e, currentToolUse.input);
-        }
-        currentToolUse = null;
-      }
-    } else if (event.type === "message_delta") {
-      stopReason = event.delta.stop_reason;
-    } else if (event.type === "message_stop") {
-      // Message complete
+    // API call with tools and streaming on every iteration
+    let response;
+    try {
+      response = await getClient().messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages,
+        tools: TOOLS,
+        stream: true
+      });
+    } catch (err) {
+      console.error(`API call failed (iteration ${iterations}):`, err);
+      yield { type: "text", content: `\n\nError processing response: ${err}` };
+      break;
     }
-  }
 
-  // Handle tool use if needed
-  if (stopReason === "tool_use" && toolUseBlocks.length > 0) {
+    // Per-iteration state (prevents text accumulation across iterations)
+    let iterationText = "";
+    let toolUseBlocks: Array<{ id: string; name: string; input: any }> = [];
+    let currentToolUse: { id: string; name: string; input: string } | null = null;
+    let stopReason: string | null = null;
+
+    // Stream and parse response
+    for await (const event of response) {
+      if (event.type === "content_block_start") {
+        if (event.content_block.type === "tool_use") {
+          currentToolUse = {
+            id: event.content_block.id,
+            name: event.content_block.name,
+            input: ""
+          };
+          yield { type: "tool", tool: event.content_block.name };
+        }
+      } else if (event.type === "content_block_delta") {
+        if (event.delta.type === "text_delta") {
+          iterationText += event.delta.text;
+          yield { type: "text", content: event.delta.text };
+        } else if (event.delta.type === "input_json_delta" && currentToolUse) {
+          currentToolUse.input += event.delta.partial_json;
+        }
+      } else if (event.type === "content_block_stop") {
+        if (currentToolUse) {
+          try {
+            const parsedInput = currentToolUse.input.trim() === ""
+              ? {}
+              : JSON.parse(currentToolUse.input);
+            toolUseBlocks.push({
+              id: currentToolUse.id,
+              name: currentToolUse.name,
+              input: parsedInput
+            });
+          } catch (e) {
+            console.error(`Failed to parse tool input for ${currentToolUse.name}:`, e, currentToolUse.input);
+          }
+          currentToolUse = null;
+        }
+      } else if (event.type === "message_delta") {
+        stopReason = event.delta.stop_reason;
+      }
+    }
+
+    // If no tool use, we're done
+    if (stopReason !== "tool_use" || toolUseBlocks.length === 0) {
+      break;
+    }
+
+    // Execute tools
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    let generatedFilePath: string | undefined;
 
     for (const toolUse of toolUseBlocks) {
       // Handle generate_document specially - it's an async generator
@@ -824,7 +926,6 @@ export async function* directChat(
 
         yield { type: "delegating", content: `Generating ${docTypeName}...` };
 
-        // Run the document agent and stream its output
         let filePath: string | undefined;
         for await (const event of generateDocument(caseFolder, docType, instructions)) {
           if (event.type === "status") {
@@ -846,6 +947,31 @@ export async function* directChat(
             ? `Document successfully generated and saved to ${filePath}`
             : "Document generation completed but no file was saved"
         });
+      } else if (toolUse.name === "read_document") {
+        // Handle read_document - spawns Agent SDK agent with Read tool for vision
+        const docPath = toolUse.input.path as string;
+        const question = toolUse.input.question as string;
+
+        yield { type: "delegating", content: `Reading ${docPath} with vision...` };
+
+        let resultContent = "";
+        for await (const event of readDocument(caseFolder, docPath, question)) {
+          if (event.type === "status") {
+            yield { type: "status", content: event.content };
+          } else if (event.type === "tool") {
+            yield { type: "tool", content: event.content };
+          } else if (event.type === "error") {
+            resultContent = event.content;
+          } else if (event.type === "done") {
+            resultContent = event.content;
+          }
+        }
+
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: resultContent || "No content extracted from document"
+        });
       } else {
         // Regular tool execution
         yield { type: "tool_executing", tool: toolUse.name };
@@ -858,11 +984,11 @@ export async function* directChat(
       }
     }
 
-    // Continue with tool results
+    // Build messages for next iteration (per-iteration text, not accumulated)
     messages.push({
       role: "assistant",
       content: [
-        ...(fullText ? [{ type: "text" as const, text: fullText }] : []),
+        ...(iterationText ? [{ type: "text" as const, text: iterationText }] : []),
         ...toolUseBlocks.map(t => ({
           type: "tool_use" as const,
           id: t.id,
@@ -876,123 +1002,7 @@ export async function* directChat(
       role: "user",
       content: toolResults
     });
-
-    // Make follow-up call with streaming to show response incrementally
-    try {
-      const followUp = await getClient().messages.create({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 4096,
-        system: systemPrompt,
-        messages,
-        tools: TOOLS,
-        stream: true
-      });
-
-      let followUpToolUseBlocks: Array<{ id: string; name: string; input: any }> = [];
-      let followUpCurrentToolUse: { id: string; name: string; input: string } | null = null;
-      let followUpStopReason: string | null = null;
-
-      // Stream follow-up response
-      for await (const event of followUp) {
-        if (event.type === "content_block_start") {
-          if (event.content_block.type === "tool_use") {
-            followUpCurrentToolUse = {
-              id: event.content_block.id,
-              name: event.content_block.name,
-              input: ""
-            };
-            yield { type: "tool", tool: event.content_block.name };
-          }
-        } else if (event.type === "content_block_delta") {
-          if (event.delta.type === "text_delta") {
-            fullText += event.delta.text;
-            yield { type: "text", content: event.delta.text };
-          } else if (event.delta.type === "input_json_delta" && followUpCurrentToolUse) {
-            followUpCurrentToolUse.input += event.delta.partial_json;
-          }
-        } else if (event.type === "content_block_stop") {
-          if (followUpCurrentToolUse) {
-            try {
-              // Handle empty input (tools with no parameters)
-              const parsedInput = followUpCurrentToolUse.input.trim() === ""
-                ? {}
-                : JSON.parse(followUpCurrentToolUse.input);
-              followUpToolUseBlocks.push({
-                id: followUpCurrentToolUse.id,
-                name: followUpCurrentToolUse.name,
-                input: parsedInput
-              });
-            } catch (e) {
-              console.error(`Failed to parse follow-up tool input for ${followUpCurrentToolUse.name}:`, e);
-            }
-            followUpCurrentToolUse = null;
-          }
-        } else if (event.type === "message_delta") {
-          followUpStopReason = event.delta.stop_reason;
-        }
-      }
-
-      // If follow-up also wants to use tools, execute them (one more level)
-      if (followUpStopReason === "tool_use" && followUpToolUseBlocks.length > 0) {
-        const followUpToolResults: Anthropic.ToolResultBlockParam[] = [];
-
-        for (const toolUse of followUpToolUseBlocks) {
-          yield { type: "tool_executing", tool: toolUse.name };
-          const result = await executeTool(toolUse.name, toolUse.input, caseFolder);
-          followUpToolResults.push({
-            type: "tool_result",
-            tool_use_id: toolUse.id,
-            content: result
-          });
-        }
-
-        // Add to messages and make final call
-        messages.push({
-          role: "assistant",
-          content: [
-            ...(fullText ? [{ type: "text" as const, text: fullText }] : []),
-            ...followUpToolUseBlocks.map(t => ({
-              type: "tool_use" as const,
-              id: t.id,
-              name: t.name,
-              input: t.input
-            }))
-          ]
-        });
-        messages.push({
-          role: "user",
-          content: followUpToolResults
-        });
-
-        // Final call (non-streaming, no more tools)
-        const finalResponse = await getClient().messages.create({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 4096,
-          system: systemPrompt,
-          messages
-        });
-
-        for (const block of finalResponse.content) {
-          if (block.type === "text") {
-            yield { type: "text", content: block.text };
-          }
-        }
-      }
-
-      yield {
-        type: "done",
-        done: true,
-        filePath: generatedFilePath
-      };
-    } catch (err) {
-      console.error("Follow-up API call failed:", err);
-      yield { type: "text", content: `\n\nError processing response: ${err}` };
-      yield { type: "done", done: true };
-    }
-  } else {
-    yield {
-      type: "done",
-      done: true
-    };
   }
+
+  yield { type: "done", done: true, filePath: generatedFilePath };
 }

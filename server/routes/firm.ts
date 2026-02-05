@@ -14,15 +14,15 @@ import { PHASE_RULES, getPhaseRules } from "../shared/phase-rules";
 import { loadPracticeGuide, loadSectionsByIds, clearKnowledgeCache } from "./knowledge";
 import { extractTextFromFile } from "../lib/extract";
 import { generateCaseSummary } from "../lib/case-summary";
-import { mergeToIndex, type HypergraphResult } from "../lib/merge-index";
+import { mergeToIndex, diffIndexes, type HypergraphResult, type IndexDiff } from "../lib/merge-index";
 import { directFirmChat } from "../lib/firm-chat";
 import {
   normalizeIndex,
   validateIndex,
   FILE_EXTRACTION_TOOL_SCHEMA,
-  PRACTICE_AREAS,
   type DocumentIndex,
 } from "../lib/index-schema";
+import { practiceAreaRegistry, PRACTICE_AREAS } from "../practice-areas";
 
 // ============================================================================
 // Usage Reporting
@@ -337,6 +337,24 @@ const SYNTHESIS_SCHEMA_WC = {
       type: "boolean" as const,
       description: "Whether there is potential for a third-party liability claim"
     },
+    open_hearings: {
+      type: "array" as const,
+      description: "Open hearing matters with case numbers and hearing level",
+      items: {
+        type: "object" as const,
+        properties: {
+          case_number: { type: "string" as const, description: "Hearing/docket case number (e.g., D-16-12345)" },
+          hearing_level: {
+            type: "string" as const,
+            enum: ["H.O.", "A.O."],
+            description: "H.O. (Hearing Officer, default) or A.O. (Appeals Officer, if any A.O. documents exist)"
+          },
+          next_date: { type: "string" as const, description: "Next hearing date if known" },
+          issue: { type: "string" as const, description: "Issue(s) in dispute" }
+        },
+        required: ["case_number", "hearing_level"] as const
+      }
+    },
     // WC summary structure
     summary: {
       type: "object" as const,
@@ -415,7 +433,7 @@ const SYNTHESIS_SCHEMA_WC = {
               enum: ["TTD", "TPD", "PPD", "PTD"],
               description: "Type of disability (Temporary Total, Temporary Partial, Permanent Partial, Permanent Total)"
             },
-            aww: { type: "number" as const, description: "Average Weekly Wage in dollars" },
+            amw: { type: "number" as const, description: "Average Monthly Wage in dollars" },
             compensation_rate: { type: "number" as const, description: "Weekly compensation rate in dollars" },
             mmi_date: { type: "string" as const, description: "Maximum Medical Improvement date" },
             ppd_rating: { type: "number" as const, description: "Permanent Partial Disability rating percentage" }
@@ -484,9 +502,9 @@ interface CaseSummary {
   // WC-specific fields
   employer?: string;
   ttdStatus?: string;
-  aww?: number;
+  amw?: number;
   compensationRate?: number;
-  openHearings?: Array<{ case_number: string; type: string; next_date?: string; issue?: string }>;
+  openHearings?: Array<{ case_number: string; hearing_level: string; next_date?: string; issue?: string }>;
   // Team assignments
   assignments?: Array<{ userId: string; assignedAt: string; assignedBy: string }>;
   // DOI container fields (for WC multi-injury clients)
@@ -608,12 +626,21 @@ async function buildCaseSummary(
       // TTD Status
       caseSummary.ttdStatus = index.summary?.disability_status?.type || index.ttd_status;
 
-      // AWW and compensation rate
-      caseSummary.aww = parseAmount(index.summary?.disability_status?.aww) || parseAmount(index.aww);
+      // AMW and compensation rate (accept both amw and legacy aww)
+      caseSummary.amw = parseAmount(index.summary?.disability_status?.amw)
+        || parseAmount(index.summary?.disability_status?.aww)
+        || parseAmount(index.amw);
       caseSummary.compensationRate = parseAmount(index.summary?.disability_status?.compensation_rate) || parseAmount(index.compensation_rate);
 
-      // Open hearings
-      caseSummary.openHearings = index.open_hearings;
+      // Open hearings (normalize legacy type→hearing_level)
+      if (Array.isArray(index.open_hearings)) {
+        caseSummary.openHearings = index.open_hearings.map((h: any) => ({
+          case_number: h.case_number,
+          hearing_level: h.hearing_level || (h.type === "A.O." ? "A.O." : "H.O."),
+          next_date: h.next_date,
+          issue: h.issue,
+        }));
+      }
     }
 
     // Team assignments
@@ -914,8 +941,8 @@ EXTRACTION PRIORITIES:
    - Mechanism of injury
    - ICD-10 diagnosis codes if present
 6. Wage information:
-   - Average Weekly Wage (AWW)
-   - Compensation rate (typically 2/3 of AWW)
+   - Average Monthly Wage (AMW)
+   - Compensation rate (typically 2/3 of AMW)
 7. Disability status (IMPORTANT - always determine disability_type when work status is mentioned):
    - TTD (Temporary Total Disability): Patient is completely off work, cannot work at all
    - TPD (Temporary Partial Disability): Patient on modified/light duty, working with restrictions
@@ -939,7 +966,18 @@ EXTRACTION PRIORITIES:
 Always call the extract_document tool with your findings.`;
 
 // Function to get the appropriate extraction prompt
+// Loads from practice-areas module (markdown files) with fallback to hardcoded prompts
 function getFileExtractionSystemPrompt(practiceArea?: string): string {
+  const config = practiceArea === PRACTICE_AREAS.WC
+    ? practiceAreaRegistry.get("WC")
+    : practiceAreaRegistry.getDefault();
+
+  // Use loaded prompt from markdown file if available, otherwise fall back to hardcoded
+  if (config?.extractionPrompt) {
+    return config.extractionPrompt;
+  }
+
+  // Fallback to hardcoded prompts during migration
   if (practiceArea === PRACTICE_AREAS.WC) return WC_EXTRACTION_PROMPT;
   return PI_EXTRACTION_PROMPT;
 }
@@ -1027,7 +1065,7 @@ EXTRACTION FOCUS:
 - Employer name, job title
 - WC Carrier name, claim number, adjuster
 - Body parts injured, diagnosis codes
-- Average Weekly Wage (AWW), compensation rate
+- Average Monthly Wage (AMW), compensation rate
 - disability_type (IMPORTANT - always determine when work status mentioned):
   * TTD = off work completely, cannot work
   * TPD = modified/light duty, working with restrictions
@@ -1060,7 +1098,18 @@ IMPORTANT:
 - If a file cannot be read or parsed, return the JSON with key_info explaining the issue`;
 
 // Function to get the appropriate fallback extraction prompt
+// Loads from practice-areas module (markdown files) with fallback to hardcoded prompts
 function getFileExtractionSystemPromptWithTools(practiceArea?: string): string {
+  const config = practiceArea === PRACTICE_AREAS.WC
+    ? practiceAreaRegistry.get("WC")
+    : practiceAreaRegistry.getDefault();
+
+  // Use loaded prompt from markdown file if available, otherwise fall back to hardcoded
+  if (config?.extractionPromptWithTools) {
+    return config.extractionPromptWithTools;
+  }
+
+  // Fallback to hardcoded prompts during migration
   if (practiceArea === PRACTICE_AREAS.WC) return WC_EXTRACTION_PROMPT_WITH_TOOLS;
   return PI_EXTRACTION_PROMPT_WITH_TOOLS;
 }
@@ -1104,7 +1153,7 @@ ${indexSchema}
    - Contact info into summary.contact
    - Employer info into summary.employer (name, address, job_title)
    - WC carrier info into summary.wc_carrier (carrier, claim_number, adjuster)
-   - Disability status into summary.disability_status (type, aww, compensation_rate, mmi_date, ppd_rating)
+   - Disability status into summary.disability_status (type, amw, compensation_rate, mmi_date, ppd_rating)
 
 4. Document ALL judgment calls in "errata"
 
@@ -1114,7 +1163,7 @@ ${indexSchema}
 
 **MANDATORY needs_review items** - If the hypergraph shows ANY of these, you MUST add to needs_review:
 1. Any field where consensus is "UNCERTAIN" - these REQUIRE human decision
-2. Any AWW or compensation rate conflicts
+2. Any AMW or compensation rate conflicts
 3. Any date_of_injury conflicts
 4. Any PPD rating conflicts
 
@@ -1152,12 +1201,12 @@ Return a JSON object with these fields:
   - total_charges: Total medical charges
   - employer: { name, address, job_title }
   - wc_carrier: { carrier, claim_number, adjuster }
-  - disability_status: { type, aww, compensation_rate, mmi_date, ppd_rating }
+  - disability_status: { type, amw, compensation_rate, mmi_date, ppd_rating }
   - contact: { phone, email, address }
   - case_summary: Brief narrative summary
 - case_name: e.g. "LASTNAME, Firstname"
 - case_phase: One of Intake, Investigation, Treatment, MMI Evaluation, Benefits Resolution, Settlement/Hearing, Closed
-- open_hearings: Array of { case_number, type, next_date, issue }
+- open_hearings: Array of { case_number, hearing_level ("H.O." or "A.O."), next_date, issue }. Use "A.O." if any Appeals Officer documents/decisions exist, otherwise default to "H.O."
 
 **IMPORTANT**: You MUST include needs_review and errata arrays. Empty arrays only if truly zero conflicts.`;
   }
@@ -1453,22 +1502,17 @@ Use the extract_document tool to return your findings.`
       return result;
     }
 
-    // Check file extension and size to decide extraction method
-    const isPdf = filename.toLowerCase().endsWith('.pdf');
-    const useAgentFallback = !isPdf || fileSizeMB > 32;
+    // ========================================================================
+    // PATH 2: Agent SDK fallback for all non-pre-extracted files
+    // Uses Haiku agent with Read/Bash tools to examine the file
+    // ========================================================================
+    console.log(`[${fileIndex + 1}/${totalFiles}] [agent-fallback] ${filename}`);
+    extractionMethod = 'agent-fallback';
 
-    if (useAgentFallback) {
-      // ========================================================================
-      // PATH 2a: Non-PDF or large file → Agent fallback with tools
-      // ========================================================================
-      const reason = !isPdf ? `non-PDF file` : `large PDF (${fileSizeMB.toFixed(1)}MB)`;
-      console.log(`[${fileIndex + 1}/${totalFiles}] [agent-fallback] ${reason}: ${filename}`);
-      extractionMethod = 'agent-fallback';
-
-      // Use cached SDK options or create them (should be cached at call site)
-      const effectiveSdkCliOpts = sdkCliOpts ?? getSDKCliOptions();
-      const effectiveSystemPrompt = cachedSystemPrompt ?? getFileExtractionSystemPromptWithTools(practiceArea);
-      const agentPrompt = `Extract information from this file: ${fullPath}
+    // Use cached SDK options or create them (should be cached at call site)
+    const effectiveSdkCliOpts = sdkCliOpts ?? getSDKCliOptions();
+    const effectiveSystemPrompt = cachedSystemPrompt ?? getFileExtractionSystemPromptWithTools(practiceArea);
+    const agentPrompt = `Extract information from this file: ${fullPath}
 
 Use the Read tool to read the file. Then return the JSON extraction with these fields:
 - type: document type
@@ -1477,150 +1521,67 @@ Use the Read tool to read the file. Then return the JSON extraction with these f
 
 Return ONLY valid JSON, no markdown.`;
 
-      const AGENT_TIMEOUT_MS = 60000; // 60 seconds
+    const AGENT_TIMEOUT_MS = 60000; // 60 seconds
 
-      try {
-        // Wrap agent query in a promise with timeout to prevent hanging
-        const agentPromise = (async () => {
-          for await (const msg of query({
-            prompt: agentPrompt,
-            options: {
-              cwd: caseFolder,
-              systemPrompt: effectiveSystemPrompt,
-              model: "haiku" as const,
-              allowedTools: ["Bash", "Read"],
-              permissionMode: "acceptEdits" as const,
-              maxTurns: 5,
-              persistSession: false,
-              ...effectiveSdkCliOpts,
-            },
-          })) {
-            if (msg.type === "assistant") {
-              for (const block of msg.message.content) {
-                if (block.type === "text") {
-                  try {
-                    const jsonMatch = block.text.match(/\{[\s\S]*\}/);
-                    if (jsonMatch) {
-                      const parsed = JSON.parse(jsonMatch[0]);
-                      result = {
-                        filename: parsed.filename || filename,
-                        folder,
-                        type: parsed.type || 'other',
-                        key_info: parsed.key_info || '',
-                        extracted_data: parsed.extracted_data,
-                      };
-                    }
-                  } catch {
-                    result.key_info = block.text.slice(0, 500);
+    try {
+      // Wrap agent query in a promise with timeout to prevent hanging
+      const agentPromise = (async () => {
+        for await (const msg of query({
+          prompt: agentPrompt,
+          options: {
+            cwd: caseFolder,
+            systemPrompt: effectiveSystemPrompt,
+            model: "haiku" as const,
+            allowedTools: ["Bash", "Read"],
+            permissionMode: "acceptEdits" as const,
+            maxTurns: 5,
+            persistSession: false,
+            ...effectiveSdkCliOpts,
+          },
+        })) {
+          if (msg.type === "assistant") {
+            for (const block of msg.message.content) {
+              if (block.type === "text") {
+                try {
+                  const jsonMatch = block.text.match(/\{[\s\S]*\}/);
+                  if (jsonMatch) {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    result = {
+                      filename: parsed.filename || filename,
+                      folder,
+                      type: parsed.type || 'other',
+                      key_info: parsed.key_info || '',
+                      extracted_data: parsed.extracted_data,
+                    };
                   }
+                } catch {
+                  result.key_info = block.text.slice(0, 500);
                 }
               }
             }
-
-            if (msg.type === "result" && (msg as any).usage) {
-              const finalUsage = (msg as any).usage;
-              usage.inputTokensNew = finalUsage.input_tokens || 0;
-              usage.inputTokensCacheWrite = finalUsage.cache_creation_input_tokens || 0;
-              usage.inputTokensCacheRead = finalUsage.cache_read_input_tokens || 0;
-              usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
-              usage.outputTokens = finalUsage.output_tokens || 0;
-              usage.apiCalls = 1;
-            }
           }
-        })();
 
-        const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 1000}s`)), AGENT_TIMEOUT_MS)
-        );
-
-        await Promise.race([agentPromise, timeoutPromise]);
-      } catch (agentErr) {
-        console.error(`[${fileIndex + 1}/${totalFiles}] Agent fallback error for ${filename}:`, agentErr);
-        result.key_info = `Extraction failed: ${agentErr instanceof Error ? agentErr.message : String(agentErr)}`;
-        result.error = agentErr instanceof Error ? agentErr.message : String(agentErr);
-      }
-    } else {
-      // ========================================================================
-      // PATH 2b: Direct API with PDF document → No agent subprocess needed
-      // ========================================================================
-      console.log(`[${fileIndex + 1}/${totalFiles}] [pdf-direct] ${filename}`);
-
-      const DIRECT_API_TIMEOUT_MS = 60000; // 60 seconds, matches agent timeout
-
-      try {
-        // Read PDF file as base64 - scoped to minimize buffer lifetime
-        const pdfBase64 = await (async () => {
-          const buf = await readFile(fullPath);
-          return buf.toString('base64');
-        })();
-
-        // Wrap API call in timeout to prevent indefinite hangs
-        const apiPromise = getClient().messages.create({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 2000,
-          system: getFileExtractionSystemPrompt(practiceArea),
-          messages: [{
-            role: "user",
-            content: [
-              {
-                type: "document",
-                source: {
-                  type: "base64",
-                  media_type: "application/pdf",
-                  data: pdfBase64,
-                },
-              },
-              {
-                type: "text",
-                text: `Extract information from this PDF document.
-
-FILENAME: ${filename}
-FOLDER: ${folder}
-
-Use the extract_document tool to return your findings.`
-              }
-            ]
-          }],
-          tools: [FILE_EXTRACTION_TOOL_SCHEMA],
-          tool_choice: { type: "tool", name: "extract_document" }
-        });
-
-        const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Direct API timeout after ${DIRECT_API_TIMEOUT_MS / 1000}s`)), DIRECT_API_TIMEOUT_MS)
-        );
-
-        const response = await Promise.race([apiPromise, timeoutPromise]);
-
-        // Capture usage
-        usage.inputTokensNew = response.usage.input_tokens || 0;
-        usage.inputTokensCacheWrite = (response.usage as any).cache_creation_input_tokens || 0;
-        usage.inputTokensCacheRead = (response.usage as any).cache_read_input_tokens || 0;
-        usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
-        usage.outputTokens = response.usage.output_tokens || 0;
-        usage.apiCalls = 1;
-
-        // Extract tool use result
-        const toolBlock = response.content.find(block => block.type === 'tool_use');
-        if (toolBlock && toolBlock.type === 'tool_use') {
-          const extracted = toolBlock.input as {
-            type: string;
-            key_info: string;
-            extracted_data: Record<string, unknown>;
-          };
-
-          result = {
-            filename,
-            folder,
-            type: extracted.type || 'other',
-            key_info: extracted.key_info || '',
-            extracted_data: extracted.extracted_data,
-          };
+          if (msg.type === "result" && (msg as any).usage) {
+            const finalUsage = (msg as any).usage;
+            usage.inputTokensNew = finalUsage.input_tokens || 0;
+            usage.inputTokensCacheWrite = finalUsage.cache_creation_input_tokens || 0;
+            usage.inputTokensCacheRead = finalUsage.cache_read_input_tokens || 0;
+            usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
+            usage.outputTokens = finalUsage.output_tokens || 0;
+            usage.apiCalls = 1;
+          }
         }
-      } catch (apiErr) {
-        console.error(`[${fileIndex + 1}/${totalFiles}] Direct PDF API error for ${filename}:`, apiErr);
-        result.key_info = `PDF extraction failed: ${apiErr instanceof Error ? apiErr.message : String(apiErr)}`;
-        result.error = apiErr instanceof Error ? apiErr.message : String(apiErr);
-      }
+      })();
+
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 1000}s`)), AGENT_TIMEOUT_MS)
+      );
+
+      await Promise.race([agentPromise, timeoutPromise]);
+    } catch (agentErr) {
+      console.error(`[${fileIndex + 1}/${totalFiles}] Agent fallback error for ${filename}:`, agentErr);
+      result.key_info = `Extraction failed: ${agentErr instanceof Error ? agentErr.message : String(agentErr)}`;
+      result.error = agentErr instanceof Error ? agentErr.message : String(agentErr);
     }
 
     result.usage = usage;
@@ -1819,6 +1780,10 @@ Analyze the case and use the case_synthesis tool to return your synthesis.`
       // Use doi for WC incident date
       if (synthesis.summary?.doi) {
         merged.summary.incident_date = synthesis.summary.doi;
+      }
+      // Open hearings from synthesis
+      if (Array.isArray(synthesis.open_hearings) && synthesis.open_hearings.length > 0) {
+        merged.open_hearings = synthesis.open_hearings;
       }
     } else {
       // PI fields
@@ -2074,7 +2039,7 @@ async function indexCase(
       siblingCases?: Array<{ path: string; name: string; dateOfInjury: string }>;
     };
   }
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; diff?: IndexDiff }> {
   const caseName = caseFolder.split('/').pop() || caseFolder;
   const isIncremental = options?.incrementalFiles && options.incrementalFiles.length > 0;
   const indexDir = join(caseFolder, '.pi_tool');
@@ -2144,7 +2109,7 @@ async function indexCase(
     }
 
     // Step 2: Extract files in batches with GC pauses
-    const BATCH_SIZE = 8;
+    const BATCH_SIZE = 15;
     console.log(`\n========== EXTRACTING ${files.length} FILES (batches of ${BATCH_SIZE} with GC) ==========`);
     onProgress({ type: "status", caseName, message: `Extracting ${files.length} files (${BATCH_SIZE} at a time)...` });
 
@@ -2190,7 +2155,7 @@ async function indexCase(
         completedCount += batch.length;
         console.log(`--- Progress: ${completedCount}/${items.length} files complete (batch ${batchNum + 1}/${totalBatches}) ---`);
 
-        // Force garbage collection every 5 batches (40 files) to prevent memory accumulation
+        // Force garbage collection every 5 batches (75 files at batch size 15) to prevent memory accumulation
         // without causing excessive pauses
         if ((batchNum + 1) % 5 === 0 && typeof Bun !== 'undefined' && Bun.gc) {
           Bun.gc(true);
@@ -2302,8 +2267,8 @@ async function indexCase(
       failed_files: failedFiles,
       issues_found: [],
       reconciled_values: existingIndex?.reconciled_values ?? {},
-      needs_review: [],
-      errata: [],
+      needs_review: existingIndex?.needs_review ?? [],
+      errata: existingIndex?.errata ?? [],
       case_analysis: existingIndex?.case_analysis ?? "",
       case_notes: existingIndex?.case_notes ?? [],
       chat_archives: existingIndex?.chat_archives ?? [],
@@ -2408,9 +2373,13 @@ async function indexCase(
       console.warn(`[Schema] Validation issues in ${caseName}:`, validation.issues.slice(0, 5));
     }
 
+    // Compute diff between old and new index
+    const indexDiff = diffIndexes(previousIndex, normalizedIndex);
+
     // Write final normalized index
     await writeFile(indexPath, JSON.stringify(normalizedIndex, null, 2));
     console.log(`[Index] Wrote normalized document_index.json`);
+    console.log(`[Diff] ${indexDiff.summary}`);
 
     // ========== SONNET SYNTHESIS (COMMENTED OUT - replaced by parallel Haiku + programmatic merge) ==========
     // // Step 6: Sonnet reconciles and writes case summary (skip for simple incremental updates)
@@ -2527,8 +2496,8 @@ async function indexCase(
       }
     }
 
-    onProgress({ type: "case_done", caseName, success: true });
-    return { success: true };
+    onProgress({ type: "case_done", caseName, success: true, diff: indexDiff });
+    return { success: true, diff: indexDiff };
 
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
@@ -2966,7 +2935,7 @@ const hypergraphSystemPromptWC = `You are a data consistency analyzer for a Work
 YOUR TASK: Read a document index JSON and build a hypergraph that groups related data points across documents to identify inconsistencies.
 
 HYPERGRAPH STRUCTURE:
-- Each "hyperedge" groups all mentions of a semantic field (e.g., all dates of injury, all DOBs, all AWW values)
+- Each "hyperedge" groups all mentions of a semantic field (e.g., all dates of injury, all DOBs, all AMW values)
 - Nodes within a hyperedge should have the same value if extracted correctly
 - Inconsistencies = nodes in same hyperedge with different values
 
@@ -2986,7 +2955,7 @@ FIELDS TO TRACK:
 13. tpa_name / third_party_administrator - Third Party Administrator (e.g., CCMSI)
 14. adjuster_name - Claims adjuster name
 15. adjuster_phone - Claims adjuster phone
-16. aww / average_weekly_wage - Average Weekly Wage (critical for benefits calculation)
+16. amw / average_monthly_wage - Average Monthly Wage (critical for benefits calculation)
 17. compensation_rate / weekly_compensation_rate - Weekly benefit rate
 18. disability_type - TTD/TPD/PPD/PTD status
 19. injury_description - Description of injury mechanism
@@ -3008,7 +2977,7 @@ ANALYSIS RULES:
 HANDLING UNCERTAINTY:
 - If document counts are EQUAL (e.g., 1:1 or 2:2), do NOT declare a consensus. Set consensus to "UNCERTAIN" and confidence to 0.
 - Do NOT guess which document is "more authoritative" or "more recent" - that's not your job.
-- AWW and compensation_rate conflicts are CRITICAL - always flag them.
+- AMW and compensation_rate conflicts are CRITICAL - always flag them.
 
 OUTPUT FORMAT - Return ONLY valid JSON:
 {
@@ -3042,7 +3011,7 @@ OUTPUT FORMAT - Return ONLY valid JSON:
 IMPORTANT:
 - Return ONLY the JSON object, no markdown, no explanation
 - Only include fields that have actual data in the index
-- AWW and compensation_rate are CRITICAL for WC - always extract if present
+- AMW and compensation_rate are CRITICAL for WC - always extract if present
 - If a field appears in only one document, confidence is lower but no conflict`;
 
 // Helper to get the right hypergraph prompt based on practice area

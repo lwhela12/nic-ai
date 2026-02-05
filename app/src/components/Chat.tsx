@@ -11,6 +11,7 @@ interface Props {
   onIndexMayHaveChanged?: () => void
   onDraftsMayHaveChanged?: () => void
   onShowFile?: (filePath: string) => void
+  onIndexStatusChange?: (status: IndexStatus | null) => void
 }
 
 interface Message {
@@ -234,7 +235,7 @@ const KEEP_RECENT = 2
 const CONTEXT_WARNING_PERCENT = 50  // Yellow warning
 const CONTEXT_DANGER_PERCENT = 55   // Red warning, trigger auto-summarize (lowered for earlier prevention)
 
-export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onShowFile }: Props) {
+export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onShowFile, onIndexStatusChange }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -363,6 +364,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
   }, [initialPrompt]) // eslint-disable-line react-hooks/exhaustive-deps
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null)
   const [isIndexing, setIsIndexing] = useState(false)
+  const [showIndexDetails, setShowIndexDetails] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const checkIndexStatus = useCallback(async () => {
@@ -385,6 +387,11 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
     const interval = setInterval(checkIndexStatus, 30000)
     return () => clearInterval(interval)
   }, [caseFolder, checkIndexStatus])
+
+  // Notify parent when indexStatus changes (for FileViewer badges)
+  useEffect(() => {
+    onIndexStatusChange?.(indexStatus)
+  }, [indexStatus]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const runReindex = async (forceFullReindex = false) => {
     if (isIndexing) return
@@ -426,15 +433,44 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
       const reader = response.body?.getReader()
       if (!reader) return
 
+      // Parse SSE events to capture the diff summary
       const decoder = new TextDecoder()
+      let buffer = ''
+      let diffSummary: string | null = null
+
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
-        decoder.decode(value)
+        buffer += decoder.decode(value, { stream: true })
+
+        // Parse SSE lines from buffer
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || '' // Keep incomplete line in buffer
+        for (const line of lines) {
+          if (line.startsWith('data:')) {
+            try {
+              const event = JSON.parse(line.slice(5).trim())
+              if (event.type === 'done' && event.diff?.summary) {
+                diffSummary = event.diff.summary
+              }
+            } catch {
+              // Not valid JSON, skip
+            }
+          }
+        }
       }
 
       await checkIndexStatus()
       onIndexMayHaveChanged?.()
+
+      // Show reindex summary as a chat message
+      if (diffSummary) {
+        setMessages(prev => [...prev, {
+          role: 'assistant' as const,
+          content: `**Index Updated** — ${diffSummary}`,
+          tools: [],
+        }])
+      }
     } catch {
       // Ignore
     } finally {
@@ -748,40 +784,62 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
     <div className="flex flex-col h-full">
       {/* Index status banner */}
       {indexStatus?.needsIndex && (
-        <div className="px-4 py-3 bg-amber-50 border-b border-amber-200 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center text-amber-600">
-              <ExclamationTriangleIcon />
+        <div className="px-4 py-3 bg-amber-50 border-b border-amber-200">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center text-amber-600">
+                <ExclamationTriangleIcon />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-amber-800">{indexStatus.message}</p>
+                {(indexStatus.newFiles.length > 0 || indexStatus.modifiedFiles.length > 0) && (
+                  <button
+                    onClick={() => setShowIndexDetails(d => !d)}
+                    className="text-xs text-amber-600 mt-0.5 hover:text-amber-800 underline decoration-dotted"
+                  >
+                    {indexStatus.newFiles.length} new, {indexStatus.modifiedFiles.length} modified
+                    {showIndexDetails ? ' ▴' : ' ▾'}
+                  </button>
+                )}
+              </div>
             </div>
-            <div>
-              <p className="text-sm font-medium text-amber-800">{indexStatus.message}</p>
-              {(indexStatus.newFiles.length > 0 || indexStatus.modifiedFiles.length > 0) && (
-                <p className="text-xs text-amber-600 mt-0.5">
-                  {indexStatus.newFiles.length} new, {indexStatus.modifiedFiles.length} modified
-                </p>
-              )}
+            <div className="flex gap-2">
+              <button
+                onClick={() => runReindex()}
+                disabled={isIndexing}
+                className="px-4 py-2 text-sm font-medium bg-amber-600 hover:bg-amber-700 text-white
+                           rounded-lg disabled:opacity-50 transition-colors"
+                title="Index only new and modified files"
+              >
+                {isIndexing ? 'Indexing...' : 'Update Index'}
+              </button>
+              <button
+                onClick={() => runReindex(true)}
+                disabled={isIndexing}
+                className="px-3 py-2 text-sm font-medium bg-surface-200 hover:bg-surface-300 text-brand-700
+                           rounded-lg disabled:opacity-50 transition-colors"
+                title="Re-index all files from scratch"
+              >
+                Full
+              </button>
             </div>
           </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => runReindex()}
-              disabled={isIndexing}
-              className="px-4 py-2 text-sm font-medium bg-amber-600 hover:bg-amber-700 text-white
-                         rounded-lg disabled:opacity-50 transition-colors"
-              title="Index only new and modified files"
-            >
-              {isIndexing ? 'Indexing...' : 'Update Index'}
-            </button>
-            <button
-              onClick={() => runReindex(true)}
-              disabled={isIndexing}
-              className="px-3 py-2 text-sm font-medium bg-surface-200 hover:bg-surface-300 text-brand-700
-                         rounded-lg disabled:opacity-50 transition-colors"
-              title="Re-index all files from scratch"
-            >
-              Full
-            </button>
-          </div>
+          {showIndexDetails && (
+            <div className="mt-2 ml-11 space-y-1">
+              {indexStatus.newFiles.map((f, i) => (
+                <div key={`new-${i}`} className="flex items-center gap-2 text-xs text-amber-700">
+                  <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-700 rounded font-medium">NEW</span>
+                  <span className="truncate">{f.split('/').pop()}</span>
+                </div>
+              ))}
+              {indexStatus.modifiedFiles.map((f, i) => (
+                <div key={`mod-${i}`} className="flex items-center gap-2 text-xs text-amber-700">
+                  <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded font-medium">MOD</span>
+                  <span className="truncate">{f.split('/').pop()}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

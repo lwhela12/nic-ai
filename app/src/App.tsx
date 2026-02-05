@@ -139,10 +139,12 @@ export interface GeneratedDoc {
 export interface DocumentIndex {
   case_name: string
   indexed_at: string
+  practice_area?: string
   folders: Record<string, DocumentFolder>
   summary: {
     client: string
-    dol: string
+    dol?: string
+    incident_date?: string
     dob?: string
     providers: string[]
     total_charges: string | number
@@ -163,6 +165,9 @@ export interface DocumentIndex {
       member_no?: string
     }
     claim_numbers?: Record<string, string>
+    disability_status?: {
+      type?: string
+    }
   }
   issues_found?: string[]
   case_analysis?: string
@@ -250,6 +255,7 @@ function App() {
   const [reviewPrompt, setReviewPrompt] = useState<string>('')
   const [viewDocPath, setViewDocPath] = useState<string | null>(null)
   const [refreshDraftsKey, setRefreshDraftsKey] = useState(0)
+  const [indexStatusForViewer, setIndexStatusForViewer] = useState<{ needsIndex: boolean; newFiles: string[]; modifiedFiles: string[] } | null>(null)
 
   // Contact card state
   const [isContactCardOpen, setIsContactCardOpen] = useState(false)
@@ -750,11 +756,17 @@ function App() {
                 {documentIndex?.summary?.client || documentIndex?.case_name || caseFolder?.split('/').pop() || 'Case'}
               </h1>
               <div className="flex items-center gap-3 text-sm text-brand-300">
-                <span>DOL: {documentIndex?.summary?.dol || '—'}</span>
+                <span>{documentIndex?.practice_area === "Workers' Compensation" ? 'DOI' : 'DOL'}: {documentIndex?.summary?.incident_date || documentIndex?.summary?.dol || '—'}</span>
                 <span className="text-brand-500">•</span>
-                <span className="text-accent-400 font-medium">
-                  {documentIndex?.summary?.total_charges || '—'} in specials
-                </span>
+                {documentIndex?.practice_area === "Workers' Compensation" ? (
+                  <span className="text-accent-400 font-medium">
+                    {documentIndex?.summary?.disability_status?.type || '—'}
+                  </span>
+                ) : (
+                  <span className="text-accent-400 font-medium">
+                    {documentIndex?.summary?.total_charges || '—'} in specials
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -878,6 +890,7 @@ function App() {
               setFileViewUrl(url)
               setFileViewName(filename)
             }}
+            indexStatus={indexStatusForViewer}
           />
         }
         centerPanel={
@@ -890,6 +903,7 @@ function App() {
             onIndexMayHaveChanged={reloadDocumentIndex}
             onDraftsMayHaveChanged={() => setRefreshDraftsKey(k => k + 1)}
             onShowFile={handleShowFile}
+            onIndexStatusChange={setIndexStatusForViewer}
           />
         }
         rightPanel={

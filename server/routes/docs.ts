@@ -261,10 +261,12 @@ function inferTypeFromPath(path: string): ExportOptions["documentType"] {
   if (lower.includes("demand")) return "demand";
   if (lower.includes("settlement")) return "settlement";
   if (lower.includes("memo")) return "memo";
-  // Letter types: Bill HI, LOR, correspondence letters
+  // Letter types: Bill HI, LOR, correspondence, requests, notices
+  // Workers' Comp letters: light duty request, TTD request, authorization request, etc.
   if (lower.includes("bill_hi") || lower.includes("bill hi") ||
       lower.includes("lor") || lower.includes("letter_of_representation") ||
-      lower.includes("letter")) return "letter";
+      lower.includes("letter") || lower.includes("request") ||
+      lower.includes("notice") || lower.includes("correspondence")) return "letter";
   return "generic";
 }
 

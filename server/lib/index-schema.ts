@@ -10,9 +10,17 @@
  * - Workers' Compensation (WC): Extended schema with WC-specific fields
  *
  * Backward compatibility: Indexes without practice_area field are treated as PI.
+ *
+ * NOTE: Document types and phases are now defined in practice-areas modules
+ * and imported here for backward compatibility.
  */
 
 import { z } from "zod";
+
+// Import from practice-areas modules (source of truth for law-specific config)
+import { SHARED_DOC_TYPES } from "../practice-areas/types";
+import { PI_DOC_TYPES, PI_PHASES } from "../practice-areas/personal-injury/config";
+import { WC_DOC_TYPES, WC_PHASES } from "../practice-areas/workers-comp/config";
 
 // =============================================================================
 // PRACTICE AREA DEFINITIONS
@@ -88,7 +96,7 @@ export const WCCarrierSchema = z.object({
 
 export const DisabilityStatusSchema = z.object({
   type: z.enum(["TTD", "TPD", "PPD", "PTD"]).optional(), // Temporary Total, Temporary Partial, Permanent Partial, Permanent Total
-  aww: z.number().optional(), // Average Weekly Wage
+  amw: z.number().optional(), // Average Monthly Wage
   compensation_rate: z.number().optional(), // Weekly benefit rate
   mmi_date: z.string().optional(), // Maximum Medical Improvement date
   ppd_rating: z.number().optional(), // Permanent Partial Disability percentage
@@ -154,31 +162,10 @@ export const ErrataSchema = z.object({
 
 // =============================================================================
 // CASE PHASE SCHEMAS (Practice Area Specific)
+// Phases are imported from practice-areas modules
 // =============================================================================
 
-// PI phases
-export const PI_PHASES = [
-  "Intake",
-  "Investigation",
-  "Treatment",
-  "Demand",
-  "Negotiation",
-  "Settlement",
-  "Complete",
-] as const;
-
-// WC phases
-export const WC_PHASES = [
-  "Intake",
-  "Investigation",
-  "Treatment",
-  "MMI Evaluation",
-  "Benefits Resolution",
-  "Settlement/Hearing",
-  "Closed",
-] as const;
-
-// Combined for schema validation (accepts either)
+// Combined for schema validation (accepts either PI or WC phases)
 export const ALL_PHASES = [...new Set([...PI_PHASES, ...WC_PHASES])] as const;
 
 export const CasePhaseSchema = z.enum(ALL_PHASES as unknown as [string, ...string[]]);
@@ -186,6 +173,9 @@ export const CasePhaseSchema = z.enum(ALL_PHASES as unknown as [string, ...strin
 export type PICasePhase = (typeof PI_PHASES)[number];
 export type WCCasePhase = (typeof WC_PHASES)[number];
 export type CasePhase = PICasePhase | WCCasePhase;
+
+// Re-export phases for backward compatibility
+export { PI_PHASES, WC_PHASES };
 
 // =============================================================================
 // PI-SPECIFIC ASSESSMENT SCHEMAS
@@ -307,6 +297,14 @@ export const DocumentIndexSchema = z.object({
   estimated_ttd_weeks: z.number().nullable().optional(),
   estimated_ppd_rating: z.number().nullable().optional(),
   third_party_potential: z.boolean().nullable().optional(),
+
+  // WC hearings
+  open_hearings: z.array(z.object({
+    case_number: z.string(),
+    hearing_level: z.enum(["H.O.", "A.O."]),
+    next_date: z.string().optional(),
+    issue: z.string().optional(),
+  })).optional(),
 });
 
 export type DocumentIndex = z.infer<typeof DocumentIndexSchema>;
@@ -370,50 +368,10 @@ export function getDefaultPhase(practiceArea?: string): string {
  */
 // =============================================================================
 // DOCUMENT TYPES BY PRACTICE AREA
+// Document types are imported from practice-areas modules
 // =============================================================================
 
-// Shared document types (all practice areas)
-export const SHARED_DOC_TYPES = [
-  "intake_form",
-  "medical_record",
-  "medical_bill",
-  "correspondence",
-  "authorization",
-  "identification",
-  "settlement",
-  "lien",
-  "other",
-] as const;
-
-// PI-specific document types
-export const PI_DOC_TYPES = [
-  "lor",                    // Letter of Representation
-  "declaration",
-  "police_report",
-  "demand",
-  "balance_request",
-  "balance_confirmation",
-  "property_damage",
-] as const;
-
-// WC-specific document types
-export const WC_DOC_TYPES = [
-  "c4_claim",               // Employee's Claim for Compensation (C-4)
-  "c3_employer_report",     // Employer's First Report of Injury (C-3)
-  "c4_supplemental",        // Supplemental claim form
-  "ime_report",             // Independent Medical Examination
-  "fce_report",             // Functional Capacity Evaluation
-  "work_status_report",     // ATP work status/restrictions
-  "ppd_rating",             // PPD rating report
-  "vocational_report",      // Vocational rehabilitation report
-  "wage_statement",         // Wage documentation
-  "d9_form",                // Request for Hearing
-  "d16_form",               // Petition to Reopen
-  "aoe_coe_investigation",  // Compensability investigation
-  "utilization_review",     // UR decision
-] as const;
-
-// All document types combined
+// All document types combined (for schema validation)
 export const ALL_DOC_TYPES = [
   ...SHARED_DOC_TYPES,
   ...PI_DOC_TYPES,
@@ -431,6 +389,9 @@ export function getDocTypesForPracticeArea(practiceArea?: string): readonly stri
   }
   return [...SHARED_DOC_TYPES, ...PI_DOC_TYPES];
 }
+
+// Re-export document types for backward compatibility
+export { SHARED_DOC_TYPES, PI_DOC_TYPES, WC_DOC_TYPES };
 
 export const FILE_EXTRACTION_TOOL_SCHEMA = {
   name: "extract_document",
@@ -589,9 +550,9 @@ export const FILE_EXTRACTION_TOOL_SCHEMA = {
           wc_carrier: { type: "string" as const },
           wc_claim_number: { type: "string" as const },
           tpa_name: { type: "string" as const },
-          aww: {
+          amw: {
             type: "number" as const,
-            description: "Average Weekly Wage in dollars",
+            description: "Average Monthly Wage in dollars",
           },
           compensation_rate: {
             type: "number" as const,
@@ -612,6 +573,15 @@ export const FILE_EXTRACTION_TOOL_SCHEMA = {
           },
           work_restrictions: { type: "string" as const },
           return_to_work_date: { type: "string" as const },
+          hearing_level: {
+            type: "string" as const,
+            enum: ["H.O.", "A.O."],
+            description: "Hearing level: H.O. (Hearing Officer, default) or A.O. (Appeals Officer, if appeal-related document)",
+          },
+          hearing_case_number: {
+            type: "string" as const,
+            description: "Hearing/docket case number (e.g., D-16-12345)",
+          },
         },
       },
     },
@@ -1029,8 +999,10 @@ export function normalizeDisabilityStatus(value: unknown): DisabilityStatus | un
   const disabilityType = validateDisabilityType(obj.type ?? obj.disability_type);
   if (disabilityType) result.type = disabilityType;
 
-  if (typeof obj.aww === "number") result.aww = obj.aww;
-  else if (typeof obj.aww === "string") result.aww = parseAmount(obj.aww);
+  // Accept both amw (canonical) and aww (legacy), store as amw
+  const amwRaw = obj.amw ?? obj.aww;
+  if (typeof amwRaw === "number") result.amw = amwRaw;
+  else if (typeof amwRaw === "string") result.amw = parseAmount(amwRaw);
 
   if (typeof obj.compensation_rate === "number") result.compensation_rate = obj.compensation_rate;
   else if (typeof obj.compensation_rate === "string") result.compensation_rate = parseAmount(obj.compensation_rate);
@@ -1351,6 +1323,21 @@ export function normalizeIndex(raw: unknown, practiceArea?: string): DocumentInd
       typeof input.third_party_potential === "boolean"
         ? input.third_party_potential
         : null;
+
+    // Open hearings normalization
+    if (Array.isArray(input.open_hearings) && input.open_hearings.length > 0) {
+      normalized.open_hearings = (input.open_hearings as any[])
+        .filter((h: any) => h && typeof h === "object" && typeof h.case_number === "string")
+        .map((h: any) => ({
+          case_number: h.case_number,
+          hearing_level: h.hearing_level === "A.O." ? "A.O." as const
+            : h.type === "A.O." ? "A.O." as const  // Legacy field mapping
+            : "H.O." as const,
+          next_date: typeof h.next_date === "string" ? h.next_date : undefined,
+          issue: typeof h.issue === "string" ? h.issue : undefined,
+        }));
+      if (normalized.open_hearings.length === 0) delete normalized.open_hearings;
+    }
   }
 
   // Linked case relationships

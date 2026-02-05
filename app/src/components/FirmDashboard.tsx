@@ -76,9 +76,9 @@ interface CaseSummary {
   // WC-specific fields
   employer?: string
   ttdStatus?: string
-  aww?: number
+  amw?: number
   compensationRate?: number
-  openHearings?: Array<{ case_number: string; type: string; next_date?: string; issue?: string }>
+  openHearings?: Array<{ case_number: string; hearing_level: string; next_date?: string; issue?: string }>
   // Team assignments
   assignments?: CaseAssignment[]
   // DOI container fields (for WC multi-injury clients)
@@ -655,9 +655,11 @@ export default function FirmDashboard({
   }
 
   const formatDate = (dateStr?: string) => {
-    if (!dateStr) return '—'
+    if (!dateStr || dateStr === 'Unknown') return '—'
     try {
-      return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
+      const d = new Date(dateStr)
+      if (isNaN(d.getTime())) return dateStr
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
     } catch {
       return dateStr
     }
@@ -757,17 +759,32 @@ export default function FirmDashboard({
     )
   }
 
-  const formatAWW = (aww?: number, rate?: number) => {
-    if (!aww && !rate) return '—'
+  const formatAMW = (amw?: number, rate?: number) => {
+    if (!amw && !rate) return '—'
     const parts = []
-    if (aww) parts.push(`AWW: ${formatCurrency(aww)}`)
+    if (amw) parts.push(`AMW: ${formatCurrency(amw)}`)
     if (rate) parts.push(`Rate: ${formatCurrency(rate)}`)
     return parts.join(' / ')
   }
 
-  const formatHearings = (hearings?: Array<{ case_number: string; type: string; next_date?: string }>) => {
+  const formatHearings = (hearings?: Array<{ case_number: string; hearing_level: string; next_date?: string }>) => {
     if (!hearings || hearings.length === 0) return '—'
-    return hearings.map(h => h.case_number).join(', ')
+    return (
+      <div className="flex flex-col gap-1">
+        {hearings.map((h, i) => (
+          <div key={i} className="flex items-center gap-1.5">
+            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold leading-none ${
+              h.hearing_level === 'A.O.'
+                ? 'bg-red-100 text-red-700'
+                : 'bg-blue-100 text-blue-700'
+            }`}>
+              {h.hearing_level || 'H.O.'}
+            </span>
+            <span className="text-xs text-brand-600">{h.case_number}</span>
+          </div>
+        ))}
+      </div>
+    )
   }
 
   const getPhaseBadge = (phase?: string) => {
@@ -1181,7 +1198,7 @@ export default function FirmDashboard({
                   <>
                     <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Employer</th>
                     <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">TTD Status</th>
-                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">AWW / Rate</th>
+                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">AMW / Rate</th>
                     <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Hearings</th>
                   </>
                 ) : (
@@ -1299,7 +1316,7 @@ export default function FirmDashboard({
                       <>
                         <td className="px-6 py-4 text-sm text-brand-600">{c.employer || '—'}</td>
                         <td className="px-6 py-4">{getTTDStatusBadge(c.ttdStatus)}</td>
-                        <td className="px-6 py-4 text-sm text-brand-600 tabular-nums">{formatAWW(c.aww, c.compensationRate)}</td>
+                        <td className="px-6 py-4 text-sm text-brand-600 tabular-nums">{formatAMW(c.amw, c.compensationRate)}</td>
                         <td className="px-6 py-4 text-sm text-brand-600">{formatHearings(c.openHearings)}</td>
                       </>
                     ) : (

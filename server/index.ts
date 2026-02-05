@@ -2,12 +2,43 @@
 // This fixes "getDefaultAgent is not a function" error in Bun bundled builds
 import "./shim";
 
+// Load .env file explicitly - Bun auto-loads from CWD, but we need to handle
+// cases where the server is run from different directories
+import { existsSync, readFileSync } from "fs";
+import { join, join as pathJoin, dirname as pathDirname } from "path";
+import { fileURLToPath as fileURLToPathUtil } from "url";
+
+const __envFilename = fileURLToPathUtil(import.meta.url);
+const __envDirname = pathDirname(__envFilename);
+
+// Try multiple locations for .env file
+const envPaths = [
+  pathJoin(__envDirname, ".env"),           // server/.env
+  pathJoin(__envDirname, "..", ".env"),     // repo root/.env
+  ".env",                                    // CWD/.env
+];
+
+for (const envPath of envPaths) {
+  if (existsSync(envPath)) {
+    const envContent = readFileSync(envPath, "utf-8");
+    for (const line of envContent.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed && !trimmed.startsWith("#")) {
+        const [key, ...valueParts] = trimmed.split("=");
+        const value = valueParts.join("=");
+        if (key && value && !process.env[key]) {
+          process.env[key] = value;
+        }
+      }
+    }
+    console.log(`[env] Loaded from ${envPath}`);
+    break;
+  }
+}
+
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serveStatic } from "hono/bun";
-import { existsSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
 import claude from "./routes/claude";
 import files from "./routes/files";
 import docs from "./routes/docs";
@@ -16,8 +47,9 @@ import knowledge from "./routes/knowledge";
 import auth from "./routes/auth";
 import { authMiddleware } from "./middleware/auth";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+// Reuse the dirname from env loading
+const __filename = __envFilename;
+const __dirname = __envDirname;
 
 const app = new Hono();
 
