@@ -1296,7 +1296,9 @@ async function extractFile(
   fileIndex: number,
   totalFiles: number,
   practiceArea?: string,
-  onProgress?: (event: { type: string; [key: string]: any }) => void
+  onProgress?: (event: { type: string; [key: string]: any }) => void,
+  sdkCliOpts?: ReturnType<typeof getSDKCliOptions>,
+  cachedSystemPrompt?: string
 ): Promise<FileExtraction> {
   const filename = filePath.split('/').pop() || filePath;
   const rawFolder = dirname(filePath).replace(/\\/g, '/');
@@ -1357,8 +1359,8 @@ async function extractFile(
       console.log(`[${fileIndex + 1}/${totalFiles}] Truncated to ${MAX_CHARS} chars`);
     }
 
-    // Track extraction method for logging
-    const extractionMethod = usePreExtracted ? 'pre-extracted' : 'agent-fallback';
+    // Track extraction method for logging (updated below if large file uses agent)
+    let extractionMethod = usePreExtracted ? 'pre-extracted' : 'pdf-direct';
 
     let result: FileExtraction = { filename, folder, type: 'other', key_info: '' };
     let usage: UsageStats = {
@@ -1443,122 +1445,163 @@ Use the extract_document tool to return your findings.`
       return result;
     }
 
-    // ========================================================================
-    // PATH 2: Agent fallback → SDK query() with tools for file reading
-    // ========================================================================
-    console.log(`[${fileIndex + 1}/${totalFiles}] Using agent fallback with tools`);
+    // Check file extension and size to decide extraction method
+    const isPdf = filename.toLowerCase().endsWith('.pdf');
+    const useAgentFallback = !isPdf || fileSizeMB > 32;
 
-    // DIAGNOSTIC LOGGING - Agent SDK spawn (writes to temp file for packaged app debugging)
-    const sdkCliOpts = getSDKCliOptions();
-    const diagLog = (msg: string) => {
-      const line = `[${new Date().toISOString()}] ${msg}\n`;
-      console.log(`[AGENT-DIAG] ${msg}`);
-      try {
-        const fs = require('fs');
-        const os = require('os');
-        const path = require('path');
-        fs.appendFileSync(path.join(os.tmpdir(), 'claude-pi-agent-diag.log'), line);
-      } catch {}
-    };
-    diagLog(`=== AGENT FALLBACK START: ${filename} ===`);
-    diagLog(`SDK CLI options: ${JSON.stringify(sdkCliOpts)}`);
-    diagLog(`CLAUDE_CLI_COMMAND: ${process.env.CLAUDE_CLI_COMMAND || 'NOT SET'}`);
-    diagLog(`CLAUDE_CODE_CLI_PATH: ${process.env.CLAUDE_CODE_CLI_PATH || 'NOT SET'}`);
-    diagLog(`Platform: ${process.platform}`);
+    if (useAgentFallback) {
+      // ========================================================================
+      // PATH 2a: Non-PDF or large file → Agent fallback with tools
+      // ========================================================================
+      const reason = !isPdf ? `non-PDF file` : `large PDF (${fileSizeMB.toFixed(1)}MB)`;
+      console.log(`[${fileIndex + 1}/${totalFiles}] [agent-fallback] ${reason}: ${filename}`);
+      extractionMethod = 'agent-fallback';
 
-    const prompt = `Extract information from this file: ${fullPath}
+      // Use cached SDK options or create them (should be cached at call site)
+      const effectiveSdkCliOpts = sdkCliOpts ?? getSDKCliOptions();
+      const effectiveSystemPrompt = cachedSystemPrompt ?? getFileExtractionSystemPromptWithTools(practiceArea);
+      const agentPrompt = `Extract information from this file: ${fullPath}
 
 Use the Read tool to read the file. Then return the JSON extraction with these fields:
-- type: document type (intake_form, lor, declaration, medical_record, medical_bill, correspondence, authorization, identification, police_report, demand, settlement, lien, balance_request, balance_confirmation, property_damage, other)
+- type: document type
 - key_info: 2-3 sentence summary
-- extracted_data: object with any data found (client_name, dob, dol, phone, email, address, charges, provider_name, policy_limits, etc.)
+- extracted_data: object with any data found
 
 Return ONLY valid JSON, no markdown.`;
 
-    const queryOptions = {
-      cwd: caseFolder,
-      systemPrompt: getFileExtractionSystemPromptWithTools(practiceArea),
-      model: "haiku" as const,
-      allowedTools: ["Bash", "Read"],
-      permissionMode: "acceptEdits" as const,
-      maxTurns: 5,
-      persistSession: false, // Prevent race condition when running concurrent extractions
-    };
+      const AGENT_TIMEOUT_MS = 60000; // 60 seconds
 
-    diagLog(`Starting query() call...`);
-    let queryStarted = false;
-    try {
-    for await (const msg of query({
-      prompt,
-      options: {
-        ...queryOptions,
-        ...sdkCliOpts,
-      },
-    })) {
-      if (!queryStarted) {
-        diagLog(`First message received - type: ${msg.type}`);
-        queryStarted = true;
-      }
-      // Log all message types for debugging
-      const msgAny = msg as any;
-      diagLog(`Message: type=${msg.type}, subtype=${msgAny.subtype || 'none'}`);
-      messageLog.push({
-        type: msg.type,
-        subtype: msgAny.subtype,
-        detail: msgAny.error || msgAny.message || msgAny.reason || undefined
-      });
-
-      // Log errors and system messages that might indicate issues
-      if (msg.type === "error" || (msg.type === "system" && msgAny.subtype === "error")) {
-        console.error(`[${fileIndex + 1}/${totalFiles}] SDK Error for ${filename}:`, JSON.stringify(msg, null, 2));
-      }
-
-      // Log result with error subtype
-      if (msg.type === "result" && msgAny.subtype === "error") {
-        console.error(`[${fileIndex + 1}/${totalFiles}] Result error for ${filename}:`, msgAny.error || msgAny.message || JSON.stringify(msg));
-      }
-
-      if (msg.type === "assistant") {
-        for (const block of msg.message.content) {
-          if (block.type === "text") {
-            // Try to parse JSON from the response
-            try {
-              const jsonMatch = block.text.match(/\{[\s\S]*\}/);
-              if (jsonMatch) {
-                const parsed = JSON.parse(jsonMatch[0]);
-                result = {
-                  filename: parsed.filename || filename,
-                  folder: folder,  // Always use our calculated folder from file path, not agent's
-                  type: parsed.type || 'other',
-                  key_info: parsed.key_info || '',
-                  extracted_data: parsed.extracted_data,
-                };
+      try {
+        // Wrap agent query in a promise with timeout to prevent hanging
+        const agentPromise = (async () => {
+          for await (const msg of query({
+            prompt: agentPrompt,
+            options: {
+              cwd: caseFolder,
+              systemPrompt: effectiveSystemPrompt,
+              model: "haiku" as const,
+              allowedTools: ["Bash", "Read"],
+              permissionMode: "acceptEdits" as const,
+              maxTurns: 5,
+              persistSession: false,
+              ...effectiveSdkCliOpts,
+            },
+          })) {
+            if (msg.type === "assistant") {
+              for (const block of msg.message.content) {
+                if (block.type === "text") {
+                  try {
+                    const jsonMatch = block.text.match(/\{[\s\S]*\}/);
+                    if (jsonMatch) {
+                      const parsed = JSON.parse(jsonMatch[0]);
+                      result = {
+                        filename: parsed.filename || filename,
+                        folder,
+                        type: parsed.type || 'other',
+                        key_info: parsed.key_info || '',
+                        extracted_data: parsed.extracted_data,
+                      };
+                    }
+                  } catch {
+                    result.key_info = block.text.slice(0, 500);
+                  }
+                }
               }
-            } catch {
-              // If JSON parsing fails, use the text as key_info
-              result.key_info = block.text.slice(0, 500);
+            }
+
+            if (msg.type === "result" && (msg as any).usage) {
+              const finalUsage = (msg as any).usage;
+              usage.inputTokensNew = finalUsage.input_tokens || 0;
+              usage.inputTokensCacheWrite = finalUsage.cache_creation_input_tokens || 0;
+              usage.inputTokensCacheRead = finalUsage.cache_read_input_tokens || 0;
+              usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
+              usage.outputTokens = finalUsage.output_tokens || 0;
+              usage.apiCalls = 1;
             }
           }
-        }
-      }
+        })();
 
-      // Capture final result usage with cache breakdown
-      if (msg.type === "result" && (msg as any).usage) {
-        const finalUsage = (msg as any).usage;
-        usage.inputTokensNew = finalUsage.input_tokens || 0;
-        usage.inputTokensCacheWrite = finalUsage.cache_creation_input_tokens || 0;
-        usage.inputTokensCacheRead = finalUsage.cache_read_input_tokens || 0;
-        usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
-        usage.outputTokens = finalUsage.output_tokens || 0;
-        usage.apiCalls = 1;
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 1000}s`)), AGENT_TIMEOUT_MS)
+        );
+
+        await Promise.race([agentPromise, timeoutPromise]);
+      } catch (agentErr) {
+        console.error(`[${fileIndex + 1}/${totalFiles}] Agent fallback error for ${filename}:`, agentErr);
+        result.key_info = `Extraction failed: ${agentErr instanceof Error ? agentErr.message : String(agentErr)}`;
+        result.error = agentErr instanceof Error ? agentErr.message : String(agentErr);
       }
-    }
-    } catch (queryErr) {
-      diagLog(`query() FAILED: ${queryErr}`);
-      diagLog(`Error type: ${queryErr?.constructor?.name}`);
-      diagLog(`Error message: ${queryErr instanceof Error ? queryErr.message : String(queryErr)}`);
-      diagLog(`Error stack: ${queryErr instanceof Error ? queryErr.stack : 'N/A'}`);
-      throw queryErr; // Re-throw to be caught by outer try-catch
+    } else {
+      // ========================================================================
+      // PATH 2b: Direct API with PDF document → No agent subprocess needed
+      // ========================================================================
+      console.log(`[${fileIndex + 1}/${totalFiles}] [pdf-direct] ${filename}`);
+
+      try {
+        // Read PDF file as base64
+        const pdfBuffer = await readFile(fullPath);
+        const pdfBase64 = pdfBuffer.toString('base64');
+
+        const response = await getClient().messages.create({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 2000,
+          system: getFileExtractionSystemPrompt(practiceArea),
+          messages: [{
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: {
+                  type: "base64",
+                  media_type: "application/pdf",
+                  data: pdfBase64,
+                },
+              },
+              {
+                type: "text",
+                text: `Extract information from this PDF document.
+
+FILENAME: ${filename}
+FOLDER: ${folder}
+
+Use the extract_document tool to return your findings.`
+              }
+            ]
+          }],
+          tools: [FILE_EXTRACTION_TOOL_SCHEMA],
+          tool_choice: { type: "tool", name: "extract_document" }
+        });
+
+        // Capture usage
+        usage.inputTokensNew = response.usage.input_tokens || 0;
+        usage.inputTokensCacheWrite = (response.usage as any).cache_creation_input_tokens || 0;
+        usage.inputTokensCacheRead = (response.usage as any).cache_read_input_tokens || 0;
+        usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
+        usage.outputTokens = response.usage.output_tokens || 0;
+        usage.apiCalls = 1;
+
+        // Extract tool use result
+        const toolBlock = response.content.find(block => block.type === 'tool_use');
+        if (toolBlock && toolBlock.type === 'tool_use') {
+          const extracted = toolBlock.input as {
+            type: string;
+            key_info: string;
+            extracted_data: Record<string, unknown>;
+          };
+
+          result = {
+            filename,
+            folder,
+            type: extracted.type || 'other',
+            key_info: extracted.key_info || '',
+            extracted_data: extracted.extracted_data,
+          };
+        }
+      } catch (apiErr) {
+        console.error(`[${fileIndex + 1}/${totalFiles}] Direct PDF API error for ${filename}:`, apiErr);
+        result.key_info = `PDF extraction failed: ${apiErr instanceof Error ? apiErr.message : String(apiErr)}`;
+        result.error = apiErr instanceof Error ? apiErr.message : String(apiErr);
+      }
     }
 
     result.usage = usage;
@@ -2128,12 +2171,23 @@ async function indexCase(
       return results;
     }
 
+    // Pre-compute SDK options and system prompt once for all files (eliminates per-file overhead)
+    const sdkCliOpts = getSDKCliOptions();
+    const cachedSystemPrompt = getFileExtractionSystemPromptWithTools(options?.practiceArea);
+
     const extractionResults = await processWithLimit(
       files,
       CONCURRENCY_LIMIT,
-      (filePath, index) => extractFile(caseFolder, filePath, index, files.length, options?.practiceArea, (event) => {
-        onProgress({ ...event, caseName });
-      })
+      (filePath, index) => extractFile(
+        caseFolder,
+        filePath,
+        index,
+        files.length,
+        options?.practiceArea,
+        (event) => { onProgress({ ...event, caseName }); },
+        sdkCliOpts,
+        cachedSystemPrompt
+      )
     );
 
     extractions.push(...extractionResults);
