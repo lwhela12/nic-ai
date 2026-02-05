@@ -2190,10 +2190,11 @@ async function indexCase(
         completedCount += batch.length;
         console.log(`--- Progress: ${completedCount}/${items.length} files complete (batch ${batchNum + 1}/${totalBatches}) ---`);
 
-        // Force garbage collection between batches to prevent memory accumulation
-        if (typeof Bun !== 'undefined' && Bun.gc) {
+        // Force garbage collection every 5 batches (40 files) to prevent memory accumulation
+        // without causing excessive pauses
+        if ((batchNum + 1) % 5 === 0 && typeof Bun !== 'undefined' && Bun.gc) {
           Bun.gc(true);
-          console.log(`[gc] Forced garbage collection after batch ${batchNum + 1}`);
+          console.log(`[gc] Forced garbage collection after ${completedCount} files`);
         }
       }
 
