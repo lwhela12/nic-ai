@@ -78,15 +78,23 @@ async function reportUsage(tokensUsed: number, requestType: string): Promise<voi
 
 // Lazy client creation - API key is set by auth middleware before requests
 // Web shim (imported in server/index.ts) handles runtime selection
+// Client is reset periodically to prevent connection pool exhaustion
 let _anthropic: Anthropic | null = null;
+let _requestCount = 0;
+const CLIENT_RESET_THRESHOLD = 50;
+
 function getClient(): Anthropic {
-  if (!_anthropic) {
-    // Explicitly pass API key - env var reading may not work in bundled binary
+  if (!_anthropic || _requestCount >= CLIENT_RESET_THRESHOLD) {
     _anthropic = new Anthropic({
       apiKey: process.env.ANTHROPIC_API_KEY,
       fetch: globalThis.fetch.bind(globalThis),
     });
+    if (_requestCount >= CLIENT_RESET_THRESHOLD) {
+      console.log('[api] Anthropic client reset (connection pool refresh)');
+    }
+    _requestCount = 0;
   }
+  _requestCount++;
   return _anthropic;
 }
 
@@ -1537,12 +1545,17 @@ Return ONLY valid JSON, no markdown.`;
       // ========================================================================
       console.log(`[${fileIndex + 1}/${totalFiles}] [pdf-direct] ${filename}`);
 
-      try {
-        // Read PDF file as base64
-        const pdfBuffer = await readFile(fullPath);
-        const pdfBase64 = pdfBuffer.toString('base64');
+      const DIRECT_API_TIMEOUT_MS = 60000; // 60 seconds, matches agent timeout
 
-        const response = await getClient().messages.create({
+      try {
+        // Read PDF file as base64 - scoped to minimize buffer lifetime
+        const pdfBase64 = await (async () => {
+          const buf = await readFile(fullPath);
+          return buf.toString('base64');
+        })();
+
+        // Wrap API call in timeout to prevent indefinite hangs
+        const apiPromise = getClient().messages.create({
           model: "claude-haiku-4-5-20251001",
           max_tokens: 2000,
           system: getFileExtractionSystemPrompt(practiceArea),
@@ -1571,6 +1584,12 @@ Use the extract_document tool to return your findings.`
           tools: [FILE_EXTRACTION_TOOL_SCHEMA],
           tool_choice: { type: "tool", name: "extract_document" }
         });
+
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`Direct API timeout after ${DIRECT_API_TIMEOUT_MS / 1000}s`)), DIRECT_API_TIMEOUT_MS)
+        );
+
+        const response = await Promise.race([apiPromise, timeoutPromise]);
 
         // Capture usage
         usage.inputTokensNew = response.usage.input_tokens || 0;
@@ -2125,7 +2144,8 @@ async function indexCase(
     }
 
     // Step 2: Extract files with concurrency limit
-    const CONCURRENCY_LIMIT = 15;
+    // Reduced from 15 to 8 to prevent connection pool exhaustion on constrained systems
+    const CONCURRENCY_LIMIT = 8;
     console.log(`\n========== EXTRACTING ${files.length} FILES (max ${CONCURRENCY_LIMIT} concurrent) ==========`);
     onProgress({ type: "status", caseName, message: `Extracting ${files.length} files (${CONCURRENCY_LIMIT} at a time)...` });
 
