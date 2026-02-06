@@ -14,13 +14,15 @@ import { indexCase } from "./firm";
 import { buildPhasePrompt } from "../shared/phase-rules";
 import { isPathWithinBounds, extractPathsFromBash } from "../lib/path-validator";
 import { directChat, type ChatMessage as DirectChatMessage } from "../lib/direct-chat";
+import { requireCaseAccess } from "../lib/team-access";
+import { acquireCaseLock, releaseCaseLock } from "../lib/case-lock";
 
 // ============================================================================
 // Usage Reporting
 // ============================================================================
 
 const DEV_MODE = process.env.DEV_MODE === "true" || process.env.NODE_ENV !== "production";
-const SUBSCRIPTION_SERVER = process.env.CLAUDE_PI_SERVER || "https://api.claude-pi.com";
+const SUBSCRIPTION_SERVER = process.env.CLAUDE_PI_SERVER || "https://claude-pi-five.vercel.app";
 const CONFIG_DIR = process.env.CLAUDE_PI_CONFIG_DIR || join(homedir(), ".claude-pi");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 
@@ -124,6 +126,11 @@ app.post("/chat", async (c) => {
 
   if (!caseFolder || !message) {
     return c.json({ error: "caseFolder and message required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   const routerPrompt = await loadRouterPrompt();
@@ -371,10 +378,34 @@ USER REQUEST: `;
   }
 
   return streamSSE(c, async (stream) => {
+    const authEmail = c.get("authEmail");
+    const lockOwner = typeof authEmail === "string" && authEmail
+      ? `user:${authEmail.toLowerCase()}`
+      : `session:${Date.now()}`;
+
     try {
       let currentSessionId: string | undefined;
       let totalInputTokens = 0;
       let totalOutputTokens = 0;
+      const lockResult = await acquireCaseLock(
+        caseFolder,
+        lockOwner,
+        typeof authEmail === "string" ? authEmail : undefined
+      );
+      const writeEnabled = lockResult.acquired;
+      const allowedTools = writeEnabled
+        ? ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "Task"]
+        : ["Read", "Glob", "Grep"];
+
+      if (!writeEnabled) {
+        const holder = lockResult.lock?.displayName || lockResult.lock?.owner || "another user";
+        await stream.writeSSE({
+          data: JSON.stringify({
+            type: "text",
+            content: `${holder}'s agent is working on this case right now. You can still ask questions, but edits are disabled for now.`,
+          }),
+        });
+      }
 
       const promptWithContext = caseContext + message;
 
@@ -396,13 +427,20 @@ USER REQUEST: `;
           model: "haiku",
           resume: effectiveSessionId,
           // Haiku has Task tool to spawn Sonnet specialists
-          allowedTools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "Task"],
+          allowedTools,
           permissionMode: "acceptEdits",
           maxTurns: 15, // Allow more turns for Task spawning
           ...getSDKCliOptions(),
 
           // Path boundary enforcement - reject file operations outside the case folder
           canUseTool: async (toolName: string, input: unknown) => {
+            if (!writeEnabled && (toolName === "Write" || toolName === "Edit" || toolName === "Bash" || toolName === "Task")) {
+              return {
+                behavior: "deny" as const,
+                message: "This case is currently locked for editing by another agent.",
+              };
+            }
+
             // Validate Write and Edit tool paths
             if (toolName === "Write" || toolName === "Edit") {
               const filePath = (input as { file_path?: string }).file_path;
@@ -540,10 +578,16 @@ USER REQUEST: `;
       if (totalInputTokens + totalOutputTokens > 0) {
         reportUsage(totalInputTokens + totalOutputTokens, "chat").catch(() => {});
       }
+
+      if (lockResult.acquired) {
+        await releaseCaseLock(caseFolder, lockOwner);
+      }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       const errorLower = errorMsg.toLowerCase();
       console.error("Agent error:", errorMsg);
+
+      await releaseCaseLock(caseFolder, lockOwner);
 
       // Detect autocompact crash: "process exited with code 1" or "prompt is too long"
       const isContextOverflow =
@@ -626,6 +670,11 @@ app.post("/chat-v2", async (c) => {
     return c.json({ error: "caseFolder and message required" }, 400);
   }
 
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
   // Convert history format if needed
   const chatHistory: DirectChatMessage[] = (history || []).map((m: any) => ({
     role: m.role as "user" | "assistant",
@@ -635,8 +684,13 @@ app.post("/chat-v2", async (c) => {
   return streamSSE(c, async (stream) => {
     try {
       let fullResponse = "";
+      const authEmail = c.get("authEmail");
+      const lockOwner = typeof authEmail === "string" && authEmail ? `user:${authEmail.toLowerCase()}` : undefined;
 
-      for await (const event of directChat(caseFolder, message, chatHistory)) {
+      for await (const event of directChat(caseFolder, message, chatHistory, {
+        lockOwner,
+        lockDisplayName: typeof authEmail === "string" ? authEmail : undefined,
+      })) {
         if (event.type === "text" && event.content) {
           fullResponse += event.content;
           await stream.writeSSE({
@@ -705,6 +759,11 @@ app.post("/init", async (c) => {
     return c.json({ error: "caseFolder is required" }, 400);
   }
 
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
   const startTime = Date.now();
 
   return streamSSE(c, async (stream) => {
@@ -761,6 +820,11 @@ app.post("/determine-phase", async (c) => {
 
   if (!caseFolder) {
     return c.json({ error: "caseFolder is required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   return streamSSE(c, async (stream) => {
@@ -823,6 +887,11 @@ app.post("/document", async (c) => {
     return c.json({ error: "caseFolder and documentPath required" }, 400);
   }
 
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
   try {
     const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
     const indexContent = await readFile(indexPath, "utf-8");
@@ -875,6 +944,11 @@ app.post("/document/feedback", async (c) => {
 
   if (!caseFolder || !documentPath || !feedback) {
     return c.json({ error: "caseFolder, documentPath, and feedback required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   const feedbackPrompt = `Re-extract information from the document "${documentPath}" with the following user feedback:
@@ -954,6 +1028,10 @@ app.post("/clear-session", async (c) => {
   if (!caseFolder) {
     return c.json({ error: "caseFolder is required" }, 400);
   }
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
   await saveSession(caseFolder, "");
   return c.json({ success: true });
 });
@@ -1030,6 +1108,11 @@ app.get("/history", async (c) => {
     return c.json({ error: "case query param required" }, 400);
   }
 
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
   try {
     const historyPath = join(caseFolder, ".pi_tool", "chat_history.json");
     const historyContent = await readFile(historyPath, "utf-8");
@@ -1052,6 +1135,11 @@ app.post("/history", async (c) => {
 
   if (!caseFolder || !messages) {
     return c.json({ error: "caseFolder and messages required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   try {
@@ -1099,6 +1187,11 @@ app.get("/history/archives", async (c) => {
     return c.json({ error: "case query param required" }, 400);
   }
 
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
   try {
     // Load archives from document index
     const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
@@ -1121,6 +1214,11 @@ app.post("/history/archive", async (c) => {
 
   if (!caseFolder) {
     return c.json({ error: "caseFolder required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   const piToolDir = join(caseFolder, ".pi_tool");
@@ -1244,6 +1342,11 @@ app.get("/history/archive/:id", async (c) => {
     return c.json({ error: "case query param required" }, 400);
   }
 
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
   try {
     // Find the archive entry in the index
     const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
@@ -1280,6 +1383,11 @@ app.post("/errata-correct", async (c) => {
 
   if (!caseFolder || !field || correctedValue === undefined) {
     return c.json({ error: "caseFolder, field, and correctedValue required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   try {

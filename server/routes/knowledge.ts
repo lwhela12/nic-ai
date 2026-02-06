@@ -8,6 +8,7 @@ import { getSDKCliOptions } from "../lib/sdk-cli-options";
 import { readdir, readFile, writeFile, mkdir, copyFile, unlink, stat } from "fs/promises";
 import { join, dirname, basename, extname } from "path";
 import { extractTextFromPdf, extractTextFromDocx, extractStylesFromDocx, DocxStyles } from "../lib/extract";
+import { requireFirmAccess } from "../lib/team-access";
 
 // Lazy client creation - API key is set by auth middleware before requests
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -24,6 +25,39 @@ function getClient(): Anthropic {
 }
 
 const app = new Hono();
+
+async function resolveRootFromRequest(c: any): Promise<string | null> {
+  const queryRoot = c.req.query("root");
+  if (queryRoot) return queryRoot;
+
+  const contentType = c.req.header("content-type") || "";
+  if (!contentType.includes("application/json")) return null;
+
+  try {
+    const body = await c.req.raw.clone().json() as Record<string, unknown>;
+    return typeof body.root === "string" ? body.root : null;
+  } catch {
+    return null;
+  }
+}
+
+app.use("/*", async (c, next) => {
+  const root = await resolveRootFromRequest(c);
+  if (!root) {
+    return next();
+  }
+
+  const access = await requireFirmAccess(c, root);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  if (c.req.method !== "GET" && !access.context.permissions.canEditKnowledge) {
+    return c.json({ error: "insufficient_permissions" }, 403);
+  }
+
+  return next();
+});
 
 // Use env var for production (set by Electron), fall back to relative path for dev
 const agentPath = process.env.AGENT_PROMPT_PATH || join(import.meta.dir, "../../agent");

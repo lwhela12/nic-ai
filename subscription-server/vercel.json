@@ -1,5 +1,8 @@
 {
   "buildCommand": "",
+  "redirects": [
+    { "source": "/admin.html", "destination": "/admin", "permanent": true }
+  ],
   "rewrites": [
     { "source": "/(.*)", "destination": "/api" }
   ]

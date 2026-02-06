@@ -6,8 +6,8 @@ import { homedir } from "os";
 // Electron production sets ELECTRON_FRONTEND_PATH - if present, always production
 // Dev mode is ONLY for running server directly with `bun run`
 const IS_ELECTRON = !!process.env.ELECTRON_FRONTEND_PATH;
-const DEV_MODE = !IS_ELECTRON &&
-  (process.env.DEV_MODE === "true" || process.env.NODE_ENV !== "production");
+// IMPORTANT: require explicit opt-in via DEV_MODE=true.
+const DEV_MODE = !IS_ELECTRON && process.env.DEV_MODE === "true";
 
 // Log auth mode at startup
 console.log(`[auth] Mode: ${DEV_MODE ? "DEV (auth bypassed)" : "PRODUCTION"}`);
@@ -18,7 +18,7 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 
 // Subscription server URL
 const SUBSCRIPTION_SERVER =
-  process.env.CLAUDE_PI_SERVER || "https://api.claude-pi.com";
+  process.env.CLAUDE_PI_SERVER || "https://claude-pi-five.vercel.app";
 
 // 24 hours in milliseconds
 const VALIDATION_INTERVAL = 24 * 60 * 60 * 1000;
@@ -32,6 +32,7 @@ interface Config {
   lastValidated?: string;
   subscriptionStatus?: string;
   expiresAt?: string;
+  accountType?: "root" | "sub_user";
 }
 
 /**
@@ -116,8 +117,19 @@ const CONFIG_CACHE_DURATION = 60 * 1000; // 1 minute
 export async function authMiddleware(c: Context, next: Next) {
   // In dev mode, skip subscription validation but still load API key from config if needed
   if (DEV_MODE) {
+    const config = loadConfig();
+    if (!config || !config.authToken) {
+      return c.json(
+        {
+          error: "authentication_required",
+          reauthRequired: true,
+          message: "Please log in to use Claude PI",
+        },
+        401
+      );
+    }
+    c.set("authEmail", config.email || null);
     if (!process.env.ANTHROPIC_API_KEY) {
-      const config = loadConfig();
       if (config?.anthropicApiKey) {
         process.env.ANTHROPIC_API_KEY = config.anthropicApiKey;
       }
@@ -139,17 +151,21 @@ export async function authMiddleware(c: Context, next: Next) {
     return c.json(
       {
         error: "authentication_required",
+        reauthRequired: true,
         message: "Please log in to use Claude PI",
       },
       401
     );
   }
 
+  c.set("authEmail", config.email || null);
+
   // Check subscription status
   if (config.subscriptionStatus === "canceled" || config.subscriptionStatus === "expired") {
     return c.json(
       {
         error: "subscription_expired",
+        reauthRequired: true,
         message: "Your subscription has expired. Please renew to continue.",
       },
       403
@@ -157,7 +173,8 @@ export async function authMiddleware(c: Context, next: Next) {
   }
 
   // Check if validation is needed
-  if (needsValidation(config)) {
+  const isSubUser = config.accountType === "sub_user";
+  if (isSubUser || needsValidation(config)) {
     const validation = await validateSubscription(config.authToken);
 
     if (validation) {
@@ -174,14 +191,26 @@ export async function authMiddleware(c: Context, next: Next) {
       // Just update the env so the API key is available
       process.env.ANTHROPIC_API_KEY = validation.anthropicApiKey;
     } else {
+      // Sub-users require fresh root-backed validation to continue.
+      if (isSubUser) {
+        return c.json(
+          {
+            error: "reauth_required",
+            reauthRequired: true,
+            message: "Session validation failed. Please sign in again.",
+          },
+          401
+        );
+      }
       // Validation failed - check grace period
       if (!isWithinGracePeriod(config)) {
         return c.json(
           {
-            error: "validation_failed",
-            message: "Could not validate subscription. Please check your internet connection.",
+            error: "reauth_required",
+            reauthRequired: true,
+            message: "Session validation expired. Please sign in again.",
           },
-          503
+          401
         );
       }
       // Within grace period - allow request but add warning header
@@ -198,10 +227,11 @@ export async function authMiddleware(c: Context, next: Next) {
   if (!process.env.ANTHROPIC_API_KEY) {
     return c.json(
       {
-        error: "api_key_missing",
-        message: "No API key available. Please log in again to refresh your session.",
+        error: "reauth_required",
+        reauthRequired: true,
+        message: "No API key available. Please sign in again.",
       },
-      503
+      401
     );
   }
 

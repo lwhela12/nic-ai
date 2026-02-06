@@ -15,7 +15,7 @@ import { loadPracticeGuide, loadSectionsByIds, clearKnowledgeCache } from "./kno
 import { extractTextFromFile } from "../lib/extract";
 import { generateCaseSummary } from "../lib/case-summary";
 import { mergeToIndex, diffIndexes, type HypergraphResult, type IndexDiff } from "../lib/merge-index";
-import { directFirmChat } from "../lib/firm-chat";
+import { directFirmChat, type FirmChatScope } from "../lib/firm-chat";
 import {
   normalizeIndex,
   validateIndex,
@@ -23,6 +23,7 @@ import {
   type DocumentIndex,
 } from "../lib/index-schema";
 import { practiceAreaRegistry, PRACTICE_AREAS } from "../practice-areas";
+import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
 
 // ============================================================================
 // Usage Reporting
@@ -734,6 +735,11 @@ app.get("/cases", async (c) => {
 
   if (!root) {
     return c.json({ error: "root query param required" }, 400);
+  }
+
+  const access = await requireFirmAccess(c, root);
+  if (!access.ok) {
+    return access.response;
   }
 
   // Accept both short code ("WC") and full name ("Workers' Compensation")
@@ -2544,6 +2550,11 @@ app.post("/batch-index", async (c) => {
     return c.json({ error: "root is required" }, 400);
   }
 
+  const access = await requireFirmAccess(c, root);
+  if (!access.ok) {
+    return access.response;
+  }
+
   // Accept both short code ("WC") and full name ("Workers' Compensation")
   const isWC = practiceArea === PRACTICE_AREAS.WC || practiceArea === "WC";
 
@@ -3203,6 +3214,85 @@ app.post("/generate-hypergraph", async (c) => {
 // FIRM-LEVEL CHAT - Portfolio analysis across all cases
 // ============================================================================
 
+interface ScopeAssignment {
+  userId: string;
+}
+
+interface ScopeResolutionInput {
+  role: string;
+  permissions: {
+    canManageTeam: boolean;
+    canViewAllCases: boolean;
+  };
+}
+
+function normalizeScopeAssignments(input: unknown): ScopeAssignment[] {
+  if (!Array.isArray(input)) return [];
+  return input.filter(
+    (assignment): assignment is ScopeAssignment =>
+      !!assignment &&
+      typeof assignment === "object" &&
+      typeof (assignment as any).userId === "string"
+  );
+}
+
+function isVisibleInScope(
+  assignments: ScopeAssignment[],
+  scope: FirmChatScope,
+  actorUserId: string
+): boolean {
+  if (scope.mode === "firm") return true;
+  if (scope.mode === "mine") {
+    return assignments.some((assignment) => assignment.userId === actorUserId);
+  }
+  return assignments.some((assignment) => assignment.userId === scope.memberId);
+}
+
+function defaultScopeForRole(role: string): FirmChatScope {
+  if (role === "case_manager") {
+    return { mode: "mine" };
+  }
+  return { mode: "firm" };
+}
+
+function resolveFirmChatScope(
+  rawScope: unknown,
+  context: ScopeResolutionInput,
+  teamMemberIds: Set<string>
+): { ok: true; scope: FirmChatScope } | { ok: false; error: string } {
+  const fallback = defaultScopeForRole(context.role);
+
+  if (!rawScope || typeof rawScope !== "object") {
+    return { ok: true, scope: fallback };
+  }
+
+  const scopeInput = rawScope as { mode?: string; memberId?: string };
+  const mode = scopeInput.mode;
+
+  if (mode === "mine") {
+    return { ok: true, scope: { mode: "mine" } };
+  }
+
+  if (mode === "member") {
+    if (!context.permissions.canManageTeam) {
+      return { ok: false, error: "insufficient_permissions" };
+    }
+    if (!scopeInput.memberId || !teamMemberIds.has(scopeInput.memberId)) {
+      return { ok: false, error: "invalid_member_scope" };
+    }
+    return { ok: true, scope: { mode: "member", memberId: scopeInput.memberId } };
+  }
+
+  if (mode === "firm") {
+    if (!context.permissions.canViewAllCases) {
+      return { ok: true, scope: { mode: "mine" } };
+    }
+    return { ok: true, scope: { mode: "firm" } };
+  }
+
+  return { ok: true, scope: fallback };
+}
+
 // Firm context for chat
 interface FirmContext {
   root: string;
@@ -3217,6 +3307,7 @@ interface FirmContext {
     solDaysRemaining?: number;
     providers: string[];
     policyLimits?: string | Record<string, unknown>;
+    assignedTo: string[];
   }>;
   aggregates: {
     totalSpecials: number;
@@ -3226,13 +3317,19 @@ interface FirmContext {
 }
 
 // Build aggregated firm context from case summaries
-async function buildFirmContext(root: string): Promise<FirmContext> {
+async function buildFirmContext(
+  root: string,
+  scope: FirmChatScope,
+  actorUserId: string,
+  memberById: Map<string, { id: string; email: string; name?: string }>
+): Promise<FirmContext> {
   const entries = await readdir(root, { withFileTypes: true });
   const caseSummaries: FirmContext['caseSummaries'] = [];
   const casesByPhase: Record<string, number> = {};
   let totalSpecials = 0;
   let solUrgent = 0;
   let indexedCount = 0;
+  let visibleCaseCount = 0;
 
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name === ".pi_tool") continue;
@@ -3243,6 +3340,11 @@ async function buildFirmContext(root: string): Promise<FirmContext> {
     try {
       const indexContent = await readFile(indexPath, "utf-8");
       const index = JSON.parse(indexContent);
+      const assignments = normalizeScopeAssignments(index.assignments);
+      if (!isVisibleInScope(assignments, scope, actorUserId)) {
+        continue;
+      }
+      visibleCaseCount++;
       indexedCount++;
 
       // Parse amounts consistently
@@ -3321,6 +3423,11 @@ async function buildFirmContext(root: string): Promise<FirmContext> {
       // Track phase counts
       casesByPhase[casePhase] = (casesByPhase[casePhase] || 0) + 1;
       totalSpecials += specials;
+      const assignedTo = assignments.map((assignment) => {
+        const member = memberById.get(assignment.userId);
+        if (!member) return assignment.userId;
+        return member.name ? `${member.name} (${member.email})` : member.email;
+      });
 
       caseSummaries.push({
         name: entry.name,
@@ -3331,9 +3438,13 @@ async function buildFirmContext(root: string): Promise<FirmContext> {
         solDaysRemaining,
         providers,
         policyLimits,
+        assignedTo,
       });
     } catch {
-      // Case not indexed, skip
+      // Case not indexed
+      if (scope.mode === "firm") {
+        visibleCaseCount++;
+      }
     }
   }
 
@@ -3349,7 +3460,7 @@ async function buildFirmContext(root: string): Promise<FirmContext> {
 
   return {
     root,
-    caseCount: entries.filter(e => e.isDirectory() && e.name !== ".pi_tool").length,
+    caseCount: visibleCaseCount,
     indexedCount,
     caseSummaries,
     aggregates: {
@@ -3372,21 +3483,47 @@ async function loadFirmSystemPrompt(): Promise<string> {
 
 // Firm-level chat endpoint
 app.post("/chat", async (c) => {
-  const { root, message, sessionId: providedSessionId } = await c.req.json();
+  const { root, message, sessionId: providedSessionId, scope: rawScope } = await c.req.json();
 
   if (!root || !message) {
     return c.json({ error: "root and message required" }, 400);
   }
 
+  const access = await requireFirmAccess(c, root);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  const activeMembers = access.team.members.filter((member) => member.status === "active");
+  const scopedMemberIds = new Set(
+    activeMembers
+      .filter((member) => member.role === "case_manager" || member.role === "case_manager_assistant")
+      .map((member) => member.id)
+  );
+  const scopeResult = resolveFirmChatScope(rawScope, access.context, scopedMemberIds);
+  if (!scopeResult.ok) {
+    return c.json({ error: scopeResult.error }, 403);
+  }
+  const scope = scopeResult.scope;
+  const memberById = new Map(
+    activeMembers.map((member) => [member.id, { id: member.id, email: member.email, name: member.name }])
+  );
+
   const systemPrompt = await loadFirmSystemPrompt();
   const sessionId = providedSessionId || (await getFirmSession(root));
 
   // Build firm context
-  const firmContext = await buildFirmContext(root);
+  const firmContext = await buildFirmContext(root, scope, access.context.userId, memberById);
+  const scopeLabel = scope.mode === "firm"
+    ? "firm"
+    : scope.mode === "mine"
+      ? "my cases"
+      : `${memberById.get(scope.memberId)?.name || memberById.get(scope.memberId)?.email || "selected team member"}'s cases`;
 
   // Format context for the prompt
   const contextString = `
 FIRM PORTFOLIO CONTEXT:
+- Active Scope: ${scopeLabel}
 - Total Cases: ${firmContext.caseCount}
 - Indexed Cases: ${firmContext.indexedCount}
 - Total Medical Specials: $${firmContext.aggregates.totalSpecials.toLocaleString()}
@@ -3400,7 +3537,7 @@ ${firmContext.caseSummaries.map(c => `
 - **${c.clientName}** (${c.name})
   Phase: ${c.casePhase} | DOL: ${c.dateOfLoss || 'Unknown'} | Specials: $${c.totalSpecials.toLocaleString()}
   SOL: ${c.solDaysRemaining !== undefined ? `${c.solDaysRemaining} days remaining` : 'Unknown'}
-  Policy: ${c.policyLimits || 'Unknown'} | Providers: ${c.providers.length > 0 ? c.providers.join(', ') : 'None listed'}
+  Policy: ${c.policyLimits || 'Unknown'} | Providers: ${c.providers.length > 0 ? c.providers.join(', ') : 'None listed'} | Assigned: ${c.assignedTo.length > 0 ? c.assignedTo.join(', ') : 'Unassigned'}
 `).join('')}
 
 USER QUESTION: `;
@@ -3489,15 +3626,39 @@ USER QUESTION: `;
 
 // Direct firm chat - lightweight Haiku-based chat with tools
 app.post("/direct-chat", async (c) => {
-  const { root, message, history = [] } = await c.req.json();
+  const { root, message, history = [], scope: rawScope } = await c.req.json();
 
   if (!root || !message) {
     return c.json({ error: "root and message required" }, 400);
   }
 
+  const access = await requireFirmAccess(c, root);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  const activeMembers = access.team.members.filter((member) => member.status === "active");
+  const scopedMemberIds = new Set(
+    activeMembers
+      .filter((member) => member.role === "case_manager" || member.role === "case_manager_assistant")
+      .map((member) => member.id)
+  );
+  const scopeResult = resolveFirmChatScope(rawScope, access.context, scopedMemberIds);
+  if (!scopeResult.ok) {
+    return c.json({ error: scopeResult.error }, 403);
+  }
+
   return streamSSE(c, async (stream) => {
     try {
-      for await (const event of directFirmChat(root, message, history)) {
+      for await (const event of directFirmChat(root, message, history, {
+        scope: scopeResult.scope,
+        actorUserId: access.context.userId,
+        teamMembers: activeMembers.map((member) => ({
+          id: member.id,
+          email: member.email,
+          name: member.name,
+        })),
+      })) {
         // Report usage when done
         if (event.type === "done" && event.usage) {
           const totalTokens = (event.usage.inputTokens || 0) + (event.usage.outputTokens || 0);
@@ -3526,6 +3687,10 @@ app.post("/clear-session", async (c) => {
   const { root } = await c.req.json();
   if (!root) {
     return c.json({ error: "root is required" }, 400);
+  }
+  const access = await requireFirmAccess(c, root);
+  if (!access.ok) {
+    return access.response;
   }
   await saveFirmSession(root, "");
   return c.json({ success: true });
@@ -3556,6 +3721,11 @@ app.get("/todos", async (c) => {
     return c.json({ error: "root query param required" }, 400);
   }
 
+  const access = await requireFirmAccess(c, root);
+  if (!access.ok) {
+    return access.response;
+  }
+
   try {
     const todosPath = join(root, FIRM_DIR, "todos.json");
     const content = await readFile(todosPath, "utf-8");
@@ -3573,6 +3743,11 @@ app.post("/todos", async (c) => {
 
   if (!root) {
     return c.json({ error: "root is required" }, 400);
+  }
+
+  const access = await requireFirmAccess(c, root);
+  if (!access.ok) {
+    return access.response;
   }
 
   try {
@@ -3610,6 +3785,14 @@ app.put("/case/assign", async (c) => {
 
   if (!Array.isArray(userIds)) {
     return c.json({ error: "userIds must be an array" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, casePath);
+  if (!access.ok) {
+    return access.response;
+  }
+  if (!access.context.permissions.canAssignCases) {
+    return c.json({ error: "insufficient_permissions" }, 403);
   }
 
   try {
@@ -3660,6 +3843,14 @@ app.delete("/case/unassign", async (c) => {
 
   if (!casePath || !userId) {
     return c.json({ error: "casePath and userId query params are required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, casePath);
+  if (!access.ok) {
+    return access.response;
+  }
+  if (!access.context.permissions.canAssignCases) {
+    return c.json({ error: "insufficient_permissions" }, 403);
   }
 
   try {

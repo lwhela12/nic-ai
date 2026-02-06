@@ -18,9 +18,10 @@ interface Manifest {
 interface Props {
   apiUrl: string
   firmRoot: string
+  canEditKnowledge: boolean
 }
 
-export default function KnowledgeEditor({ apiUrl, firmRoot }: Props) {
+export default function KnowledgeEditor({ apiUrl, firmRoot, canEditKnowledge }: Props) {
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [selectedSection, setSelectedSection] = useState<string | null>(null)
   const [content, setContent] = useState('')
@@ -71,6 +72,10 @@ export default function KnowledgeEditor({ apiUrl, firmRoot }: Props) {
 
   const saveSection = async () => {
     if (!selectedSection || !isDirty) return
+    if (!canEditKnowledge) {
+      setError('Only attorneys can edit firm knowledge.')
+      return
+    }
     setSaving(true)
     try {
       const res = await fetch(`${apiUrl}/api/knowledge/section/${selectedSection}`, {
@@ -78,7 +83,10 @@ export default function KnowledgeEditor({ apiUrl, firmRoot }: Props) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ root: firmRoot, content }),
       })
-      if (!res.ok) throw new Error('Failed to save')
+      if (!res.ok) {
+        if (res.status === 403) throw new Error('Only attorneys can edit firm knowledge.')
+        throw new Error('Failed to save')
+      }
       setOriginalContent(content)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save')
@@ -89,13 +97,20 @@ export default function KnowledgeEditor({ apiUrl, firmRoot }: Props) {
 
   const deleteSection = async () => {
     if (!selectedSection) return
+    if (!canEditKnowledge) {
+      setError('Only attorneys can edit firm knowledge.')
+      return
+    }
     if (!confirm('Delete this section? This cannot be undone.')) return
 
     try {
       const res = await fetch(`${apiUrl}/api/knowledge/section/${selectedSection}?root=${encodeURIComponent(firmRoot)}`, {
         method: 'DELETE',
       })
-      if (!res.ok) throw new Error('Failed to delete')
+      if (!res.ok) {
+        if (res.status === 403) throw new Error('Only attorneys can edit firm knowledge.')
+        throw new Error('Failed to delete')
+      }
       setSelectedSection(null)
       setContent('')
       setOriginalContent('')
@@ -107,6 +122,10 @@ export default function KnowledgeEditor({ apiUrl, firmRoot }: Props) {
 
   const createSection = async () => {
     if (!newSectionId || !newSectionTitle) return
+    if (!canEditKnowledge) {
+      setError('Only attorneys can edit firm knowledge.')
+      return
+    }
     try {
       const res = await fetch(`${apiUrl}/api/knowledge/section`, {
         method: 'POST',
@@ -146,13 +165,15 @@ export default function KnowledgeEditor({ apiUrl, firmRoot }: Props) {
       {/* Sidebar */}
       <div className="w-64 border-r border-surface-200 bg-white flex flex-col">
         <div className="px-4 py-3 border-b border-surface-200 flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-brand-700">Sections</h3>
-          <button
-            onClick={() => setShowNewSection(true)}
-            className="text-xs px-2 py-1 bg-accent-50 text-accent-700 rounded hover:bg-accent-100 transition-colors"
-          >
-            + Add
-          </button>
+            <h3 className="text-sm font-semibold text-brand-700">Sections</h3>
+          {canEditKnowledge && (
+            <button
+              onClick={() => setShowNewSection(true)}
+              className="text-xs px-2 py-1 bg-accent-50 text-accent-700 rounded hover:bg-accent-100 transition-colors"
+            >
+              + Add
+            </button>
+          )}
         </div>
         <div className="flex-1 overflow-y-auto">
           {manifest?.sections.map((section) => (
@@ -194,24 +215,28 @@ export default function KnowledgeEditor({ apiUrl, firmRoot }: Props) {
                   >
                     Preview
                   </button>
-                  <button
-                    onClick={() => setMode('edit')}
-                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                      mode === 'edit' ? 'bg-white text-brand-900 shadow-sm' : 'text-brand-500 hover:text-brand-700'
-                    }`}
-                  >
-                    Edit
-                  </button>
+                  {canEditKnowledge && (
+                    <button
+                      onClick={() => setMode('edit')}
+                      className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                        mode === 'edit' ? 'bg-white text-brand-900 shadow-sm' : 'text-brand-500 hover:text-brand-700'
+                      }`}
+                    >
+                      Edit
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="flex gap-2">
-                <button
-                  onClick={deleteSection}
-                  className="text-xs px-3 py-1.5 text-red-600 hover:bg-red-50 rounded transition-colors"
-                >
-                  Delete
-                </button>
-                {mode === 'edit' && (
+                {canEditKnowledge && (
+                  <button
+                    onClick={deleteSection}
+                    className="text-xs px-3 py-1.5 text-red-600 hover:bg-red-50 rounded transition-colors"
+                  >
+                    Delete
+                  </button>
+                )}
+                {canEditKnowledge && mode === 'edit' && (
                   <button
                     onClick={saveSection}
                     disabled={!isDirty || saving}
@@ -225,6 +250,11 @@ export default function KnowledgeEditor({ apiUrl, firmRoot }: Props) {
             </div>
             {mode === 'preview' ? (
               <div className="flex-1 overflow-y-auto p-8 bg-white">
+                {!canEditKnowledge && (
+                  <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-700">
+                    Read-only mode: only attorneys can edit firm knowledge.
+                  </div>
+                )}
                 <div className="max-w-3xl mx-auto prose prose-sm
                                 prose-headings:text-brand-900 prose-headings:font-semibold
                                 prose-h2:text-xl prose-h2:border-b prose-h2:border-surface-200 prose-h2:pb-2 prose-h2:mb-4

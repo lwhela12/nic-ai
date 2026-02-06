@@ -14,6 +14,7 @@ import { readFile, writeFile } from "fs/promises";
 import { join, dirname } from "path";
 import { generateDocument, type DocumentType } from "./doc-agent";
 import { readDocument } from "./doc-reader";
+import { acquireCaseLock, releaseCaseLock } from "./case-lock";
 
 // Client creation - recreated when API key changes
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -195,6 +196,19 @@ const TOOLS: Anthropic.Tool[] = [
     }
   }
 ];
+
+const WRITE_TOOLS = new Set([
+  "write_file",
+  "update_index",
+  "generate_document",
+  "batch_resolve_conflicts",
+  "resolve_conflict",
+]);
+
+function getTools(readOnlyMode: boolean): Anthropic.Tool[] {
+  if (!readOnlyMode) return TOOLS;
+  return TOOLS.filter((tool) => !WRITE_TOOLS.has(tool.name));
+}
 
 // Fuzzy field matching - handles casing, whitespace, and punctuation variations
 function findFieldIndex(needsReview: any[], field: string): number {
@@ -815,7 +829,8 @@ You: "Done! 15 resolved. Now let's look at the remaining 11..."
 export async function* directChat(
   caseFolder: string,
   message: string,
-  history: ChatMessage[] = []
+  history: ChatMessage[] = [],
+  options?: { lockOwner?: string; lockDisplayName?: string }
 ): AsyncGenerator<{ type: string; content?: string; tool?: string; done?: boolean; usage?: any; filePath?: string }> {
 
   // Build context and include it in the system prompt
@@ -839,13 +854,26 @@ export async function* directChat(
     content: message
   });
 
+  const lockOwner = options?.lockOwner || `chat-${Date.now()}`;
+  const lockResult = await acquireCaseLock(caseFolder, lockOwner, options?.lockDisplayName);
+  const readOnlyMode = !lockResult.acquired;
+
+  if (readOnlyMode) {
+    const holderName = lockResult.lock?.displayName || lockResult.lock?.owner || "another user";
+    yield {
+      type: "text",
+      content: `\n\n${holderName}'s agent is working on this case right now. You can still ask questions, but edits are disabled for now.`,
+    };
+  }
+
   // Agentic loop - supports multiple rounds of tool calls
   const MAX_TOOL_ITERATIONS = 8;
   let iterations = 0;
   let generatedFilePath: string | undefined;
 
-  while (iterations < MAX_TOOL_ITERATIONS) {
-    iterations++;
+  try {
+    while (iterations < MAX_TOOL_ITERATIONS) {
+      iterations++;
 
     // API call with tools and streaming on every iteration
     let response;
@@ -855,7 +883,7 @@ export async function* directChat(
         max_tokens: 4096,
         system: systemPrompt,
         messages,
-        tools: TOOLS,
+        tools: getTools(readOnlyMode),
         stream: true
       });
     } catch (err) {
@@ -1002,7 +1030,12 @@ export async function* directChat(
       role: "user",
       content: toolResults
     });
-  }
+    }
 
-  yield { type: "done", done: true, filePath: generatedFilePath };
+    yield { type: "done", done: true, filePath: generatedFilePath };
+  } finally {
+    if (lockResult.acquired) {
+      await releaseCaseLock(caseFolder, lockOwner);
+    }
+  }
 }

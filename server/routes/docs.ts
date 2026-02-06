@@ -12,6 +12,7 @@ import {
   ExportOptions,
 } from "../lib/export";
 import type { DocxStyles } from "../lib/extract";
+import { requireCaseAccess } from "../lib/team-access";
 
 const execAsync = promisify(exec);
 
@@ -46,6 +47,11 @@ app.get("/list", async (c) => {
 
   if (!caseFolder) {
     return c.json({ error: "case query param required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   const docs: any[] = [];
@@ -112,6 +118,11 @@ app.get("/read", async (c) => {
     return c.json({ error: "case and path query params required" }, 400);
   }
 
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
   const fullPath = join(caseFolder, docPath);
 
   try {
@@ -128,6 +139,11 @@ app.post("/save", async (c) => {
 
   if (!caseFolder || !targetPath || !content) {
     return c.json({ error: "caseFolder, targetPath, and content required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   const fullPath = join(caseFolder, targetPath);
@@ -160,6 +176,11 @@ app.post("/export", async (c) => {
 
   if (!caseFolder || !sourcePath || !format) {
     return c.json({ error: "caseFolder, sourcePath, and format required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   if (!["docx", "pdf"].includes(format)) {
@@ -284,6 +305,11 @@ app.get("/download", async (c) => {
     return c.json({ error: "case and path query params required" }, 400);
   }
 
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
   const fullPath = join(caseFolder, docPath);
 
   try {
@@ -357,6 +383,11 @@ app.get("/drafts", async (c) => {
 
   if (!caseFolder) {
     return c.json({ error: "case query param required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   const drafts: Draft[] = [];
@@ -451,6 +482,11 @@ app.post("/approve", async (c) => {
 
   if (!caseFolder || !draftPath) {
     return c.json({ error: "caseFolder and draftPath required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   const fullDraftPath = join(caseFolder, draftPath);
@@ -561,6 +597,11 @@ app.post("/bundle-demand", async (c) => {
 
   if (!caseFolder) {
     return c.json({ error: "caseFolder required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   const warnings: string[] = [];
@@ -723,6 +764,11 @@ app.get("/bundle-status", async (c) => {
 
   if (!caseFolder) {
     return c.json({ error: "case query param required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   try {

@@ -61,6 +61,7 @@ const WarningIcon = () => (
 export default function FileViewer({ documentIndex, generatedDocs, caseFolder, apiUrl, onDocSelect, onFileView, indexStatus }: Props) {
   const [sort, setSort] = useState<SortOption>('folder')
   const [filter, setFilter] = useState<FilterOption>('all')
+  const [searchQuery, setSearchQuery] = useState('')
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
   const folderKeys = useMemo(() => Object.keys(documentIndex?.folders || {}), [documentIndex])
   const expandedFolders = useMemo(() => {
@@ -168,16 +169,41 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
 
   const totalFiles = Object.values(filteredFolders).reduce((acc, files) => acc + files.length, 0)
 
-  // Sort folders alphabetically
+  // Sort folders alphabetically and filter files by search query
   const sortedFolderEntries = useMemo(() => {
-    return Object.entries(filteredFolders).sort(([a], [b]) => a.localeCompare(b))
-  }, [filteredFolders])
+    const entries = Object.entries(filteredFolders).sort(([a], [b]) => a.localeCompare(b))
+    if (!searchQuery) return entries
+    const q = searchQuery.toLowerCase()
+    return entries
+      .map(([folder, files]) => {
+        const matched = files.filter(file => {
+          const fileName = typeof file === 'string' ? file : (file.file || file.filename || '')
+          return fileName.toLowerCase().includes(q) || folder.toLowerCase().includes(q)
+        })
+        return [folder, matched] as [string, DocumentFile[]]
+      })
+      .filter(([, files]) => files.length > 0)
+  }, [filteredFolders, searchQuery])
 
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="px-4 py-4 border-b border-surface-200">
         <h2 className="text-sm font-semibold text-brand-900 mb-3">Case Documents</h2>
+        <div className="relative mb-2">
+          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+          </svg>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search files..."
+            className="w-full text-xs border border-surface-200 rounded-lg pl-8 pr-2.5 py-2 bg-white
+                       text-brand-700 focus:outline-none focus:ring-2 focus:ring-accent-500
+                       placeholder:text-brand-400"
+          />
+        </div>
         <div className="flex gap-2">
           <select
             value={sort}

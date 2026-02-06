@@ -45,6 +45,7 @@ import docs from "./routes/docs";
 import firm from "./routes/firm";
 import knowledge from "./routes/knowledge";
 import auth from "./routes/auth";
+import team from "./routes/team";
 import { authMiddleware } from "./middleware/auth";
 
 // Reuse the dirname from env loading
@@ -72,6 +73,8 @@ app.use("/api/files/*", authMiddleware);
 app.use("/api/docs/*", authMiddleware);
 app.use("/api/firm/*", authMiddleware);
 app.use("/api/knowledge/*", authMiddleware);
+app.use("/api/team", authMiddleware);
+app.use("/api/team/*", authMiddleware);
 
 // Mount protected routes
 app.route("/api/claude", claude);
@@ -79,6 +82,7 @@ app.route("/api/files", files);
 app.route("/api/docs", docs);
 app.route("/api/firm", firm);
 app.route("/api/knowledge", knowledge);
+app.route("/api/team", team);
 
 // In production, serve static frontend
 if (isProduction) {

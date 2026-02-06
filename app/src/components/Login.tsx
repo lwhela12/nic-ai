@@ -1,8 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 interface LoginProps {
   apiUrl: string
   onLoginSuccess: (email: string, subscriptionStatus: string) => void
+  initialError?: string
+  firmRoot?: string | null
 }
 
 // Icon components
@@ -19,13 +21,37 @@ const SpinnerIcon = () => (
   </svg>
 )
 
-export default function Login({ apiUrl, onLoginSuccess }: LoginProps) {
+export default function Login({ apiUrl, onLoginSuccess, initialError, firmRoot }: LoginProps) {
   const [mode, setMode] = useState<'login' | 'signup'>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+
+  const toFriendlyAuthError = (raw: unknown): string => {
+    if (typeof raw !== 'string' || !raw.trim()) return 'Authentication failed. Please try again.'
+    const code = raw.trim().toLowerCase()
+    const map: Record<string, string> = {
+      firm_not_bootstrapped: 'This firm is not initialized yet. Sign in with the first approved attorney account to bootstrap it.',
+      invite_required: 'Your email does not have an active invite for this firm. Ask an attorney or lead to invite you in Team settings.',
+      license_limit_reached: 'This firm has reached its license limit. Ask your firm admin to increase available seats.',
+      owner_subscription_inactive: 'Your firm owner account is inactive. Ask the owner to re-validate billing access.',
+      authentication_required: 'Please sign in to continue.',
+      reauth_required: 'Your session expired. Please sign in again.',
+      subscription_expired: 'Your subscription is inactive. Please contact support or update billing.',
+      invalid_credentials: 'Incorrect email or password.',
+      unauthorized: 'You are not authorized for this action.',
+      forbidden: 'Access denied.',
+    }
+    return map[code] || raw
+  }
+
+  useEffect(() => {
+    if (initialError) {
+      setError(initialError)
+    }
+  }, [initialError])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -53,13 +79,13 @@ export default function Login({ apiUrl, onLoginSuccess }: LoginProps) {
       const response = await fetch(`${apiUrl}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, firmRoot }),
       })
 
       const data = await response.json()
 
       if (!response.ok) {
-        setError(data.error || 'Authentication failed')
+        setError(toFriendlyAuthError(data.error || data.message))
         return
       }
 
