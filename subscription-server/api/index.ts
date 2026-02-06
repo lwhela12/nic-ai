@@ -19,27 +19,30 @@ const ADMIN_HTML = `<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Claude PI Admin</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
   <script>
     tailwind.config = {
       theme: {
         extend: {
           colors: {
             brand: {
-              900: '#0f172a',
-              800: '#1e293b',
-              700: '#334155',
-              500: '#64748b',
-              400: '#94a3b8',
-              200: '#e2e8f0',
+              900: '#f8fafc',
+              800: '#e2e8f0',
+              700: '#cbd5e1',
+              500: '#94a3b8',
+              400: '#64748b',
+              200: '#334155',
             },
             accent: {
-              600: '#d97706',
-              500: '#f59e0b',
-              50: '#fffbeb',
+              600: '#fb7185',
+              500: '#f97316',
+              50: '#2a1016',
             },
             surface: {
-              50: '#fafaf9',
-              200: '#e7e5e4',
+              50: '#020617',
+              200: '#1e293b',
             }
           }
         }
@@ -47,7 +50,113 @@ const ADMIN_HTML = `<!DOCTYPE html>
     }
   </script>
   <style>
-    body { font-family: 'Inter', system-ui, sans-serif; }
+    :root {
+      --ribbon-a: linear-gradient(120deg, #fef08a 0%, #f97316 28%, #ef4444 54%, #111827 78%, #06b6d4 100%);
+      --ribbon-b: linear-gradient(115deg, #0b1120 10%, #111827 32%, #0f172a 40%, #ef4444 60%, #22d3ee 100%);
+      --glass: rgba(8, 15, 30, 0.62);
+      --line: rgba(148, 163, 184, 0.22);
+      --glow: 0 20px 50px rgba(15, 23, 42, 0.55);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Sora", system-ui, sans-serif;
+      color: #e2e8f0;
+      background: radial-gradient(circle at 14% 22%, rgba(249,115,22,0.22), transparent 34%),
+                  radial-gradient(circle at 82% 18%, rgba(34,211,238,0.24), transparent 36%),
+                  radial-gradient(circle at 76% 78%, rgba(236,72,153,0.18), transparent 36%),
+                  #020617;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      width: 150vw;
+      height: 42vh;
+      left: -25vw;
+      border-radius: 999px;
+      filter: blur(8px) saturate(1.05);
+      opacity: 0.9;
+      pointer-events: none;
+      z-index: -1;
+    }
+    body::before {
+      top: 10vh;
+      background: var(--ribbon-a);
+      transform: rotate(-11deg);
+    }
+    body::after {
+      bottom: -10vh;
+      background: var(--ribbon-b);
+      transform: rotate(8deg);
+      opacity: 0.75;
+    }
+    h1, h2, h3 { font-family: "Space Grotesk", sans-serif; letter-spacing: 0.01em; }
+    .max-w-6xl {
+      max-width: 1150px !important;
+      background: var(--glass);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--glow);
+      backdrop-filter: blur(14px);
+      margin-top: 2rem;
+    }
+    .bg-white {
+      background: rgba(15, 23, 42, 0.68) !important;
+      border: 1px solid var(--line) !important;
+      backdrop-filter: blur(10px);
+    }
+    .bg-brand-100,
+    .hover\:bg-brand-100:hover { background: rgba(30, 41, 59, 0.8) !important; }
+    .rounded-xl, .rounded-2xl { border-radius: 18px !important; }
+    .text-brand-900 { color: #f8fafc !important; }
+    .text-brand-800, .text-brand-700 { color: #cbd5e1 !important; }
+    .text-brand-500, .text-brand-400 { color: #94a3b8 !important; }
+    .bg-surface-50 { background: rgba(15, 23, 42, 0.52) !important; }
+    .border-surface-200 { border-color: rgba(148, 163, 184, 0.2) !important; }
+    .bg-brand-900 {
+      background: linear-gradient(130deg, #f97316 0%, #ef4444 40%, #06b6d4 100%) !important;
+      color: #fff !important;
+      box-shadow: 0 10px 25px rgba(14, 165, 233, 0.28), inset 0 0 0 1px rgba(255,255,255,0.16);
+    }
+    .bg-brand-900:hover { filter: brightness(1.06); }
+    .hover\:bg-brand-800:hover { filter: brightness(1.06); }
+    .bg-accent-600 {
+      background: linear-gradient(125deg, #fb7185 0%, #f97316 100%) !important;
+      box-shadow: 0 12px 24px rgba(249, 115, 22, 0.28);
+    }
+    .hover\:bg-accent-500:hover { filter: brightness(1.08); }
+    .bg-red-50, .bg-green-50, .bg-blue-50, .bg-accent-50 {
+      background: rgba(15, 23, 42, 0.6) !important;
+    }
+    .text-red-700 { color: #fda4af !important; }
+    .text-green-700, .text-green-600 { color: #6ee7b7 !important; }
+    .text-blue-700, .text-blue-600 { color: #7dd3fc !important; }
+    .text-accent-600, .hover\:text-accent-500:hover { color: #fb7185 !important; }
+    input, select {
+      background: rgba(2, 6, 23, 0.75) !important;
+      color: #e2e8f0 !important;
+      border-color: rgba(148, 163, 184, 0.3) !important;
+    }
+    input::placeholder { color: #64748b; }
+    .shadow-sm, .shadow-lg { box-shadow: var(--glow) !important; }
+    .grid > .bg-white { transition: transform 180ms ease, box-shadow 220ms ease, border-color 220ms ease; }
+    .grid > .bg-white:hover {
+      transform: translateY(-3px);
+      border-color: rgba(34, 211, 238, 0.34) !important;
+      box-shadow: 0 20px 40px rgba(8, 47, 73, 0.4) !important;
+    }
+    tr { transition: background-color 160ms ease; }
+    tr:hover { background: rgba(30, 41, 59, 0.42); }
+    button { transition: transform 140ms ease, filter 180ms ease, box-shadow 180ms ease; }
+    button:hover { transform: translateY(-1px); }
+    .fixed.inset-0.bg-brand-900\/60 { background: rgba(2, 6, 23, 0.74) !important; }
+    @media (max-width: 900px) {
+      .max-w-6xl { margin: 0.75rem; border-radius: 18px; }
+      body::before, body::after { opacity: 0.55; }
+    }
   </style>
 </head>
 <body class="bg-surface-50 min-h-screen">
