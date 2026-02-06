@@ -237,7 +237,7 @@ function App() {
     const stored = localStorage.getItem(PRACTICE_AREA_KEY)
     return (stored === 'Workers\' Compensation') ? 'Workers\' Compensation' : 'Personal Injury'
   })
-  const [_pendingFolderPath, _setPendingFolderPath] = useState<string | null>(null) // eslint-disable-line @typescript-eslint/no-unused-vars
+  const [pendingFolderPath, setPendingFolderPath] = useState<string | null>(null)
   const [caseFolder, setCaseFolderState] = useState<string | null>(() => {
     return getUrlParam('case')
   })
@@ -565,10 +565,18 @@ function App() {
     setAuthState({ authenticated: false })
     setCaseFolder(null)
     setDocumentIndex(null)
+    setPendingFolderPath(null)
+    localStorage.removeItem(FIRM_ROOT_KEY)
   }
 
   // Handle login success
   const handleLoginSuccess = (email: string, subscriptionStatus: string) => {
+    // Force explicit folder selection on each login so users do not inherit prior local workspace context
+    setFirmRoot(null)
+    setCaseFolder(null)
+    setDocumentIndex(null)
+    setPendingFolderPath(null)
+    localStorage.removeItem(FIRM_ROOT_KEY)
     setAuthState({
       authenticated: true,
       email,
@@ -588,10 +596,13 @@ function App() {
 
   // Show login screen if not authenticated
   if (!authState || !authState.authenticated) {
-    const inviteError = authState?.teamError === 'invite_required'
-      ? 'Your email does not have an active invite for this firm.'
-      : undefined
-    return <Login apiUrl={API_URL} onLoginSuccess={handleLoginSuccess} initialError={inviteError} firmRoot={firmRoot} />
+    const setupError =
+      authState?.teamError === 'invite_required'
+        ? 'Your email does not have an active invite for this firm.'
+        : authState?.teamError === 'firm_not_bootstrapped'
+          ? 'This firm is not initialized yet. Sign in with the first approved attorney account to bootstrap it.'
+          : undefined
+    return <Login apiUrl={API_URL} onLoginSuccess={handleLoginSuccess} initialError={setupError} firmRoot={firmRoot} />
   }
 
   const handleCaseSelect = (folder: string) => {
@@ -649,33 +660,6 @@ function App() {
           </div>
           <p className="text-brand-500 mb-8">Legal Case Management</p>
 
-          {/* Practice Area Selection */}
-          <div className="mb-6">
-            <label className="block text-sm font-medium text-brand-700 mb-2">Practice Area</label>
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                onClick={() => setPracticeArea('Personal Injury')}
-                className={`px-4 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
-                  practiceArea === 'Personal Injury'
-                    ? 'border-accent-500 bg-accent-50 text-accent-700'
-                    : 'border-surface-200 text-brand-600 hover:border-accent-300 hover:bg-surface-50'
-                }`}
-              >
-                Personal Injury
-              </button>
-              <button
-                onClick={() => setPracticeArea('Workers\' Compensation')}
-                className={`px-4 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
-                  practiceArea === 'Workers\' Compensation'
-                    ? 'border-accent-500 bg-accent-50 text-accent-700'
-                    : 'border-surface-200 text-brand-600 hover:border-accent-300 hover:bg-surface-50'
-                }`}
-              >
-                Workers' Comp
-              </button>
-            </div>
-          </div>
-
           <button
             onClick={() => setShowPicker(true)}
             className="w-full px-6 py-6 border-2 border-dashed border-surface-300 rounded-xl
@@ -691,10 +675,48 @@ function App() {
                 Select Cases Folder
               </p>
               <p className="mt-1 text-sm text-brand-400">
-                Choose the folder containing all your case files
+                Choose the folder containing all your case files first
               </p>
             </div>
           </button>
+
+          {pendingFolderPath && (
+            <div className="mt-6 border border-surface-200 rounded-xl p-4 bg-surface-50">
+              <p className="text-xs text-brand-500 mb-2">Selected folder</p>
+              <p className="text-sm text-brand-700 break-all">{pendingFolderPath}</p>
+              <div className="mt-4">
+                <label className="block text-sm font-medium text-brand-700 mb-2">Practice Area</label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => setPracticeArea('Personal Injury')}
+                    className={`px-4 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
+                      practiceArea === 'Personal Injury'
+                        ? 'border-accent-500 bg-accent-50 text-accent-700'
+                        : 'border-surface-200 text-brand-600 hover:border-accent-300 hover:bg-surface-50'
+                    }`}
+                  >
+                    Personal Injury
+                  </button>
+                  <button
+                    onClick={() => setPracticeArea('Workers\' Compensation')}
+                    className={`px-4 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
+                      practiceArea === 'Workers\' Compensation'
+                        ? 'border-accent-500 bg-accent-50 text-accent-700'
+                        : 'border-surface-200 text-brand-600 hover:border-accent-300 hover:bg-surface-50'
+                    }`}
+                  >
+                    Workers' Comp
+                  </button>
+                </div>
+              </div>
+              <button
+                onClick={() => setFirmRoot(pendingFolderPath)}
+                className="mt-4 w-full px-4 py-3 bg-brand-900 text-white rounded-lg font-medium hover:bg-brand-800 transition-colors"
+              >
+                Continue
+              </button>
+            </div>
+          )}
 
           <p className="text-xs text-brand-400 text-center mt-6">
             Your cases are stored locally and never uploaded
@@ -706,7 +728,7 @@ function App() {
             apiUrl={API_URL}
             onSelect={(path) => {
               setShowPicker(false)
-              setFirmRoot(path)
+              setPendingFolderPath(path)
             }}
             onCancel={() => setShowPicker(false)}
           />

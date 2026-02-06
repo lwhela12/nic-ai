@@ -1,4 +1,7 @@
 import { Hono } from "hono";
+import { existsSync, readFileSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
 import {
   createTeamInvite,
   listTeamForUser,
@@ -8,6 +11,41 @@ import {
 } from "../lib/team";
 
 const app = new Hono();
+const CONFIG_DIR = process.env.CLAUDE_PI_CONFIG_DIR || join(homedir(), ".claude-pi");
+const CONFIG_FILE = join(CONFIG_DIR, "config.json");
+const SUBSCRIPTION_SERVER = process.env.CLAUDE_PI_SERVER || "https://claude-pi-five.vercel.app";
+
+function loadAuthToken(): string | null {
+  try {
+    if (!existsSync(CONFIG_FILE)) return null;
+    const parsed = JSON.parse(readFileSync(CONFIG_FILE, "utf-8")) as { authToken?: string };
+    return typeof parsed.authToken === "string" && parsed.authToken ? parsed.authToken : null;
+  } catch {
+    return null;
+  }
+}
+
+async function createRemoteSubUserInvite(inviteEmail: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  const authToken = loadAuthToken();
+  if (!authToken) return { ok: false, error: "root_auth_required" };
+  try {
+    const response = await fetch(`${SUBSCRIPTION_SERVER}/v1/account/invite-subuser`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${authToken}`,
+      },
+      body: JSON.stringify({ email: inviteEmail }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      return { ok: false, error: data.error || "remote_invite_failed" };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "remote_invite_unreachable" };
+  }
+}
 
 function getAuthEmail(c: any): string | null {
   const email = c.get("authEmail");
@@ -78,6 +116,11 @@ app.post("/invite", async (c) => {
   }
   if (!VALID_ROLES.includes(role)) {
     return c.json({ error: "invalid_role" }, 400);
+  }
+
+  const remoteInvite = await createRemoteSubUserInvite(inviteEmail.toLowerCase());
+  if (!remoteInvite.ok) {
+    return c.json({ error: remoteInvite.error }, 403);
   }
 
   const result = await createTeamInvite(root, email, inviteEmail, role);

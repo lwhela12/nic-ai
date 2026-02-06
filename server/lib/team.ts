@@ -101,7 +101,7 @@ export function getPermissionsForRole(role: TeamRole): TeamPermissions {
       };
     case "case_manager_lead":
       return {
-        canManageTeam: true,
+        canManageTeam: false,
         canAssignCases: true,
         canViewAllCases: true,
         canEditKnowledge: false,
@@ -442,4 +442,39 @@ export async function listTeamForUser(firmRoot: string, actorEmail: string): Pro
     context: actorResult.context,
     team: actorResult.team,
   };
+}
+
+export async function bootstrapTeamFounder(
+  firmRoot: string,
+  rawEmail: string
+): Promise<
+  | { ok: true; team: TeamState; context: TeamContext }
+  | { ok: false; reason: "already_configured" }
+> {
+  const email = normalizeEmail(rawEmail);
+  const team = await loadTeamState(firmRoot);
+
+  const existingMember = findActiveMember(team, email);
+  if (existingMember) {
+    return { ok: true, team, context: toContext(existingMember) };
+  }
+
+  if (team.members.length > 0) {
+    return { ok: false, reason: "already_configured" };
+  }
+
+  const founder: TeamMember = {
+    id: randomUUID(),
+    email,
+    role: "attorney",
+    status: "active",
+    joinedAt: nowIso(),
+  };
+
+  const next: TeamState = {
+    ...team,
+    members: [founder],
+  };
+  await saveTeamState(firmRoot, next);
+  return { ok: true, team: next, context: toContext(founder) };
 }

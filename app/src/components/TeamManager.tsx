@@ -58,6 +58,19 @@ export default function TeamManager({
   const [inviteRole, setInviteRole] = useState<TeamRole>('case_manager')
   const [isInviting, setIsInviting] = useState(false)
 
+  const mapError = (raw: string): string => {
+    const code = raw.toLowerCase()
+    const map: Record<string, string> = {
+      only_root_account_can_invite: 'Only the root user can invite staff for this firm.',
+      root_auth_required: 'Root authentication is required before inviting staff.',
+      license_limit_reached: 'License limit reached for this firm. Increase max licenses in admin.',
+      domain_mismatch: 'Invite email must match the same domain as the root account.',
+      remote_invite_unreachable: 'Could not contact remote auth server. Try again.',
+      remote_invite_failed: 'Remote invite failed. Try again.',
+    }
+    return map[code] || raw
+  }
+
   const loadTeam = async () => {
     setIsLoading(true)
     setError(null)
@@ -97,7 +110,7 @@ export default function TeamManager({
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || 'Could not send invite')
+        throw new Error(mapError(data.error || 'Could not send invite'))
       }
       setInviteEmail('')
       await loadTeam()

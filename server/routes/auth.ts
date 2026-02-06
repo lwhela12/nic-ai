@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { requireTeamContext } from "../lib/team";
+import { bootstrapTeamFounder, requireTeamContext } from "../lib/team";
 
 const auth = new Hono();
 
@@ -17,8 +17,9 @@ const SUBSCRIPTION_SERVER =
 // Dev mode flag - must match middleware/auth.ts logic
 // Electron sets ELECTRON_FRONTEND_PATH, so we're only in dev mode when running directly with bun
 const IS_ELECTRON = !!process.env.ELECTRON_FRONTEND_PATH;
-const DEV_MODE = !IS_ELECTRON &&
-  (process.env.DEV_MODE === "true" || process.env.NODE_ENV !== "production");
+// IMPORTANT: require explicit opt-in via DEV_MODE=true.
+// Running `npm run dev` should still hit remote auth when DEV_MODE is false.
+const DEV_MODE = !IS_ELECTRON && process.env.DEV_MODE === "true";
 
 interface Config {
   authToken?: string;
@@ -27,12 +28,28 @@ interface Config {
   lastValidated?: string;
   subscriptionStatus?: string;
   expiresAt?: string;
+  accountType?: "root" | "sub_user";
+  ownerEmail?: string | null;
+  maxLicenses?: number;
 }
 
-async function validateFirmAccess(firmRoot: string | undefined, email: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+async function validateFirmAccess(
+  firmRoot: string | undefined,
+  email: string,
+  options?: { bootstrapIfMissing?: boolean }
+): Promise<{ ok: true } | { ok: false; reason: string }> {
   if (!firmRoot) return { ok: true };
   const teamResult = await requireTeamContext(firmRoot, email);
   if (teamResult.ok) return { ok: true };
+  if (
+    options?.bootstrapIfMissing &&
+    teamResult.reason === "firm_not_bootstrapped"
+  ) {
+    const bootstrap = await bootstrapTeamFounder(firmRoot, email);
+    if (bootstrap.ok) {
+      return { ok: true };
+    }
+  }
   return { ok: false, reason: teamResult.reason };
 }
 
@@ -100,6 +117,9 @@ auth.get("/status", async (c) => {
       devMode: true,
       email,
       subscriptionStatus: config.subscriptionStatus || "active",
+      accountType: config.accountType || "root",
+      ownerEmail: config.ownerEmail || null,
+      maxLicenses: config.maxLicenses || 0,
       ...teamPayload,
     });
   }
@@ -143,6 +163,9 @@ auth.get("/status", async (c) => {
     subscriptionStatus: config.subscriptionStatus,
     expiresAt: config.expiresAt,
     lastValidated: config.lastValidated,
+    accountType: config.accountType || "root",
+    ownerEmail: config.ownerEmail || null,
+    maxLicenses: config.maxLicenses || 0,
     ...teamPayload,
   });
 });
@@ -160,7 +183,11 @@ auth.post("/login", async (c) => {
 
   // In dev mode, accept any credentials
   if (DEV_MODE) {
-    const firmAccess = await validateFirmAccess(typeof firmRoot === "string" ? firmRoot : undefined, email);
+    const firmAccess = await validateFirmAccess(
+      typeof firmRoot === "string" ? firmRoot : undefined,
+      email,
+      { bootstrapIfMissing: true }
+    );
     if (!firmAccess.ok) {
       return c.json({ error: firmAccess.reason }, 403);
     }
@@ -172,6 +199,8 @@ auth.post("/login", async (c) => {
       lastValidated: new Date().toISOString(),
       subscriptionStatus: "active",
       expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+      accountType: "root",
+      ownerEmail: null,
     };
     saveConfig(config);
 
@@ -193,14 +222,18 @@ auth.post("/login", async (c) => {
     if (!response.ok) {
       const error = await response.json().catch(() => ({ message: "Login failed" }));
       return c.json(
-        { error: error.message || "Invalid credentials" },
+        { error: error.error || error.message || "Invalid credentials" },
         response.status
       );
     }
 
     const data = await response.json();
 
-    const firmAccess = await validateFirmAccess(typeof firmRoot === "string" ? firmRoot : undefined, data.email);
+    const firmAccess = await validateFirmAccess(
+      typeof firmRoot === "string" ? firmRoot : undefined,
+      data.email,
+      { bootstrapIfMissing: true }
+    );
     if (!firmAccess.ok) {
       return c.json({ error: firmAccess.reason }, 403);
     }
@@ -213,6 +246,9 @@ auth.post("/login", async (c) => {
       lastValidated: new Date().toISOString(),
       subscriptionStatus: data.subscriptionStatus,
       expiresAt: data.expiresAt,
+      accountType: data.accountType || "root",
+      ownerEmail: data.ownerEmail || null,
+      maxLicenses: data.maxLicenses || 0,
     };
     saveConfig(config);
 
@@ -245,7 +281,11 @@ auth.post("/signup", async (c) => {
 
   // In dev mode, just create a local config
   if (DEV_MODE) {
-    const firmAccess = await validateFirmAccess(typeof firmRoot === "string" ? firmRoot : undefined, email);
+    const firmAccess = await validateFirmAccess(
+      typeof firmRoot === "string" ? firmRoot : undefined,
+      email,
+      { bootstrapIfMissing: true }
+    );
     if (!firmAccess.ok) {
       return c.json({ error: firmAccess.reason }, 403);
     }
@@ -257,6 +297,8 @@ auth.post("/signup", async (c) => {
       lastValidated: new Date().toISOString(),
       subscriptionStatus: "trialing",
       expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+      accountType: "root",
+      ownerEmail: null,
     };
     saveConfig(config);
 
@@ -279,14 +321,18 @@ auth.post("/signup", async (c) => {
     if (!response.ok) {
       const error = await response.json().catch(() => ({ message: "Signup failed" }));
       return c.json(
-        { error: error.message || "Could not create account" },
+        { error: error.error || error.message || "Could not create account" },
         response.status
       );
     }
 
     const data = await response.json();
 
-    const firmAccess = await validateFirmAccess(typeof firmRoot === "string" ? firmRoot : undefined, data.email);
+    const firmAccess = await validateFirmAccess(
+      typeof firmRoot === "string" ? firmRoot : undefined,
+      data.email,
+      { bootstrapIfMissing: true }
+    );
     if (!firmAccess.ok) {
       return c.json({ error: firmAccess.reason }, 403);
     }
@@ -299,6 +345,9 @@ auth.post("/signup", async (c) => {
       lastValidated: new Date().toISOString(),
       subscriptionStatus: data.subscriptionStatus,
       expiresAt: data.expiresAt,
+      accountType: data.accountType || "root",
+      ownerEmail: data.ownerEmail || null,
+      maxLicenses: data.maxLicenses || 0,
     };
     saveConfig(config);
 

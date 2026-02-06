@@ -6,8 +6,8 @@ import { homedir } from "os";
 // Electron production sets ELECTRON_FRONTEND_PATH - if present, always production
 // Dev mode is ONLY for running server directly with `bun run`
 const IS_ELECTRON = !!process.env.ELECTRON_FRONTEND_PATH;
-const DEV_MODE = !IS_ELECTRON &&
-  (process.env.DEV_MODE === "true" || process.env.NODE_ENV !== "production");
+// IMPORTANT: require explicit opt-in via DEV_MODE=true.
+const DEV_MODE = !IS_ELECTRON && process.env.DEV_MODE === "true";
 
 // Log auth mode at startup
 console.log(`[auth] Mode: ${DEV_MODE ? "DEV (auth bypassed)" : "PRODUCTION"}`);
@@ -32,6 +32,7 @@ interface Config {
   lastValidated?: string;
   subscriptionStatus?: string;
   expiresAt?: string;
+  accountType?: "root" | "sub_user";
 }
 
 /**
@@ -172,7 +173,8 @@ export async function authMiddleware(c: Context, next: Next) {
   }
 
   // Check if validation is needed
-  if (needsValidation(config)) {
+  const isSubUser = config.accountType === "sub_user";
+  if (isSubUser || needsValidation(config)) {
     const validation = await validateSubscription(config.authToken);
 
     if (validation) {
@@ -189,6 +191,17 @@ export async function authMiddleware(c: Context, next: Next) {
       // Just update the env so the API key is available
       process.env.ANTHROPIC_API_KEY = validation.anthropicApiKey;
     } else {
+      // Sub-users require fresh root-backed validation to continue.
+      if (isSubUser) {
+        return c.json(
+          {
+            error: "reauth_required",
+            reauthRequired: true,
+            message: "Session validation failed. Please sign in again.",
+          },
+          401
+        );
+      }
       // Validation failed - check grace period
       if (!isWithinGracePeriod(config)) {
         return c.json(

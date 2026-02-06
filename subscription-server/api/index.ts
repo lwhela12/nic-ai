@@ -181,9 +181,8 @@ const ADMIN_HTML = `<!DOCTYPE html>
       showAssignKey: null,
       showAddUser: false,
       newUserEmail: '',
-      newUserPassword: '',
       newUserTrialDays: 14,
-      newUserStatus: 'trialing',
+      newUserMaxLicenses: 10,
     };
     function setState(updates) {
       state = { ...state, ...updates };
@@ -283,24 +282,22 @@ const ADMIN_HTML = `<!DOCTYPE html>
       }
     }
     async function createUserAdmin() {
-      if (!state.newUserEmail || !state.newUserPassword) return;
+      if (!state.newUserEmail) return;
       setState({ loading: true, error: null });
       try {
         await apiCall('/v1/admin/users', {
           method: 'POST',
           body: JSON.stringify({
             email: state.newUserEmail,
-            password: state.newUserPassword,
             trialDays: Number(state.newUserTrialDays) || 14,
-            status: state.newUserStatus || 'trialing',
+            maxLicenses: Number(state.newUserMaxLicenses) || 10,
           }),
         });
         setState({
           showAddUser: false,
           newUserEmail: '',
-          newUserPassword: '',
           newUserTrialDays: 14,
-          newUserStatus: 'trialing',
+          newUserMaxLicenses: 10,
           loading: false
         });
         loadData();
@@ -364,13 +361,13 @@ const ADMIN_HTML = `<!DOCTYPE html>
         return;
       }
       const statsHtml = !state.stats ? '<div class="text-brand-500">Loading...</div>' : '<div class="grid grid-cols-2 md:grid-cols-4 gap-4"><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.stats.totalUsers + '</div><div class="text-brand-500">Total Users</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.stats.activeSubscriptions + '</div><div class="text-brand-500">Active Subscriptions</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.stats.activeApiKeys + '</div><div class="text-brand-500">API Keys</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.stats.validationsLast24h + '</div><div class="text-brand-500">Validations (24h)</div></div></div>';
-      const usersHeaderHtml = '<div class="mb-4"><button onclick="setState({showAddUser:true})" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">+ Add User</button></div>';
-      const usersTableHtml = !state.users.length ? '<div class="text-brand-500">No users yet</div>' : '<div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Email</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Status</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Assigned Key</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Expires</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Actions</th></tr></thead><tbody>' + state.users.map(u => '<tr class="border-b border-surface-200 last:border-0"><td class="px-4 py-3 text-brand-900">' + u.email + '</td><td class="px-4 py-3"><span class="inline-flex px-2 py-1 text-xs font-medium rounded-md ' + (u.subscriptionStatus === 'active' ? 'bg-green-50 text-green-700' : u.subscriptionStatus === 'trialing' ? 'bg-accent-50 text-accent-600' : 'bg-red-50 text-red-700') + '">' + u.subscriptionStatus + '</span></td><td class="px-4 py-3 text-brand-500">' + (u.assignedKeyName ? '<span class="text-green-600">' + u.assignedKeyName + '</span>' : '<span class="text-brand-400">Pool</span>') + '</td><td class="px-4 py-3 text-brand-500">' + formatDate(u.trialEndsAt || u.currentPeriodEnd) + '</td><td class="px-4 py-3 space-x-3"><button onclick="viewUser(' + u.id + ')" class="text-sm text-accent-600 hover:text-accent-500">View</button><button onclick="deleteUserAdmin(' + u.id + ')" class="text-sm text-red-600 hover:text-red-500">Delete</button></td></tr>').join('') + '</tbody></table></div>';
+      const usersHeaderHtml = '<div class="mb-4"><button onclick="setState({showAddUser:true})" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">+ Invite User</button></div>';
+      const usersTableHtml = !state.users.length ? '<div class="text-brand-500">No users yet</div>' : '<div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Email</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Type</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Status</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Assigned Key</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Expires</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Actions</th></tr></thead><tbody>' + state.users.map(u => '<tr class="border-b border-surface-200 last:border-0"><td class="px-4 py-3 text-brand-900">' + u.email + '</td><td class="px-4 py-3 text-brand-500">' + (u.accountType === 'sub_user' ? ('Sub User' + (u.ownerEmail ? ' (' + u.ownerEmail + ')' : '')) : ('Root (max ' + (u.maxLicenses || 0) + ')')) + '</td><td class="px-4 py-3"><span class="inline-flex px-2 py-1 text-xs font-medium rounded-md ' + (u.subscriptionStatus === 'active' ? 'bg-green-50 text-green-700' : u.subscriptionStatus === 'trialing' ? 'bg-accent-50 text-accent-600' : 'bg-red-50 text-red-700') + '">' + u.subscriptionStatus + '</span></td><td class="px-4 py-3 text-brand-500">' + (u.assignedKeyName ? '<span class="text-green-600">' + u.assignedKeyName + '</span>' : '<span class="text-brand-400">Pool</span>') + '</td><td class="px-4 py-3 text-brand-500">' + formatDate(u.trialEndsAt || u.currentPeriodEnd) + '</td><td class="px-4 py-3 space-x-3"><button onclick="viewUser(' + u.id + ')" class="text-sm text-accent-600 hover:text-accent-500">View</button><button onclick="deleteUserAdmin(' + u.id + ')" class="text-sm text-red-600 hover:text-red-500">Delete</button></td></tr>').join('') + '</tbody></table></div>';
       const usersHtml = usersHeaderHtml + usersTableHtml;
       const keysHtml = '<div class="mb-4"><button onclick="setState({showAddKey:true})" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">+ Add API Key</button></div>' + (state.apiKeys.length ? '<div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Name</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Status</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Assigned To</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Daily Usage</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Actions</th></tr></thead><tbody>' + state.apiKeys.map(k => '<tr class="border-b border-surface-200 last:border-0 ' + (k.isActive ? (k.assignedUserEmail ? 'bg-green-50/30' : 'bg-amber-50/30') : 'bg-red-50/30') + '"><td class="px-4 py-3 text-brand-900">' + (k.name || 'Unnamed') + '</td><td class="px-4 py-3"><span class="inline-flex px-2 py-1 text-xs font-medium rounded-md ' + (k.isActive ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700') + '">' + (k.isActive ? 'Active' : 'Disabled') + '</span></td><td class="px-4 py-3">' + (k.assignedUserEmail ? '<span class="text-green-600">' + k.assignedUserEmail + '</span>' : '<span class="text-brand-400">Unassigned</span>') + '</td><td class="px-4 py-3 text-brand-500">' + formatTokens(k.dailyUsageTokens || 0) + '</td><td class="px-4 py-3 space-x-2"><button onclick="setState({showAssignKey:' + k.id + '})" class="text-sm text-blue-600 hover:text-blue-500">Assign</button><button onclick="toggleKeyActive(' + k.id + ', ' + k.isActive + ')" class="text-sm text-accent-600 hover:text-accent-500">' + (k.isActive ? 'Disable' : 'Enable') + '</button><button onclick="deleteKey(' + k.id + ')" class="text-sm text-red-600 hover:text-red-500">Delete</button></td></tr>').join('') + '</tbody></table></div>' : '<div class="text-brand-500">No API keys in pool</div>');
       const usageHtml = !state.usage ? '<div class="text-brand-500">Loading usage data...</div>' : '<div class="space-y-6"><div class="grid grid-cols-2 md:grid-cols-4 gap-4"><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + formatTokens(state.usage.summary.last7Days.totalTokens) + '</div><div class="text-brand-500">Tokens (7 days)</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.usage.summary.last7Days.requestCount + '</div><div class="text-brand-500">Requests (7 days)</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + formatTokens(state.usage.summary.last30Days.totalTokens) + '</div><div class="text-brand-500">Tokens (30 days)</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.usage.summary.last30Days.requestCount + '</div><div class="text-brand-500">Requests (30 days)</div></div></div><div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><h3 class="px-4 py-3 font-medium text-brand-700 bg-surface-50 border-b border-surface-200">Usage by User (30 days)</h3><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">User</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Tokens</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Requests</th></tr></thead><tbody>' + (state.usage.byUser || []).filter(u => u.totalTokens > 0).map(u => '<tr class="border-b border-surface-200 last:border-0"><td class="px-4 py-3 text-brand-900">' + u.email + '</td><td class="px-4 py-3 text-brand-500">' + formatTokens(u.totalTokens) + '</td><td class="px-4 py-3 text-brand-500">' + u.requestCount + '</td></tr>').join('') + '</tbody></table></div><div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><h3 class="px-4 py-3 font-medium text-brand-700 bg-surface-50 border-b border-surface-200">Recent Activity</h3><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">User</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Type</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Tokens</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Time</th></tr></thead><tbody>' + (state.usage.recentLogs || []).slice(0, 20).map(l => '<tr class="border-b border-surface-200 last:border-0"><td class="px-4 py-3 text-brand-900">' + l.email + '</td><td class="px-4 py-3 text-brand-500">' + (l.requestType || 'unknown') + '</td><td class="px-4 py-3 text-brand-500">' + formatTokens(l.tokensUsed) + '</td><td class="px-4 py-3 text-brand-500 text-sm">' + formatDateTime(l.loggedAt) + '</td></tr>').join('') + '</tbody></table></div></div>';
       const addKeyModalHtml = state.showAddKey ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">Add API Key</h2><div class="space-y-4"><div><label class="block text-sm font-medium text-brand-700 mb-1">Name (optional)</label><input type="text" id="newKeyName" value="' + state.newKeyName + '" placeholder="e.g., Production Key 1" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Anthropic API Key</label><input type="password" id="newKeyValue" value="' + state.newKeyValue + '" placeholder="sk-ant-api03-..." class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAddKey:false,newKeyName:\\'\\',newKeyValue:\\'\\'})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="addKey()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Add Key</button></div></div></div>' : '';
-      const addUserModalHtml = state.showAddUser ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">Add User</h2><div class="space-y-4"><div><label class="block text-sm font-medium text-brand-700 mb-1">Email</label><input type="email" id="newUserEmail" value="' + state.newUserEmail + '" placeholder="attorney@firm.com" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Initial Password</label><input type="password" id="newUserPassword" value="' + state.newUserPassword + '" placeholder="At least 8 characters" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div class="grid grid-cols-2 gap-3"><div><label class="block text-sm font-medium text-brand-700 mb-1">Status</label><select id="newUserStatus" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="trialing" ' + (state.newUserStatus === 'trialing' ? 'selected' : '') + '>Trialing</option><option value="active" ' + (state.newUserStatus === 'active' ? 'selected' : '') + '>Active</option><option value="expired" ' + (state.newUserStatus === 'expired' ? 'selected' : '') + '>Expired</option></select></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Trial Days</label><input type="number" min="0" id="newUserTrialDays" value="' + state.newUserTrialDays + '" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAddUser:false,newUserEmail:\\'\\',newUserPassword:\\'\\',newUserTrialDays:14,newUserStatus:\\'trialing\\'})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="createUserAdmin()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Create User</button></div></div></div>' : '';
+      const addUserModalHtml = state.showAddUser ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-2">Create Root Invite</h2><p class="text-sm text-brand-500 mb-4">Create signup eligibility by email for a root account. Team members are invited later by that root user.</p><div class="space-y-4"><div><label class="block text-sm font-medium text-brand-700 mb-1">Email</label><input type="email" id="newUserEmail" value="' + state.newUserEmail + '" placeholder="owner@firm.com" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div class="grid grid-cols-2 gap-3"><div><label class="block text-sm font-medium text-brand-700 mb-1">Trial Days</label><input type="number" min="0" id="newUserTrialDays" value="' + state.newUserTrialDays + '" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Max Licenses</label><input type="number" min="1" id="newUserMaxLicenses" value="' + state.newUserMaxLicenses + '" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAddUser:false,newUserEmail:\\'\\',newUserTrialDays:14,newUserMaxLicenses:10})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="createUserAdmin()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Create Invite</button></div></div></div>' : '';
       const userModalHtml = state.showUserModal && state.selectedUser ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-lg p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">' + state.selectedUser.email + '</h2><div class="space-y-4"><div class="grid grid-cols-2 gap-4"><div><div class="text-sm text-brand-500">Status</div><div class="font-medium">' + state.selectedUser.subscriptionStatus + '</div></div><div><div class="text-sm text-brand-500">Created</div><div class="font-medium">' + formatDate(state.selectedUser.createdAt) + '</div></div><div><div class="text-sm text-brand-500">Expires</div><div class="font-medium">' + formatDate(state.selectedUser.trialEndsAt || state.selectedUser.currentPeriodEnd) + '</div></div><div><div class="text-sm text-brand-500">Assigned Key</div><div class="font-medium">' + (state.selectedUser.assignedKey ? state.selectedUser.assignedKey.name : 'Pool') + '</div></div></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Usage (Last 30 Days)</div><div class="grid grid-cols-2 gap-4"><div class="bg-surface-50 rounded-lg p-3"><div class="text-xl font-semibold text-brand-900">' + formatTokens(state.selectedUser.usage?.last30Days?.totalTokens || 0) + '</div><div class="text-sm text-brand-500">Tokens</div></div><div class="bg-surface-50 rounded-lg p-3"><div class="text-xl font-semibold text-brand-900">' + (state.selectedUser.usage?.last30Days?.requestCount || 0) + '</div><div class="text-sm text-brand-500">Requests</div></div></div></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Assign API Key</div><select id="userKeySelect" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="">Use Pool (Rotation)</option>' + state.apiKeys.filter(k => k.isActive).map(k => '<option value="' + k.id + '" ' + (state.selectedUser.assignedKey?.id === k.id ? 'selected' : '') + '>' + (k.name || 'Unnamed') + (k.assignedUserEmail && k.assignedToUserId !== state.selectedUser.id ? ' (assigned to ' + k.assignedUserEmail + ')' : '') + '</option>').join('') + '</select></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Actions</div><div class="flex gap-2 flex-wrap"><button onclick="extendTrial(' + state.selectedUser.id + ', 7)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+7 Days</button><button onclick="extendTrial(' + state.selectedUser.id + ', 14)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+14 Days</button><button onclick="extendTrial(' + state.selectedUser.id + ', 30)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+30 Days</button><button onclick="updateUserSubscription(' + state.selectedUser.id + ', {status: \\'active\\'})" class="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-sm hover:bg-blue-100">Set Active</button><button onclick="updateUserSubscription(' + state.selectedUser.id + ', {status: \\'expired\\'})" class="px-3 py-1.5 bg-red-50 text-red-700 rounded-lg text-sm hover:bg-red-100">Expire</button></div></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showUserModal:false,selectedUser:null})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Close</button><button onclick="(function(){ var sel = document.getElementById(\\'userKeySelect\\'); assignKeyToUser(state.selectedUser.assignedKey?.id || null, null); var keyId = sel.value ? parseInt(sel.value) : null; if(keyId) assignKeyToUser(keyId, state.selectedUser.id); else if(state.selectedUser.assignedKey) assignKeyToUser(state.selectedUser.assignedKey.id, null); viewUser(state.selectedUser.id); })()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Save Key Assignment</button></div></div></div>' : '';
       const assignKeyModalHtml = state.showAssignKey ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">Assign Key to User</h2><div class="space-y-4"><select id="assignUserSelect" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="">Unassigned (Pool)</option>' + state.users.map(u => '<option value="' + u.id + '">' + u.email + '</option>').join('') + '</select></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAssignKey:null})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="(function(){ var sel = document.getElementById(\\'assignUserSelect\\'); assignKeyToUser(state.showAssignKey, sel.value ? parseInt(sel.value) : null); })()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Assign</button></div></div></div>' : '';
       app.innerHTML = '<div class="max-w-6xl mx-auto p-6"><div class="flex justify-between items-center mb-8"><h1 class="text-2xl font-semibold text-brand-900">Claude PI Admin</h1><button onclick="logout()" class="text-brand-500 hover:text-brand-700">Sign Out</button></div>' + (state.error ? '<div class="bg-red-50 text-red-700 px-4 py-3 rounded-lg mb-4">' + state.error + ' <button onclick="setState({error:null})" class="ml-2 underline">Dismiss</button></div>' : '') + '<div class="flex gap-2 mb-6"><button onclick="setState({tab:\\'stats\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'stats' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Stats</button><button onclick="setState({tab:\\'users\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'users' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Users</button><button onclick="setState({tab:\\'keys\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'keys' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">API Keys</button><button onclick="setState({tab:\\'usage\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'usage' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Usage</button></div>' + (state.tab === 'stats' ? statsHtml : '') + (state.tab === 'users' ? usersHtml : '') + (state.tab === 'keys' ? keysHtml : '') + (state.tab === 'usage' ? usageHtml : '') + '<div class="mt-8 pt-6 border-t border-surface-200"><button onclick="runMaintenance()" ' + (state.loading ? 'disabled' : '') + ' class="px-4 py-2 bg-accent-600 text-white rounded-lg hover:bg-accent-500 disabled:opacity-50">' + (state.loading ? 'Running...' : 'Run Maintenance') + '</button><span class="ml-3 text-sm text-brand-500">Cleans expired tokens & resets daily usage counters</span></div></div>' + addKeyModalHtml + addUserModalHtml + userModalHtml + assignKeyModalHtml;
@@ -380,15 +377,13 @@ const ADMIN_HTML = `<!DOCTYPE html>
       const nameInput = document.getElementById('newKeyName');
       const valueInput = document.getElementById('newKeyValue');
       const userEmailInput = document.getElementById('newUserEmail');
-      const userPasswordInput = document.getElementById('newUserPassword');
       const userTrialDaysInput = document.getElementById('newUserTrialDays');
-      const userStatusInput = document.getElementById('newUserStatus');
+      const userMaxLicensesInput = document.getElementById('newUserMaxLicenses');
       if (nameInput && !nameInput.dataset.bound) { nameInput.dataset.bound = 'true'; nameInput.addEventListener('input', (e) => { state.newKeyName = e.target.value; }); }
       if (valueInput && !valueInput.dataset.bound) { valueInput.dataset.bound = 'true'; valueInput.addEventListener('input', (e) => { state.newKeyValue = e.target.value; }); }
       if (userEmailInput && !userEmailInput.dataset.bound) { userEmailInput.dataset.bound = 'true'; userEmailInput.addEventListener('input', (e) => { state.newUserEmail = e.target.value; }); }
-      if (userPasswordInput && !userPasswordInput.dataset.bound) { userPasswordInput.dataset.bound = 'true'; userPasswordInput.addEventListener('input', (e) => { state.newUserPassword = e.target.value; }); }
       if (userTrialDaysInput && !userTrialDaysInput.dataset.bound) { userTrialDaysInput.dataset.bound = 'true'; userTrialDaysInput.addEventListener('input', (e) => { state.newUserTrialDays = Number(e.target.value || 0); }); }
-      if (userStatusInput && !userStatusInput.dataset.bound) { userStatusInput.dataset.bound = 'true'; userStatusInput.addEventListener('change', (e) => { state.newUserStatus = e.target.value; }); }
+      if (userMaxLicensesInput && !userMaxLicensesInput.dataset.bound) { userMaxLicensesInput.dataset.bound = 'true'; userMaxLicensesInput.addEventListener('input', (e) => { state.newUserMaxLicenses = Number(e.target.value || 0); }); }
     });
     observer.observe(document.getElementById('app'), { childList: true, subtree: true });
   </script>
@@ -403,6 +398,8 @@ interface User {
   id: number;
   email: string;
   password_hash: string;
+  owner_user_id: number | null;
+  max_licenses: number;
   created_at: string;
   updated_at: string;
 }
@@ -441,6 +438,16 @@ interface ApiKey {
   created_at: string;
 }
 
+interface SignupInvite {
+  id: number;
+  email: string;
+  trial_days: number;
+  owner_user_id: number | null;
+  max_licenses: number | null;
+  created_at: string;
+  claimed_at: string | null;
+}
+
 // ============================================================================
 // Database Schema & Init
 // ============================================================================
@@ -453,10 +460,14 @@ async function initDatabase(): Promise<void> {
       id SERIAL PRIMARY KEY,
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
+      owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      max_licenses INTEGER NOT NULL DEFAULT 10,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL`;
+  await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS max_licenses INTEGER NOT NULL DEFAULT 10`;
 
   await sql`
     CREATE TABLE IF NOT EXISTS subscriptions (
@@ -521,6 +532,20 @@ async function initDatabase(): Promise<void> {
   `;
 
   await sql`
+    CREATE TABLE IF NOT EXISTS signup_invites (
+      id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      trial_days INTEGER NOT NULL DEFAULT 14,
+      owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      max_licenses INTEGER,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      claimed_at TIMESTAMPTZ
+    )
+  `;
+  await sql`ALTER TABLE signup_invites ADD COLUMN IF NOT EXISTS owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL`;
+  await sql`ALTER TABLE signup_invites ADD COLUMN IF NOT EXISTS max_licenses INTEGER`;
+
+  await sql`
     CREATE TABLE IF NOT EXISTS schema_version (
       version INTEGER PRIMARY KEY
     )
@@ -539,6 +564,9 @@ async function initDatabase(): Promise<void> {
   await sql`CREATE INDEX IF NOT EXISTS idx_api_key_pool_active ON api_key_pool(is_active)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_daily_validations_user ON daily_validations(user_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_usage_logs_user ON usage_logs(user_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_signup_invites_email ON signup_invites(email)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_users_owner_user_id ON users(owner_user_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_signup_invites_owner_user_id ON signup_invites(owner_user_id)`;
 }
 
 let initialized = false;
@@ -553,11 +581,17 @@ async function ensureDatabase(): Promise<void> {
 // Database Operations
 // ============================================================================
 
-async function createUser(email: string, passwordHash: string): Promise<User | null> {
+async function createUser(
+  email: string,
+  passwordHash: string,
+  options?: { ownerUserId?: number | null; maxLicenses?: number }
+): Promise<User | null> {
   try {
+    const ownerUserId = options?.ownerUserId ?? null;
+    const maxLicenses = options?.maxLicenses ?? 10;
     const { rows } = await sql`
-      INSERT INTO users (email, password_hash)
-      VALUES (${email.toLowerCase()}, ${passwordHash})
+      INSERT INTO users (email, password_hash, owner_user_id, max_licenses)
+      VALUES (${email.toLowerCase()}, ${passwordHash}, ${ownerUserId}, ${maxLicenses})
       RETURNING *
     `;
     return rows[0] as User || null;
@@ -597,6 +631,70 @@ async function getSubscriptionByUserId(userId: number): Promise<Subscription | n
 async function getSubscriptionByStripeCustomerId(customerId: string): Promise<Subscription | null> {
   const { rows } = await sql`SELECT * FROM subscriptions WHERE stripe_customer_id = ${customerId}`;
   return rows[0] as Subscription || null;
+}
+
+async function createOrRefreshSignupInvite(
+  email: string,
+  trialDays: number = 14,
+  options?: { ownerUserId?: number | null; maxLicenses?: number | null }
+): Promise<SignupInvite | null> {
+  const normalized = email.toLowerCase();
+  const safeTrialDays = Math.max(0, Math.floor(trialDays));
+  const ownerUserId = options?.ownerUserId ?? null;
+  const maxLicenses = options?.maxLicenses ?? null;
+  const { rows } = await sql`
+    INSERT INTO signup_invites (email, trial_days, owner_user_id, max_licenses, claimed_at)
+    VALUES (${normalized}, ${safeTrialDays}, ${ownerUserId}, ${maxLicenses}, NULL)
+    ON CONFLICT (email) DO UPDATE SET
+      trial_days = EXCLUDED.trial_days,
+      owner_user_id = EXCLUDED.owner_user_id,
+      max_licenses = EXCLUDED.max_licenses,
+      claimed_at = NULL
+    RETURNING *
+  `;
+  return rows[0] as SignupInvite || null;
+}
+
+async function getActiveSignupInvite(email: string): Promise<SignupInvite | null> {
+  const { rows } = await sql`
+    SELECT * FROM signup_invites
+    WHERE email = ${email.toLowerCase()} AND claimed_at IS NULL
+    LIMIT 1
+  `;
+  return rows[0] as SignupInvite || null;
+}
+
+async function claimSignupInvite(email: string): Promise<void> {
+  await sql`
+    UPDATE signup_invites
+    SET claimed_at = NOW()
+    WHERE email = ${email.toLowerCase()} AND claimed_at IS NULL
+  `;
+}
+
+async function getOwnerForUser(user: User): Promise<User> {
+  if (!user.owner_user_id) return user;
+  const owner = await getUserById(user.owner_user_id);
+  return owner || user;
+}
+
+async function countSubUsers(ownerUserId: number): Promise<number> {
+  const { rows } = await sql`
+    SELECT COUNT(*)::int AS count
+    FROM users
+    WHERE owner_user_id = ${ownerUserId}
+  `;
+  return Number(rows[0]?.count || 0);
+}
+
+async function countPendingSubUserInvites(ownerUserId: number): Promise<number> {
+  const { rows } = await sql`
+    SELECT COUNT(*)::int AS count
+    FROM signup_invites
+    WHERE owner_user_id = ${ownerUserId}
+      AND claimed_at IS NULL
+  `;
+  return Number(rows[0]?.count || 0);
 }
 
 async function updateSubscription(
@@ -817,7 +915,8 @@ app.get("/health", (c) =>
 app.post("/v1/auth/signup", async (c) => {
   await ensureDatabase();
   const body = await c.req.json();
-  const { email, password } = body;
+  const email = String(body.email || "").toLowerCase().trim();
+  const password = String(body.password || "");
 
   if (!email || !password) {
     return c.json({ error: "Email and password are required" }, 400);
@@ -837,32 +936,71 @@ app.post("/v1/auth/signup", async (c) => {
     return c.json({ error: "An account with this email already exists" }, 409);
   }
 
+  const invite = await getActiveSignupInvite(email);
+  if (!invite) {
+    return c.json({ error: "invite_required" }, 403);
+  }
+
+  const ownerUserId = invite.owner_user_id ?? null;
+  if (ownerUserId) {
+    const owner = await getUserById(ownerUserId);
+    if (!owner) {
+      return c.json({ error: "owner_not_found" }, 403);
+    }
+    const ownerSubCount = await countSubUsers(ownerUserId);
+    if (ownerSubCount >= (owner.max_licenses || 0)) {
+      return c.json({ error: "license_limit_reached" }, 403);
+    }
+  }
+
   const passwordHash = hashPassword(password);
-  const user = await createUser(email, passwordHash);
+  const user = await createUser(email, passwordHash, {
+    ownerUserId,
+    maxLicenses: invite.max_licenses ?? 10,
+  });
 
   if (!user) {
     return c.json({ error: "Failed to create account" }, 500);
   }
 
-  const subscription = await createSubscription(user.id, 14);
+  const subscription = await createSubscription(user.id, invite.trial_days || 14);
 
   if (!subscription) {
     return c.json({ error: "Failed to create subscription" }, 500);
   }
 
+  if (ownerUserId) {
+    const ownerSub = await getSubscriptionByUserId(ownerUserId);
+    if (!ownerSub || !isSubscriptionActive(ownerSub)) {
+      return c.json({ error: "owner_subscription_inactive" }, 403);
+    }
+    await updateSubscription(user.id, {
+      status: ownerSub.status,
+      trial_ends_at: ownerSub.trial_ends_at,
+      current_period_start: ownerSub.current_period_start,
+      current_period_end: ownerSub.current_period_end,
+      stripe_customer_id: ownerSub.stripe_customer_id,
+      stripe_subscription_id: ownerSub.stripe_subscription_id,
+    });
+  }
+
   const token = generateToken();
   const tokenHash = hashToken(token);
   await createAuthToken(user.id, tokenHash, 30);
+  await claimSignupInvite(email);
 
   const apiKey = await getApiKeyForUser(user.id);
   const decryptedKey = apiKey ? decryptApiKey(apiKey.key_encrypted) : null;
 
+  const ownerUser = ownerUserId ? await getUserById(ownerUserId) : null;
   return c.json({
     authToken: token,
     email: user.email,
     anthropicApiKey: decryptedKey,
-    subscriptionStatus: subscription.status,
-    expiresAt: getSubscriptionExpiry(subscription),
+    subscriptionStatus: ownerUserId ? ((await getSubscriptionByUserId(ownerUserId))?.status || subscription.status) : subscription.status,
+    expiresAt: ownerUserId ? getSubscriptionExpiry((await getSubscriptionByUserId(ownerUserId)) || subscription) : getSubscriptionExpiry(subscription),
+    accountType: ownerUserId ? "sub_user" : "root",
+    ownerEmail: ownerUser?.email || null,
   });
 });
 
@@ -885,7 +1023,8 @@ app.post("/v1/auth/login", async (c) => {
     return c.json({ error: "Invalid email or password" }, 401);
   }
 
-  const subscription = await getSubscriptionByUserId(user.id);
+  const owner = await getOwnerForUser(user);
+  const subscription = await getSubscriptionByUserId(owner.id);
   if (!subscription) {
     return c.json({ error: "No subscription found" }, 403);
   }
@@ -918,6 +1057,9 @@ app.post("/v1/auth/login", async (c) => {
     anthropicApiKey: decryptedKey,
     subscriptionStatus: subscription.status,
     expiresAt: getSubscriptionExpiry(subscription),
+    accountType: user.owner_user_id ? "sub_user" : "root",
+    ownerEmail: user.owner_user_id ? owner.email : null,
+    maxLicenses: owner.max_licenses,
   });
 });
 
@@ -938,7 +1080,12 @@ app.post("/v1/auth/validate", async (c) => {
 
   await updateTokenLastUsed(authToken.id);
 
-  const subscription = await getSubscriptionByUserId(authToken.user_id);
+  const authedUser = await getUserById(authToken.user_id);
+  if (!authedUser) {
+    return c.json({ error: "User not found" }, 401);
+  }
+  const owner = await getOwnerForUser(authedUser);
+  const subscription = await getSubscriptionByUserId(owner.id);
   if (!subscription) {
     return c.json({ error: "No subscription found" }, 403);
   }
@@ -964,6 +1111,9 @@ app.post("/v1/auth/validate", async (c) => {
     anthropicApiKey: decryptedKey,
     subscriptionStatus: subscription.status,
     expiresAt: getSubscriptionExpiry(subscription),
+    accountType: authedUser.owner_user_id ? "sub_user" : "root",
+    ownerEmail: authedUser.owner_user_id ? owner.email : null,
+    maxLicenses: owner.max_licenses,
   });
 });
 
@@ -1159,6 +1309,66 @@ app.get("/v1/subscriptions/status", async (c) => {
   });
 });
 
+app.post("/v1/account/invite-subuser", async (c) => {
+  await ensureDatabase();
+  const user = await getUserFromAuth(c.req.header("Authorization"));
+  if (!user) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+  if (user.owner_user_id) {
+    return c.json({ error: "only_root_account_can_invite" }, 403);
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const email = String(body.email || "").trim().toLowerCase();
+  const trialDaysRaw = Number(body.trialDays);
+  const trialDays = Number.isFinite(trialDaysRaw) ? Math.max(0, Math.floor(trialDaysRaw)) : 14;
+
+  if (!email) {
+    return c.json({ error: "email_required" }, 400);
+  }
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return c.json({ error: "invalid_email" }, 400);
+  }
+  const rootDomain = user.email.split("@")[1]?.toLowerCase() || "";
+  const inviteDomain = email.split("@")[1]?.toLowerCase() || "";
+  if (!rootDomain || rootDomain !== inviteDomain) {
+    return c.json({ error: "domain_mismatch" }, 403);
+  }
+
+  const existing = await getUserByEmail(email);
+  if (existing) {
+    if (existing.owner_user_id === user.id) {
+      return c.json({ error: "already_member" }, 409);
+    }
+    return c.json({ error: "email_already_registered" }, 409);
+  }
+
+  const subCount = await countSubUsers(user.id);
+  const pendingInvites = await countPendingSubUserInvites(user.id);
+  if (subCount + pendingInvites >= (user.max_licenses || 0)) {
+    return c.json({ error: "license_limit_reached" }, 403);
+  }
+
+  const invite = await createOrRefreshSignupInvite(email, trialDays, {
+    ownerUserId: user.id,
+  });
+  if (!invite) {
+    return c.json({ error: "failed_to_create_invite" }, 500);
+  }
+  return c.json({
+    success: true,
+    invite: {
+      id: invite.id,
+      email: invite.email,
+      trialDays: invite.trial_days,
+      ownerUserId: invite.owner_user_id,
+      createdAt: invite.created_at,
+    },
+  });
+});
+
 // ============================================================================
 // Admin Routes
 // ============================================================================
@@ -1286,12 +1496,14 @@ app.get("/v1/admin/users/:id", adminAuth, async (c) => {
   const id = parseInt(c.req.param("id"));
 
   const { rows } = await sql`
-    SELECT u.id, u.email, u.created_at,
-           s.status as subscription_status, s.trial_ends_at, s.current_period_end,
-           s.stripe_customer_id, s.stripe_subscription_id,
+    SELECT u.id, u.email, u.created_at, u.owner_user_id, u.max_licenses,
+           owner.email as owner_email,
+           s_owner.status as subscription_status, s_owner.trial_ends_at, s_owner.current_period_end,
+           s_owner.stripe_customer_id, s_owner.stripe_subscription_id,
            k.id as assigned_key_id, k.key_name as assigned_key_name
     FROM users u
-    LEFT JOIN subscriptions s ON u.id = s.user_id
+    LEFT JOIN users owner ON u.owner_user_id = owner.id
+    LEFT JOIN subscriptions s_owner ON COALESCE(u.owner_user_id, u.id) = s_owner.user_id
     LEFT JOIN api_key_pool k ON k.assigned_to_user_id = u.id AND k.is_active = TRUE
     WHERE u.id = ${id}
   `;
@@ -1314,6 +1526,10 @@ app.get("/v1/admin/users/:id", adminAuth, async (c) => {
   return c.json({
     id: u.id,
     email: u.email,
+    accountType: u.owner_user_id ? "sub_user" : "root",
+    ownerUserId: u.owner_user_id,
+    ownerEmail: u.owner_email || null,
+    maxLicenses: u.max_licenses,
     createdAt: u.created_at,
     subscriptionStatus: u.subscription_status || "none",
     trialEndsAt: u.trial_ends_at,
@@ -1478,16 +1694,13 @@ app.post("/v1/admin/users", adminAuth, async (c) => {
   await ensureDatabase();
   const body = await c.req.json().catch(() => ({}));
   const email = String(body.email || "").trim().toLowerCase();
-  const password = String(body.password || "");
-  const requestedStatus = String(body.status || "trialing");
   const trialDaysRaw = Number(body.trialDays);
+  const maxLicensesRaw = Number(body.maxLicenses);
   const trialDays = Number.isFinite(trialDaysRaw) ? Math.max(0, Math.floor(trialDaysRaw)) : 14;
+  const maxLicenses = Number.isFinite(maxLicensesRaw) ? Math.max(1, Math.floor(maxLicensesRaw)) : 10;
 
-  if (!email || !password) {
-    return c.json({ error: "Email and password are required" }, 400);
-  }
-  if (password.length < 8) {
-    return c.json({ error: "Password must be at least 8 characters" }, 400);
+  if (!email) {
+    return c.json({ error: "Email is required" }, 400);
   }
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) {
@@ -1499,32 +1712,20 @@ app.post("/v1/admin/users", adminAuth, async (c) => {
     return c.json({ error: "An account with this email already exists" }, 409);
   }
 
-  const user = await createUser(email, hashPassword(password));
-  if (!user) {
-    return c.json({ error: "Failed to create user" }, 500);
+  const invite = await createOrRefreshSignupInvite(email, trialDays, {
+    ownerUserId: null,
+    maxLicenses,
+  });
+  if (!invite) {
+    return c.json({ error: "Failed to create invite" }, 500);
   }
-
-  const subscription = await createSubscription(user.id, trialDays);
-  if (!subscription) {
-    return c.json({ error: "Failed to create subscription" }, 500);
-  }
-
-  if (requestedStatus && requestedStatus !== "trialing") {
-    const status = ["active", "expired", "canceled", "past_due", "unpaid"].includes(requestedStatus)
-      ? requestedStatus
-      : "trialing";
-    await updateSubscription(user.id, { status: status as any });
-  }
-
-  const latest = await getSubscriptionByUserId(user.id);
   return c.json({
-    user: {
-      id: user.id,
-      email: user.email,
-      createdAt: user.created_at,
-      subscriptionStatus: latest?.status || "none",
-      trialEndsAt: latest?.trial_ends_at || null,
-      currentPeriodEnd: latest?.current_period_end || null,
+    invite: {
+      id: invite.id,
+      email: invite.email,
+      trialDays: invite.trial_days,
+      maxLicenses: invite.max_licenses,
+      createdAt: invite.created_at,
     }
   });
 });
@@ -1552,12 +1753,14 @@ app.delete("/v1/admin/users/:id", adminAuth, async (c) => {
 app.get("/v1/admin/users", adminAuth, async (c) => {
   await ensureDatabase();
   const { rows } = await sql`
-    SELECT u.id, u.email, u.created_at,
-           s.status as subscription_status, s.trial_ends_at, s.current_period_end,
-           s.stripe_customer_id, s.stripe_subscription_id,
+    SELECT u.id, u.email, u.created_at, u.owner_user_id, u.max_licenses,
+           owner.email as owner_email,
+           s_owner.status as subscription_status, s_owner.trial_ends_at, s_owner.current_period_end,
+           s_owner.stripe_customer_id, s_owner.stripe_subscription_id,
            k.id as assigned_key_id, k.key_name as assigned_key_name
     FROM users u
-    LEFT JOIN subscriptions s ON u.id = s.user_id
+    LEFT JOIN users owner ON u.owner_user_id = owner.id
+    LEFT JOIN subscriptions s_owner ON COALESCE(u.owner_user_id, u.id) = s_owner.user_id
     LEFT JOIN api_key_pool k ON k.assigned_to_user_id = u.id AND k.is_active = TRUE
     ORDER BY u.created_at DESC
   `;
@@ -1566,6 +1769,10 @@ app.get("/v1/admin/users", adminAuth, async (c) => {
     users: rows.map((u: any) => ({
       id: u.id,
       email: u.email,
+      accountType: u.owner_user_id ? "sub_user" : "root",
+      ownerUserId: u.owner_user_id,
+      ownerEmail: u.owner_email || null,
+      maxLicenses: u.max_licenses,
       createdAt: u.created_at,
       subscriptionStatus: u.subscription_status || "none",
       trialEndsAt: u.trial_ends_at,
@@ -1582,7 +1789,11 @@ app.get("/v1/admin/stats", adminAuth, async (c) => {
 
   const { rows: [userCount] } = await sql`SELECT COUNT(*) as count FROM users`;
   const { rows: [activeSubCount] } = await sql`
-    SELECT COUNT(*) as count FROM subscriptions WHERE status IN ('active', 'trialing')
+    SELECT COUNT(*) as count
+    FROM subscriptions s
+    JOIN users u ON s.user_id = u.id
+    WHERE u.owner_user_id IS NULL
+      AND s.status IN ('active', 'trialing')
   `;
   const { rows: [apiKeyCount] } = await sql`
     SELECT COUNT(*) as count FROM api_key_pool WHERE is_active = TRUE
