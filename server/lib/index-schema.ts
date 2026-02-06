@@ -202,6 +202,12 @@ export const RelatedCaseSchema = z.object({
   dateOfInjury: z.string().optional(), // For DOI siblings: injury date from folder name
 });
 
+export const AssignmentSchema = z.object({
+  userId: z.string(),
+  assignedAt: z.string(),
+  assignedBy: z.string(),
+});
+
 // =============================================================================
 // DOI CONTAINER SCHEMA (for multi-injury WC clients)
 // =============================================================================
@@ -282,6 +288,7 @@ export const DocumentIndexSchema = z.object({
   parent_case: LinkedCaseSchema.optional(),
   related_cases: z.array(RelatedCaseSchema).optional(),
   is_subcase: z.boolean().optional(),
+  assignments: z.array(AssignmentSchema).optional(),
 
   // DOI container relationships (for WC multi-injury clients)
   container: z.object({
@@ -1372,6 +1379,25 @@ export function normalizeIndex(raw: unknown, practiceArea?: string): DocumentInd
   }
   if (typeof input.is_subcase === "boolean") {
     normalized.is_subcase = input.is_subcase;
+  }
+
+  if (Array.isArray(input.assignments) && input.assignments.length > 0) {
+    const assignments = input.assignments
+      .filter((assignment): assignment is { userId: string; assignedAt: string; assignedBy: string } =>
+        !!assignment &&
+        typeof assignment === "object" &&
+        typeof (assignment as any).userId === "string" &&
+        typeof (assignment as any).assignedAt === "string" &&
+        typeof (assignment as any).assignedBy === "string"
+      )
+      .map((assignment) => ({
+        userId: assignment.userId,
+        assignedAt: assignment.assignedAt,
+        assignedBy: assignment.assignedBy,
+      }));
+    if (assignments.length > 0) {
+      normalized.assignments = assignments;
+    }
   }
 
   // DOI container relationships

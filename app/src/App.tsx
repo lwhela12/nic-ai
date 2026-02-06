@@ -62,6 +62,7 @@ interface TeamContext {
     canManageTeam: boolean
     canAssignCases: boolean
     canViewAllCases: boolean
+    canEditKnowledge: boolean
   }
 }
 
@@ -70,6 +71,7 @@ interface AuthState {
   email?: string
   subscriptionStatus?: string
   devMode?: boolean
+  teamError?: string
   team?: TeamContext
 }
 
@@ -275,10 +277,33 @@ function App() {
   const [knowledgeInitLoading, setKnowledgeInitLoading] = useState(false)
   const [knowledgeVersion, setKnowledgeVersion] = useState(0) // Increments after init to trigger re-fetch
 
+  const checkAuthStatus = useCallback(async () => {
+    const endpoint = firmRoot
+      ? `${API_URL}/api/auth/status?firmRoot=${encodeURIComponent(firmRoot)}`
+      : `${API_URL}/api/auth/status`
+
+    try {
+      const res = await fetch(endpoint)
+      if (res.ok) {
+        const data = await res.json()
+        setAuthState(data)
+      } else {
+        setAuthState({ authenticated: false })
+      }
+    } catch {
+      setAuthState({ authenticated: false })
+    }
+    setAuthChecked(true)
+  }, [firmRoot])
+
   const loadTodos = useCallback(async () => {
     if (!firmRoot) return
     try {
       const res = await fetch(`${API_URL}/api/firm/todos?root=${encodeURIComponent(firmRoot)}`)
+      if (res.status === 401) {
+        setAuthState({ authenticated: false })
+        return
+      }
       if (res.ok) {
         const data = await res.json()
         setTodos(data.todos || [])
@@ -421,6 +446,10 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ root: firmRoot, templateId }),
       })
+      if (res.status === 401) {
+        setAuthState({ authenticated: false })
+        return
+      }
       if (res.ok) {
         setShowKnowledgeInit(false)
         setKnowledgeVersion(v => v + 1) // Trigger FirmDashboard to re-fetch knowledge
@@ -434,29 +463,27 @@ function App() {
 
   // Check auth status on mount
   useEffect(() => {
-    const checkAuth = async () => {
-      // In dev mode, skip auth check
-      if (DEV_MODE) {
-        setAuthState({ authenticated: true, devMode: true, email: 'dev@localhost' })
-        setAuthChecked(true)
-        return
-      }
+    checkAuthStatus()
+  }, [checkAuthStatus])
 
-      try {
-        const res = await fetch(`${API_URL}/api/auth/status`)
-        if (res.ok) {
-          const data = await res.json()
-          setAuthState(data)
-        } else {
-          setAuthState({ authenticated: false })
-        }
-      } catch {
-        setAuthState({ authenticated: false })
-      }
-      setAuthChecked(true)
+  // Background auth checks to ensure reauth flow is triggered before stale sessions break the app
+  useEffect(() => {
+    if (DEV_MODE) return
+
+    const interval = window.setInterval(() => {
+      checkAuthStatus()
+    }, 5 * 60 * 1000)
+
+    const onFocus = () => {
+      checkAuthStatus()
     }
-    checkAuth()
-  }, [])
+    window.addEventListener('focus', onFocus)
+
+    return () => {
+      window.clearInterval(interval)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [checkAuthStatus])
 
   // Save firm root and practice area to localStorage and check for knowledge base
   useEffect(() => {
@@ -467,13 +494,24 @@ function App() {
       // Check if knowledge base exists for this firm root
       fetch(`${API_URL}/api/knowledge/manifest?root=${encodeURIComponent(firmRoot)}`)
         .then(res => {
+          if (res.status === 401) {
+            setAuthState({ authenticated: false })
+            return
+          }
           if (!res.ok) {
             // No knowledge — fetch templates and show init modal
             return fetch(`${API_URL}/api/knowledge/templates`)
-              .then(r => r.json())
+              .then(r => {
+                if (r.status === 401) {
+                  setAuthState({ authenticated: false })
+                  return []
+                }
+                return r.json()
+              })
               .then(data => {
-                setKnowledgeTemplates(data)
-                setShowKnowledgeInit(true)
+                const templates = Array.isArray(data) ? data : []
+                setKnowledgeTemplates(templates)
+                setShowKnowledgeInit(templates.length > 0)
               })
           }
           // Knowledge exists — nothing to do
@@ -481,16 +519,9 @@ function App() {
         .catch(() => {})
 
       // Reload auth status with team context for this firm root
-      if (authState?.authenticated && authState?.email) {
-        fetch(`${API_URL}/api/auth/status?firmRoot=${encodeURIComponent(firmRoot)}`)
-          .then(res => res.ok ? res.json() : null)
-          .then(data => {
-            if (data) setAuthState(data)
-          })
-          .catch(() => {})
-      }
+      checkAuthStatus()
     }
-  }, [firmRoot, practiceArea, authState?.authenticated, authState?.email])
+  }, [firmRoot, practiceArea, checkAuthStatus])
 
   const handleShowFile = useCallback((filePath: string) => {
     if (!caseFolder) return
@@ -543,6 +574,7 @@ function App() {
       email,
       subscriptionStatus,
     })
+    checkAuthStatus()
   }
 
   // Show loading while checking auth
@@ -554,9 +586,12 @@ function App() {
     )
   }
 
-  // Show login screen if not authenticated (and not in dev mode)
-  if (!DEV_MODE && (!authState || !authState.authenticated)) {
-    return <Login apiUrl={API_URL} onLoginSuccess={handleLoginSuccess} />
+  // Show login screen if not authenticated
+  if (!authState || !authState.authenticated) {
+    const inviteError = authState?.teamError === 'invite_required'
+      ? 'Your email does not have an active invite for this firm.'
+      : undefined
+    return <Login apiUrl={API_URL} onLoginSuccess={handleLoginSuccess} initialError={inviteError} firmRoot={firmRoot} />
   }
 
   const handleCaseSelect = (folder: string) => {
@@ -950,7 +985,7 @@ function App() {
             Choose a practice area to initialize the knowledge base for this folder. You can customize sections after setup.
           </p>
           <div className="space-y-3">
-            {knowledgeTemplates.map(t => (
+            {(Array.isArray(knowledgeTemplates) ? knowledgeTemplates : []).map(t => (
               <button
                 key={t.id}
                 onClick={() => handleKnowledgeInit(t.id)}

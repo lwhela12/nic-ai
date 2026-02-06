@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "bun run --watch index.ts",
-    "start": "bun run index.ts"
+    "start": "bun run index.ts",
+    "test": "bun test tests"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.12",

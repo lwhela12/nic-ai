@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { readdir, stat, readFile, writeFile, mkdir } from "fs/promises";
 import { join, dirname } from "path";
 import { homedir } from "os";
+import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
 
 const app = new Hono();
 
@@ -37,6 +38,11 @@ app.get("/cases", async (c) => {
     return c.json({ error: "dir query param required" }, 400);
   }
 
+  const access = await requireFirmAccess(c, baseDir);
+  if (!access.ok) {
+    return access.response;
+  }
+
   try {
     const entries = await readdir(baseDir, { withFileTypes: true });
     const folders = entries
@@ -60,6 +66,11 @@ app.get("/index", async (c) => {
     return c.json({ error: "case query param required" }, 400);
   }
 
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
   const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
 
   try {
@@ -76,6 +87,11 @@ app.get("/index-status", async (c) => {
 
   if (!caseFolder) {
     return c.json({ error: "case query param required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
@@ -204,6 +220,11 @@ app.get("/memo", async (c) => {
     return c.json({ error: "case query param required" }, 400);
   }
 
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
   const memoPath = join(caseFolder, ".pi_tool", "case_memo.md");
 
   try {
@@ -220,6 +241,11 @@ app.get("/list", async (c) => {
 
   if (!caseFolder) {
     return c.json({ error: "case query param required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   async function walkDir(dir: string, base: string = ""): Promise<any[]> {
@@ -288,6 +314,11 @@ app.get("/view", async (c) => {
 
   if (!caseFolder || !filePath) {
     return c.json({ error: "case and path query params required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
   }
 
   const fullPath = join(caseFolder, filePath);

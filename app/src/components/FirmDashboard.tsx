@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import FirmChat from './FirmChat'
 import KnowledgeEditor from './KnowledgeEditor'
 import KnowledgeChat from './KnowledgeChat'
@@ -38,12 +38,12 @@ interface FirmTodo {
 
 type PracticeArea = 'Personal Injury' | 'Workers\' Compensation'
 type TeamRole = 'attorney' | 'case_manager_lead' | 'case_manager' | 'case_manager_assistant'
-type AssignmentFilter = 'all' | 'mine' | 'unassigned'
+type AssignmentFilter = 'all' | 'mine' | 'unassigned' | `member:${string}`
 
 interface TeamMember {
   id: string
   email: string
-  name: string
+  name?: string
   role: TeamRole
   status: 'pending' | 'active' | 'deactivated'
 }
@@ -126,6 +126,7 @@ interface Props {
       canManageTeam: boolean
       canAssignCases: boolean
       canViewAllCases: boolean
+      canEditKnowledge: boolean
     }
   }
 }
@@ -283,11 +284,18 @@ export default function FirmDashboard({
       } else {
         setKnowledgeSubTabState('editor')
       }
+
+      const urlSettingsTab = getUrlParam('settingsTab')
+      setSettingsTab(urlSettingsTab === 'team' ? 'team' : 'firm')
+
+      const shouldOpenSettings = getUrlParam('openSettings') === '1'
+      setShowFirmConfig(shouldOpenSettings)
     }
 
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
   }, [])
+  const [searchQuery, setSearchQuery] = useState('')
   const [selectedCases, setSelectedCases] = useState<Set<string>>(new Set())
   const [knowledgeExists, setKnowledgeExists] = useState<boolean | null>(null)
   const [showFirmConfig, setShowFirmConfig] = useState(false)
@@ -299,8 +307,30 @@ export default function FirmDashboard({
 
   // Team management state
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
-  const [settingsTab, setSettingsTab] = useState<'firm' | 'team'>('firm')
+  const [settingsTab, setSettingsTab] = useState<'firm' | 'team'>(() => {
+    const tab = getUrlParam('settingsTab')
+    return tab === 'team' ? 'team' : 'firm'
+  })
   const [assignmentFilter, setAssignmentFilter] = useState<AssignmentFilter>('all')
+  const canFilterBySpecificMember = teamContext?.role === 'attorney' || teamContext?.role === 'case_manager_lead'
+  const selectableMemberFilters = useMemo(
+    () =>
+      teamMembers.filter(
+        (member) =>
+          member.status === 'active' &&
+          (member.role === 'case_manager' || member.role === 'case_manager_assistant')
+      ),
+    [teamMembers]
+  )
+  const selectedMemberFilterId = assignmentFilter.startsWith('member:')
+    ? assignmentFilter.slice('member:'.length)
+    : null
+  const chatScope =
+    assignmentFilter === 'mine'
+      ? ({ mode: 'mine' } as const)
+      : selectedMemberFilterId
+        ? ({ mode: 'member', memberId: selectedMemberFilterId } as const)
+        : ({ mode: 'firm' } as const)
 
   // Container expand/collapse state (for DOI multi-injury clients)
   const [expandedContainers, setExpandedContainers] = useState<Set<string>>(new Set())
@@ -379,10 +409,66 @@ export default function FirmDashboard({
     } catch {}
   }, [apiUrl, firmRoot])
 
+  const syncCaseAssignments = useCallback(async (casePath: string, newAssignments: CaseAssignment[]) => {
+    if (!teamContext?.permissions?.canAssignCases) return
+
+    const existing = firmData?.cases.find(c => c.path === casePath)?.assignments || []
+    const existingSet = new Set(existing.map(a => a.userId))
+    const nextSet = new Set(newAssignments.map(a => a.userId))
+
+    const toAdd = Array.from(nextSet).filter(id => !existingSet.has(id))
+    const toRemove = Array.from(existingSet).filter(id => !nextSet.has(id))
+
+    if (toAdd.length > 0) {
+      const addRes = await fetch(`${apiUrl}/api/firm/case/assign`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          casePath,
+          userIds: toAdd,
+          assignedBy: (userEmail || teamContext.userId || 'system').toLowerCase(),
+        }),
+      })
+      if (!addRes.ok) {
+        const data = await addRes.json().catch(() => ({}))
+        throw new Error(data.error || 'Failed to assign users')
+      }
+    }
+
+    for (const userId of toRemove) {
+      const removeRes = await fetch(
+        `${apiUrl}/api/firm/case/unassign?casePath=${encodeURIComponent(casePath)}&userId=${encodeURIComponent(userId)}`,
+        { method: 'DELETE' }
+      )
+      if (!removeRes.ok) {
+        const data = await removeRes.json().catch(() => ({}))
+        throw new Error(data.error || 'Failed to unassign user')
+      }
+    }
+  }, [apiUrl, firmData?.cases, teamContext?.permissions?.canAssignCases, teamContext?.userId, userEmail])
+
   useEffect(() => {
     loadCases()
     loadTeamMembers()
   }, [loadCases, loadTeamMembers])
+
+  useEffect(() => {
+    if (!teamContext?.role) return
+
+    setAssignmentFilter((prev) => {
+      if (prev.startsWith('member:')) {
+        const memberId = prev.slice('member:'.length)
+        const memberStillSelectable = selectableMemberFilters.some((member) => member.id === memberId)
+        if (!canFilterBySpecificMember || !memberStillSelectable) {
+          return teamContext.role === 'case_manager' ? 'mine' : 'all'
+        }
+      }
+      if (teamContext.role === 'case_manager' && prev === 'all') {
+        return 'mine'
+      }
+      return prev
+    })
+  }, [canFilterBySpecificMember, selectableMemberFilters, teamContext?.role])
 
   // Check if knowledge base exists
   const checkKnowledge = useCallback(async () => {
@@ -417,6 +503,24 @@ export default function FirmDashboard({
       setLogoPreview(null)
     }
   }, [apiUrl, firmRoot])
+
+  const openFirmSettings = useCallback((tab: 'firm' | 'team' = 'firm') => {
+    setView('knowledge')
+    setKnowledgeSubTab('editor')
+    setSettingsTab(tab)
+    loadFirmConfig()
+    loadFirmLogo()
+    loadTeamMembers()
+    setShowFirmConfig(true)
+    setUrlParam('openSettings', null, false)
+  }, [loadFirmConfig, loadFirmLogo, loadTeamMembers])
+
+  useEffect(() => {
+    const shouldOpenSettings = getUrlParam('openSettings') === '1'
+    if (!shouldOpenSettings) return
+    const tab = getUrlParam('settingsTab')
+    openFirmSettings(tab === 'team' ? 'team' : 'firm')
+  }, [openFirmSettings])
 
   const handleLogoUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return
@@ -769,21 +873,14 @@ export default function FirmDashboard({
 
   const formatHearings = (hearings?: Array<{ case_number: string; hearing_level: string; next_date?: string }>) => {
     if (!hearings || hearings.length === 0) return '—'
+    const hasAO = hearings.some(h => h.hearing_level === 'A.O.')
+    const label = hasAO ? 'AO' : 'HO'
     return (
-      <div className="flex flex-col gap-1">
-        {hearings.map((h, i) => (
-          <div key={i} className="flex items-center gap-1.5">
-            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold leading-none ${
-              h.hearing_level === 'A.O.'
-                ? 'bg-red-100 text-red-700'
-                : 'bg-blue-100 text-blue-700'
-            }`}>
-              {h.hearing_level || 'H.O.'}
-            </span>
-            <span className="text-xs text-brand-600">{h.case_number}</span>
-          </div>
-        ))}
-      </div>
+      <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
+        hasAO ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'
+      }`}>
+        {label}
+      </span>
     )
   }
 
@@ -812,6 +909,12 @@ export default function FirmDashboard({
   }
 
   const sortedCases = firmData?.cases
+    .filter(c => {
+      if (!searchQuery) return true
+      const q = searchQuery.toLowerCase()
+      return (c.clientName || '').toLowerCase().includes(q) ||
+             c.name.toLowerCase().includes(q)
+    })
     .filter(c => filterPhase === 'all' || c.casePhase === filterPhase)
     .filter(c => {
       // Assignment filter
@@ -819,6 +922,10 @@ export default function FirmDashboard({
       if (assignmentFilter === 'unassigned') return !c.assignments || c.assignments.length === 0
       if (assignmentFilter === 'mine' && teamContext?.userId) {
         return c.assignments?.some(a => a.userId === teamContext.userId)
+      }
+      if (assignmentFilter.startsWith('member:')) {
+        const memberId = assignmentFilter.slice('member:'.length)
+        return c.assignments?.some(a => a.userId === memberId)
       }
       return true
     })
@@ -995,6 +1102,13 @@ export default function FirmDashboard({
                 </span>
               )}
             </button>
+            <button
+              onClick={() => openFirmSettings('firm')}
+              className="p-2 text-brand-300 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+              title="Settings"
+            >
+              <CogIcon />
+            </button>
             {userEmail && (
               <div className="flex items-center gap-3 border-l border-brand-700 pl-4">
                 <span className="text-sm text-brand-300">{userEmail}</span>
@@ -1082,7 +1196,7 @@ export default function FirmDashboard({
               </button>
             </div>
             <button
-              onClick={() => { loadFirmConfig(); loadFirmLogo(); loadTeamMembers(); setShowFirmConfig(true) }}
+              onClick={() => openFirmSettings(settingsTab)}
               className="ml-auto flex items-center gap-1.5 text-sm text-brand-500 hover:text-brand-700 transition-colors"
             >
               <CogIcon />
@@ -1094,7 +1208,7 @@ export default function FirmDashboard({
               <TemplateManager apiUrl={apiUrl} firmRoot={firmRoot} />
             ) : knowledgeExists ? (
               knowledgeSubTab === 'editor'
-                ? <KnowledgeEditor apiUrl={apiUrl} firmRoot={firmRoot} />
+                ? <KnowledgeEditor apiUrl={apiUrl} firmRoot={firmRoot} canEditKnowledge={teamContext?.permissions?.canEditKnowledge || false} />
                 : <KnowledgeChat apiUrl={apiUrl} firmRoot={firmRoot} />
             ) : (
               <div className="flex flex-col items-center justify-center h-full text-brand-400 gap-2">
@@ -1108,6 +1222,7 @@ export default function FirmDashboard({
         <FirmChat
           apiUrl={apiUrl}
           firmRoot={firmRoot}
+          scope={chatScope}
           onTodosUpdated={onTodosUpdated}
           initialPrompt={firmChatPrompt}
           onInitialPromptUsed={onFirmChatPromptUsed}
@@ -1116,6 +1231,22 @@ export default function FirmDashboard({
         <>
           {/* Filters */}
           <div className="bg-white border-b border-surface-200 px-8 py-4 flex gap-6 items-center">
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+                </svg>
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search cases..."
+                  className="text-sm border border-surface-200 rounded-lg pl-9 pr-3 py-2 bg-white w-52
+                             focus:outline-none focus:ring-2 focus:ring-accent-500 focus:border-transparent
+                             placeholder:text-brand-400"
+                />
+              </div>
+            </div>
             <div className="flex items-center gap-2">
               <label className="text-sm font-medium text-brand-600">Sort by</label>
               <select
@@ -1167,6 +1298,12 @@ export default function FirmDashboard({
                   <option value="all">All Cases</option>
                   <option value="mine">My Cases</option>
                   <option value="unassigned">Unassigned</option>
+                  {canFilterBySpecificMember &&
+                    selectableMemberFilters.map((member) => (
+                      <option key={member.id} value={`member:${member.id}`}>
+                        {member.name || member.email}
+                      </option>
+                    ))}
                 </select>
               </div>
             )}
@@ -1336,7 +1473,8 @@ export default function FirmDashboard({
                           teamMembers={teamMembers}
                           userEmail={userEmail || ''}
                           canAssign={teamContext?.permissions?.canAssignCases || false}
-                          onAssignmentChange={(newAssignments) => {
+                          onAssignmentChange={async (newAssignments) => {
+                            await syncCaseAssignments(c.path, newAssignments)
                             // Update the case in firmData
                             if (firmData) {
                               setFirmData({
@@ -1506,6 +1644,7 @@ export default function FirmDashboard({
             ) : (
               <div className="max-h-[60vh] overflow-y-auto">
                 <TeamManager
+                  apiUrl={apiUrl}
                   firmRoot={firmRoot}
                   userEmail={userEmail || ''}
                   canManageTeam={teamContext?.permissions?.canManageTeam || false}

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { requireTeamContext } from "../lib/team";
 
 const auth = new Hono();
 
@@ -26,6 +27,13 @@ interface Config {
   lastValidated?: string;
   subscriptionStatus?: string;
   expiresAt?: string;
+}
+
+async function validateFirmAccess(firmRoot: string | undefined, email: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!firmRoot) return { ok: true };
+  const teamResult = await requireTeamContext(firmRoot, email);
+  if (teamResult.ok) return { ok: true };
+  return { ok: false, reason: teamResult.reason };
 }
 
 /**
@@ -56,13 +64,43 @@ function saveConfig(config: Config): void {
  * Get current auth status
  */
 auth.get("/status", async (c) => {
-  // In dev mode, always return authenticated
+  const firmRoot = c.req.query("firmRoot");
+
+  // In dev mode, use local config-backed auth (no remote validation)
   if (DEV_MODE) {
+    const config = loadConfig();
+    if (!config || !config.authToken) {
+      return c.json({
+        authenticated: false,
+        devMode: true,
+      });
+    }
+
+    const email = config.email || "dev@localhost";
+    let teamPayload: Record<string, unknown> = {};
+    let teamAllowed = true;
+    if (firmRoot) {
+      const teamResult = await requireTeamContext(firmRoot, email);
+      if (!teamResult.ok) {
+        teamAllowed = false;
+        teamPayload = {
+          team: null,
+          teamConfigured: teamResult.team.members.length > 0,
+          teamError: teamResult.reason,
+        };
+      } else {
+        teamPayload = {
+          team: teamResult.context,
+          teamConfigured: true,
+        };
+      }
+    }
     return c.json({
-      authenticated: true,
+      authenticated: teamAllowed,
       devMode: true,
-      email: "dev@localhost",
-      subscriptionStatus: "active",
+      email,
+      subscriptionStatus: config.subscriptionStatus || "active",
+      ...teamPayload,
     });
   }
 
@@ -79,12 +117,33 @@ auth.get("/status", async (c) => {
     config.subscriptionStatus === "active" ||
     config.subscriptionStatus === "trialing";
 
+  let teamPayload: Record<string, unknown> = {};
+  let teamAllowed = true;
+  if (firmRoot && config.email) {
+    const teamResult = await requireTeamContext(firmRoot, config.email);
+    if (!teamResult.ok) {
+      teamAllowed = false;
+      teamPayload = {
+        team: null,
+        teamConfigured: teamResult.team.members.length > 0,
+        teamError: teamResult.reason,
+      };
+    } else {
+      teamPayload = {
+        team: teamResult.context,
+        teamConfigured: true,
+      };
+    }
+  }
+
   return c.json({
-    authenticated: isValid,
+    authenticated: isValid && teamAllowed,
+    reauthRequired: !isValid,
     email: config.email,
     subscriptionStatus: config.subscriptionStatus,
     expiresAt: config.expiresAt,
     lastValidated: config.lastValidated,
+    ...teamPayload,
   });
 });
 
@@ -93,7 +152,7 @@ auth.get("/status", async (c) => {
  */
 auth.post("/login", async (c) => {
   const body = await c.req.json();
-  const { email, password } = body;
+  const { email, password, firmRoot } = body;
 
   if (!email || !password) {
     return c.json({ error: "Email and password are required" }, 400);
@@ -101,6 +160,11 @@ auth.post("/login", async (c) => {
 
   // In dev mode, accept any credentials
   if (DEV_MODE) {
+    const firmAccess = await validateFirmAccess(typeof firmRoot === "string" ? firmRoot : undefined, email);
+    if (!firmAccess.ok) {
+      return c.json({ error: firmAccess.reason }, 403);
+    }
+
     const config: Config = {
       authToken: "dev_token_" + Date.now(),
       email,
@@ -136,6 +200,11 @@ auth.post("/login", async (c) => {
 
     const data = await response.json();
 
+    const firmAccess = await validateFirmAccess(typeof firmRoot === "string" ? firmRoot : undefined, data.email);
+    if (!firmAccess.ok) {
+      return c.json({ error: firmAccess.reason }, 403);
+    }
+
     // Save config locally
     const config: Config = {
       authToken: data.authToken,
@@ -168,7 +237,7 @@ auth.post("/login", async (c) => {
  */
 auth.post("/signup", async (c) => {
   const body = await c.req.json();
-  const { email, password } = body;
+  const { email, password, firmRoot } = body;
 
   if (!email || !password) {
     return c.json({ error: "Email and password are required" }, 400);
@@ -176,6 +245,11 @@ auth.post("/signup", async (c) => {
 
   // In dev mode, just create a local config
   if (DEV_MODE) {
+    const firmAccess = await validateFirmAccess(typeof firmRoot === "string" ? firmRoot : undefined, email);
+    if (!firmAccess.ok) {
+      return c.json({ error: firmAccess.reason }, 403);
+    }
+
     const config: Config = {
       authToken: "dev_token_" + Date.now(),
       email,
@@ -211,6 +285,11 @@ auth.post("/signup", async (c) => {
     }
 
     const data = await response.json();
+
+    const firmAccess = await validateFirmAccess(typeof firmRoot === "string" ? firmRoot : undefined, data.email);
+    if (!firmAccess.ok) {
+      return c.json({ error: firmAccess.reason }, 403);
+    }
 
     // Save config locally
     const config: Config = {

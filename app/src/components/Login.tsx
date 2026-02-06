@@ -1,8 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 interface LoginProps {
   apiUrl: string
   onLoginSuccess: (email: string, subscriptionStatus: string) => void
+  initialError?: string
+  firmRoot?: string | null
 }
 
 // Icon components
@@ -19,13 +21,19 @@ const SpinnerIcon = () => (
   </svg>
 )
 
-export default function Login({ apiUrl, onLoginSuccess }: LoginProps) {
+export default function Login({ apiUrl, onLoginSuccess, initialError, firmRoot }: LoginProps) {
   const [mode, setMode] = useState<'login' | 'signup'>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+
+  useEffect(() => {
+    if (initialError) {
+      setError(initialError)
+    }
+  }, [initialError])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -53,7 +61,7 @@ export default function Login({ apiUrl, onLoginSuccess }: LoginProps) {
       const response = await fetch(`${apiUrl}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, firmRoot }),
       })
 
       const data = await response.json()

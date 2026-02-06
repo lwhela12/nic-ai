@@ -11,9 +11,15 @@ interface FirmTodo {
   createdAt: string
 }
 
+type FirmChatScope =
+  | { mode: 'firm' }
+  | { mode: 'mine' }
+  | { mode: 'member'; memberId: string }
+
 interface Props {
   apiUrl: string
   firmRoot: string
+  scope?: FirmChatScope
   onTodosUpdated?: (todos: FirmTodo[]) => void
   initialPrompt?: string
   onInitialPromptUsed?: () => void
@@ -151,7 +157,7 @@ const MessageItem = memo(function MessageItem({
   )
 })
 
-export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialPrompt, onInitialPromptUsed }: Props) {
+export default function FirmChat({ apiUrl, firmRoot, scope, onTodosUpdated, initialPrompt, onInitialPromptUsed }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [chatHistory, setChatHistory] = useState<ChatHistoryMessage[]>([])
   const [input, setInput] = useState('')
@@ -177,7 +183,7 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
       const response = await fetch(`${apiUrl}/api/firm/direct-chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ root: firmRoot, message: userMessage, history: chatHistory }),
+        body: JSON.stringify({ root: firmRoot, message: userMessage, history: chatHistory, scope }),
       })
 
       const reader = response.body?.getReader()
@@ -261,7 +267,7 @@ export default function FirmChat({ apiUrl, firmRoot, onTodosUpdated, initialProm
       setIsLoading(false)
       setCurrentTool(null)
     }
-  }, [apiUrl, firmRoot, input, isLoading, chatHistory, onTodosUpdated])
+  }, [apiUrl, firmRoot, scope, input, isLoading, chatHistory, onTodosUpdated])
 
   // Handle initial prompt (e.g., from "Generate Tasks" button)
   useEffect(() => {

@@ -116,8 +116,19 @@ const CONFIG_CACHE_DURATION = 60 * 1000; // 1 minute
 export async function authMiddleware(c: Context, next: Next) {
   // In dev mode, skip subscription validation but still load API key from config if needed
   if (DEV_MODE) {
+    const config = loadConfig();
+    if (!config || !config.authToken) {
+      return c.json(
+        {
+          error: "authentication_required",
+          reauthRequired: true,
+          message: "Please log in to use Claude PI",
+        },
+        401
+      );
+    }
+    c.set("authEmail", config.email || null);
     if (!process.env.ANTHROPIC_API_KEY) {
-      const config = loadConfig();
       if (config?.anthropicApiKey) {
         process.env.ANTHROPIC_API_KEY = config.anthropicApiKey;
       }
@@ -139,17 +150,21 @@ export async function authMiddleware(c: Context, next: Next) {
     return c.json(
       {
         error: "authentication_required",
+        reauthRequired: true,
         message: "Please log in to use Claude PI",
       },
       401
     );
   }
 
+  c.set("authEmail", config.email || null);
+
   // Check subscription status
   if (config.subscriptionStatus === "canceled" || config.subscriptionStatus === "expired") {
     return c.json(
       {
         error: "subscription_expired",
+        reauthRequired: true,
         message: "Your subscription has expired. Please renew to continue.",
       },
       403
@@ -178,10 +193,11 @@ export async function authMiddleware(c: Context, next: Next) {
       if (!isWithinGracePeriod(config)) {
         return c.json(
           {
-            error: "validation_failed",
-            message: "Could not validate subscription. Please check your internet connection.",
+            error: "reauth_required",
+            reauthRequired: true,
+            message: "Session validation expired. Please sign in again.",
           },
-          503
+          401
         );
       }
       // Within grace period - allow request but add warning header
@@ -198,10 +214,11 @@ export async function authMiddleware(c: Context, next: Next) {
   if (!process.env.ANTHROPIC_API_KEY) {
     return c.json(
       {
-        error: "api_key_missing",
-        message: "No API key available. Please log in again to refresh your session.",
+        error: "reauth_required",
+        reauthRequired: true,
+        message: "No API key available. Please sign in again.",
       },
-      503
+      401
     );
   }
 

@@ -30,6 +30,29 @@ export interface ChatMessage {
   content: string;
 }
 
+export type FirmChatScope =
+  | { mode: "firm" }
+  | { mode: "mine" }
+  | { mode: "member"; memberId: string };
+
+interface TeamMemberRef {
+  id: string;
+  email: string;
+  name?: string;
+}
+
+export interface DirectFirmChatOptions {
+  scope?: FirmChatScope;
+  actorUserId?: string;
+  teamMembers?: TeamMemberRef[];
+}
+
+interface ParsedAssignment {
+  userId: string;
+  assignedAt?: string;
+  assignedBy?: string;
+}
+
 // Firm todo format
 interface FirmTodo {
   id: string;
@@ -174,12 +197,56 @@ async function saveTodos(firmRoot: string, todos: FirmTodo[]): Promise<void> {
   await writeFile(todosPath, JSON.stringify(data, null, 2));
 }
 
+function normalizeAssignments(input: unknown): ParsedAssignment[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter(
+      (assignment): assignment is { userId: string; assignedAt?: string; assignedBy?: string } =>
+        !!assignment &&
+        typeof assignment === "object" &&
+        typeof (assignment as any).userId === "string"
+    )
+    .map((assignment) => ({
+      userId: assignment.userId,
+      assignedAt: assignment.assignedAt,
+      assignedBy: assignment.assignedBy,
+    }));
+}
+
+function isCaseVisibleForScope(
+  assignments: ParsedAssignment[],
+  scope: FirmChatScope | undefined,
+  actorUserId: string | undefined
+): boolean {
+  if (!scope || scope.mode === "firm") return true;
+  if (scope.mode === "mine") {
+    if (!actorUserId) return false;
+    return assignments.some((assignment) => assignment.userId === actorUserId);
+  }
+  return assignments.some((assignment) => assignment.userId === scope.memberId);
+}
+
+function formatAssignmentLabels(
+  assignments: ParsedAssignment[],
+  memberById: Map<string, TeamMemberRef>
+): string[] {
+  if (assignments.length === 0) return [];
+  return assignments.map((assignment) => {
+    const member = memberById.get(assignment.userId);
+    if (!member) return assignment.userId;
+    return member.name ? `${member.name} (${member.email})` : member.email;
+  });
+}
+
 // Execute a tool and return result
 async function executeTool(
   toolName: string,
   toolInput: Record<string, any>,
-  firmRoot: string
+  firmRoot: string,
+  options?: DirectFirmChatOptions
 ): Promise<string> {
+  const memberById = new Map((options?.teamMembers || []).map((member) => [member.id, member]));
+
   try {
     switch (toolName) {
       case "read_file": {
@@ -200,6 +267,11 @@ async function executeTool(
         try {
           const indexContent = await readFile(indexPath, "utf-8");
           const index = JSON.parse(indexContent);
+          const assignments = normalizeAssignments(index.assignments);
+
+          if (!isCaseVisibleForScope(assignments, options?.scope, options?.actorUserId)) {
+            return `Error: "${caseName}" is outside your current case view scope.`;
+          }
 
           // Return a trimmed version focused on key details
           const trimmed = {
@@ -211,6 +283,7 @@ async function executeTool(
             injury_tier: index.injury_tier,
             estimated_value_range: index.estimated_value_range,
             needs_review: index.needs_review,
+            assignments: formatAssignmentLabels(assignments, memberById),
           };
 
           return JSON.stringify(trimmed, null, 2);
@@ -347,8 +420,10 @@ async function executeTool(
 }
 
 // Build context from firm data
-async function buildFirmContext(firmRoot: string): Promise<string> {
+async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOptions): Promise<string> {
   const parts: string[] = [];
+  const memberById = new Map((options?.teamMembers || []).map((member) => [member.id, member]));
+  const scope = options?.scope;
 
   // Current date
   const now = new Date();
@@ -359,6 +434,15 @@ async function buildFirmContext(firmRoot: string): Promise<string> {
     day: 'numeric'
   });
   parts.push(`TODAY'S DATE: ${dateStr}`);
+  if (!scope || scope.mode === "firm") {
+    parts.push("ACTIVE CASE VIEW: Firm (all cases)");
+  } else if (scope.mode === "mine") {
+    parts.push("ACTIVE CASE VIEW: My cases");
+  } else {
+    const member = memberById.get(scope.memberId);
+    const label = member?.name || member?.email || scope.memberId;
+    parts.push(`ACTIVE CASE VIEW: ${label}'s cases`);
+  }
 
   // Load firm config
   try {
@@ -403,6 +487,7 @@ async function buildFirmContext(firmRoot: string): Promise<string> {
   let totalSpecials = 0;
   let solUrgent = 0;
   let indexedCount = 0;
+  let visibleCaseCount = 0;
 
   try {
     const entries = await readdir(firmRoot, { withFileTypes: true });
@@ -416,6 +501,13 @@ async function buildFirmContext(firmRoot: string): Promise<string> {
       try {
         const indexContent = await readFile(indexPath, "utf-8");
         const index = JSON.parse(indexContent);
+        const assignments = normalizeAssignments(index.assignments);
+
+        if (!isCaseVisibleForScope(assignments, scope, options?.actorUserId)) {
+          continue;
+        }
+
+        visibleCaseCount++;
         indexedCount++;
 
         // Parse amounts consistently
@@ -491,6 +583,7 @@ async function buildFirmContext(firmRoot: string): Promise<string> {
         // Track phase counts
         casesByPhase[casePhase] = (casesByPhase[casePhase] || 0) + 1;
         totalSpecials += specials;
+        const assignedTo = formatAssignmentLabels(assignments, memberById);
 
         caseSummaries.push({
           folder: entry.name,
@@ -501,9 +594,13 @@ async function buildFirmContext(firmRoot: string): Promise<string> {
           solDaysRemaining,
           providers,
           policyLimits,
+          assignedTo,
         });
       } catch {
-        // Case not indexed, skip
+        // Case not indexed
+        if (!scope || scope.mode === "firm") {
+          visibleCaseCount++;
+        }
       }
     }
 
@@ -519,7 +616,7 @@ async function buildFirmContext(firmRoot: string): Promise<string> {
 
     // Add portfolio metrics
     parts.push(`\n## PORTFOLIO METRICS
-- Total Cases: ${entries.filter(e => e.isDirectory() && e.name !== ".pi_tool").length}
+- Total Cases: ${visibleCaseCount}
 - Indexed Cases: ${indexedCount}
 - Total Medical Specials: $${totalSpecials.toLocaleString()}
 - Cases with SOL < 90 days: ${solUrgent}
@@ -529,6 +626,9 @@ ${Object.entries(casesByPhase).map(([phase, count]) => `- ${phase}: ${count}`).j
 
     // Add case summaries
     parts.push(`\n## CASE SUMMARIES (sorted by SOL urgency)`);
+    if (caseSummaries.length === 0) {
+      parts.push("- No indexed cases found in the current view.");
+    }
     for (const c of caseSummaries) {
       parts.push(`
 ### ${c.clientName} (${c.folder})
@@ -537,7 +637,8 @@ ${Object.entries(casesByPhase).map(([phase, count]) => `- ${phase}: ${count}`).j
 - Specials: $${c.totalSpecials.toLocaleString()}
 - SOL: ${c.solDaysRemaining !== undefined ? `${c.solDaysRemaining} days remaining` : 'Unknown'}
 - Policy: ${c.policyLimits || 'Unknown'}
-- Providers: ${c.providers.length > 0 ? c.providers.join(', ') : 'None listed'}`);
+- Providers: ${c.providers.length > 0 ? c.providers.join(', ') : 'None listed'}
+- Assigned: ${c.assignedTo && c.assignedTo.length > 0 ? c.assignedTo.join(', ') : 'Unassigned'}`);
     }
 
   } catch (error) {
@@ -646,11 +747,12 @@ What would you like to do? (complete / skip / modify / delete)"
 export async function* directFirmChat(
   firmRoot: string,
   message: string,
-  history: ChatMessage[] = []
+  history: ChatMessage[] = [],
+  options?: DirectFirmChatOptions
 ): AsyncGenerator<{ type: string; content?: string; tool?: string; done?: boolean; usage?: any; todos?: any[] }> {
 
   // Build context and include it in the system prompt
-  const context = await buildFirmContext(firmRoot);
+  const context = await buildFirmContext(firmRoot, options);
   const systemPrompt = `${BASE_SYSTEM_PROMPT}\n\n---\n\n${context}`;
 
   // Build messages array from history
@@ -730,7 +832,7 @@ export async function* directFirmChat(
 
     for (const toolUse of toolUseBlocks) {
       yield { type: "tool_executing", tool: toolUse.name };
-      const result = await executeTool(toolUse.name, toolUse.input, firmRoot);
+      const result = await executeTool(toolUse.name, toolUse.input, firmRoot, options);
 
       // Track saved todos for the response
       if (toolUse.name === "update_todos" && toolUse.input.todos) {
