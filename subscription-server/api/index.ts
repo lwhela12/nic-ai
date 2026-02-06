@@ -70,6 +70,11 @@ const ADMIN_HTML = `<!DOCTYPE html>
       showUserModal: null,
       selectedUser: null,
       showAssignKey: null,
+      showAddUser: false,
+      newUserEmail: '',
+      newUserPassword: '',
+      newUserTrialDays: 14,
+      newUserStatus: 'trialing',
     };
     function setState(updates) {
       state = { ...state, ...updates };
@@ -168,6 +173,46 @@ const ADMIN_HTML = `<!DOCTYPE html>
         setState({ error: err.message });
       }
     }
+    async function createUserAdmin() {
+      if (!state.newUserEmail || !state.newUserPassword) return;
+      setState({ loading: true, error: null });
+      try {
+        await apiCall('/v1/admin/users', {
+          method: 'POST',
+          body: JSON.stringify({
+            email: state.newUserEmail,
+            password: state.newUserPassword,
+            trialDays: Number(state.newUserTrialDays) || 14,
+            status: state.newUserStatus || 'trialing',
+          }),
+        });
+        setState({
+          showAddUser: false,
+          newUserEmail: '',
+          newUserPassword: '',
+          newUserTrialDays: 14,
+          newUserStatus: 'trialing',
+          loading: false
+        });
+        loadData();
+      } catch (err) {
+        setState({ error: err.message, loading: false });
+      }
+    }
+    async function deleteUserAdmin(userId) {
+      const user = (state.users || []).find((u) => u.id === userId);
+      const email = user ? user.email : ('ID ' + userId);
+      if (!confirm('Delete user ' + email + '? This will remove access and auth tokens.')) return;
+      try {
+        await apiCall('/v1/admin/users/' + userId, { method: 'DELETE' });
+        if (state.selectedUser && state.selectedUser.id === userId) {
+          setState({ showUserModal: false, selectedUser: null });
+        }
+        loadData();
+      } catch (err) {
+        setState({ error: err.message });
+      }
+    }
     async function extendTrial(userId, days) {
       const newDate = new Date();
       newDate.setDate(newDate.getDate() + days);
@@ -210,20 +255,31 @@ const ADMIN_HTML = `<!DOCTYPE html>
         return;
       }
       const statsHtml = !state.stats ? '<div class="text-brand-500">Loading...</div>' : '<div class="grid grid-cols-2 md:grid-cols-4 gap-4"><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.stats.totalUsers + '</div><div class="text-brand-500">Total Users</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.stats.activeSubscriptions + '</div><div class="text-brand-500">Active Subscriptions</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.stats.activeApiKeys + '</div><div class="text-brand-500">API Keys</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.stats.validationsLast24h + '</div><div class="text-brand-500">Validations (24h)</div></div></div>';
-      const usersHtml = !state.users.length ? '<div class="text-brand-500">No users yet</div>' : '<div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Email</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Status</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Assigned Key</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Expires</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Actions</th></tr></thead><tbody>' + state.users.map(u => '<tr class="border-b border-surface-200 last:border-0"><td class="px-4 py-3 text-brand-900">' + u.email + '</td><td class="px-4 py-3"><span class="inline-flex px-2 py-1 text-xs font-medium rounded-md ' + (u.subscriptionStatus === 'active' ? 'bg-green-50 text-green-700' : u.subscriptionStatus === 'trialing' ? 'bg-accent-50 text-accent-600' : 'bg-red-50 text-red-700') + '">' + u.subscriptionStatus + '</span></td><td class="px-4 py-3 text-brand-500">' + (u.assignedKeyName ? '<span class="text-green-600">' + u.assignedKeyName + '</span>' : '<span class="text-brand-400">Pool</span>') + '</td><td class="px-4 py-3 text-brand-500">' + formatDate(u.trialEndsAt || u.currentPeriodEnd) + '</td><td class="px-4 py-3"><button onclick="viewUser(' + u.id + ')" class="text-sm text-accent-600 hover:text-accent-500">View</button></td></tr>').join('') + '</tbody></table></div>';
+      const usersHeaderHtml = '<div class="mb-4"><button onclick="setState({showAddUser:true})" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">+ Add User</button></div>';
+      const usersTableHtml = !state.users.length ? '<div class="text-brand-500">No users yet</div>' : '<div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Email</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Status</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Assigned Key</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Expires</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Actions</th></tr></thead><tbody>' + state.users.map(u => '<tr class="border-b border-surface-200 last:border-0"><td class="px-4 py-3 text-brand-900">' + u.email + '</td><td class="px-4 py-3"><span class="inline-flex px-2 py-1 text-xs font-medium rounded-md ' + (u.subscriptionStatus === 'active' ? 'bg-green-50 text-green-700' : u.subscriptionStatus === 'trialing' ? 'bg-accent-50 text-accent-600' : 'bg-red-50 text-red-700') + '">' + u.subscriptionStatus + '</span></td><td class="px-4 py-3 text-brand-500">' + (u.assignedKeyName ? '<span class="text-green-600">' + u.assignedKeyName + '</span>' : '<span class="text-brand-400">Pool</span>') + '</td><td class="px-4 py-3 text-brand-500">' + formatDate(u.trialEndsAt || u.currentPeriodEnd) + '</td><td class="px-4 py-3 space-x-3"><button onclick="viewUser(' + u.id + ')" class="text-sm text-accent-600 hover:text-accent-500">View</button><button onclick="deleteUserAdmin(' + u.id + ')" class="text-sm text-red-600 hover:text-red-500">Delete</button></td></tr>').join('') + '</tbody></table></div>';
+      const usersHtml = usersHeaderHtml + usersTableHtml;
       const keysHtml = '<div class="mb-4"><button onclick="setState({showAddKey:true})" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">+ Add API Key</button></div>' + (state.apiKeys.length ? '<div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Name</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Status</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Assigned To</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Daily Usage</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Actions</th></tr></thead><tbody>' + state.apiKeys.map(k => '<tr class="border-b border-surface-200 last:border-0 ' + (k.isActive ? (k.assignedUserEmail ? 'bg-green-50/30' : 'bg-amber-50/30') : 'bg-red-50/30') + '"><td class="px-4 py-3 text-brand-900">' + (k.name || 'Unnamed') + '</td><td class="px-4 py-3"><span class="inline-flex px-2 py-1 text-xs font-medium rounded-md ' + (k.isActive ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700') + '">' + (k.isActive ? 'Active' : 'Disabled') + '</span></td><td class="px-4 py-3">' + (k.assignedUserEmail ? '<span class="text-green-600">' + k.assignedUserEmail + '</span>' : '<span class="text-brand-400">Unassigned</span>') + '</td><td class="px-4 py-3 text-brand-500">' + formatTokens(k.dailyUsageTokens || 0) + '</td><td class="px-4 py-3 space-x-2"><button onclick="setState({showAssignKey:' + k.id + '})" class="text-sm text-blue-600 hover:text-blue-500">Assign</button><button onclick="toggleKeyActive(' + k.id + ', ' + k.isActive + ')" class="text-sm text-accent-600 hover:text-accent-500">' + (k.isActive ? 'Disable' : 'Enable') + '</button><button onclick="deleteKey(' + k.id + ')" class="text-sm text-red-600 hover:text-red-500">Delete</button></td></tr>').join('') + '</tbody></table></div>' : '<div class="text-brand-500">No API keys in pool</div>');
       const usageHtml = !state.usage ? '<div class="text-brand-500">Loading usage data...</div>' : '<div class="space-y-6"><div class="grid grid-cols-2 md:grid-cols-4 gap-4"><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + formatTokens(state.usage.summary.last7Days.totalTokens) + '</div><div class="text-brand-500">Tokens (7 days)</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.usage.summary.last7Days.requestCount + '</div><div class="text-brand-500">Requests (7 days)</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + formatTokens(state.usage.summary.last30Days.totalTokens) + '</div><div class="text-brand-500">Tokens (30 days)</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.usage.summary.last30Days.requestCount + '</div><div class="text-brand-500">Requests (30 days)</div></div></div><div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><h3 class="px-4 py-3 font-medium text-brand-700 bg-surface-50 border-b border-surface-200">Usage by User (30 days)</h3><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">User</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Tokens</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Requests</th></tr></thead><tbody>' + (state.usage.byUser || []).filter(u => u.totalTokens > 0).map(u => '<tr class="border-b border-surface-200 last:border-0"><td class="px-4 py-3 text-brand-900">' + u.email + '</td><td class="px-4 py-3 text-brand-500">' + formatTokens(u.totalTokens) + '</td><td class="px-4 py-3 text-brand-500">' + u.requestCount + '</td></tr>').join('') + '</tbody></table></div><div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><h3 class="px-4 py-3 font-medium text-brand-700 bg-surface-50 border-b border-surface-200">Recent Activity</h3><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">User</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Type</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Tokens</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Time</th></tr></thead><tbody>' + (state.usage.recentLogs || []).slice(0, 20).map(l => '<tr class="border-b border-surface-200 last:border-0"><td class="px-4 py-3 text-brand-900">' + l.email + '</td><td class="px-4 py-3 text-brand-500">' + (l.requestType || 'unknown') + '</td><td class="px-4 py-3 text-brand-500">' + formatTokens(l.tokensUsed) + '</td><td class="px-4 py-3 text-brand-500 text-sm">' + formatDateTime(l.loggedAt) + '</td></tr>').join('') + '</tbody></table></div></div>';
       const addKeyModalHtml = state.showAddKey ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">Add API Key</h2><div class="space-y-4"><div><label class="block text-sm font-medium text-brand-700 mb-1">Name (optional)</label><input type="text" id="newKeyName" value="' + state.newKeyName + '" placeholder="e.g., Production Key 1" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Anthropic API Key</label><input type="password" id="newKeyValue" value="' + state.newKeyValue + '" placeholder="sk-ant-api03-..." class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAddKey:false,newKeyName:\\'\\',newKeyValue:\\'\\'})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="addKey()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Add Key</button></div></div></div>' : '';
+      const addUserModalHtml = state.showAddUser ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">Add User</h2><div class="space-y-4"><div><label class="block text-sm font-medium text-brand-700 mb-1">Email</label><input type="email" id="newUserEmail" value="' + state.newUserEmail + '" placeholder="attorney@firm.com" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Initial Password</label><input type="password" id="newUserPassword" value="' + state.newUserPassword + '" placeholder="At least 8 characters" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div class="grid grid-cols-2 gap-3"><div><label class="block text-sm font-medium text-brand-700 mb-1">Status</label><select id="newUserStatus" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="trialing" ' + (state.newUserStatus === 'trialing' ? 'selected' : '') + '>Trialing</option><option value="active" ' + (state.newUserStatus === 'active' ? 'selected' : '') + '>Active</option><option value="expired" ' + (state.newUserStatus === 'expired' ? 'selected' : '') + '>Expired</option></select></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Trial Days</label><input type="number" min="0" id="newUserTrialDays" value="' + state.newUserTrialDays + '" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAddUser:false,newUserEmail:\\'\\',newUserPassword:\\'\\',newUserTrialDays:14,newUserStatus:\\'trialing\\'})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="createUserAdmin()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Create User</button></div></div></div>' : '';
       const userModalHtml = state.showUserModal && state.selectedUser ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-lg p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">' + state.selectedUser.email + '</h2><div class="space-y-4"><div class="grid grid-cols-2 gap-4"><div><div class="text-sm text-brand-500">Status</div><div class="font-medium">' + state.selectedUser.subscriptionStatus + '</div></div><div><div class="text-sm text-brand-500">Created</div><div class="font-medium">' + formatDate(state.selectedUser.createdAt) + '</div></div><div><div class="text-sm text-brand-500">Expires</div><div class="font-medium">' + formatDate(state.selectedUser.trialEndsAt || state.selectedUser.currentPeriodEnd) + '</div></div><div><div class="text-sm text-brand-500">Assigned Key</div><div class="font-medium">' + (state.selectedUser.assignedKey ? state.selectedUser.assignedKey.name : 'Pool') + '</div></div></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Usage (Last 30 Days)</div><div class="grid grid-cols-2 gap-4"><div class="bg-surface-50 rounded-lg p-3"><div class="text-xl font-semibold text-brand-900">' + formatTokens(state.selectedUser.usage?.last30Days?.totalTokens || 0) + '</div><div class="text-sm text-brand-500">Tokens</div></div><div class="bg-surface-50 rounded-lg p-3"><div class="text-xl font-semibold text-brand-900">' + (state.selectedUser.usage?.last30Days?.requestCount || 0) + '</div><div class="text-sm text-brand-500">Requests</div></div></div></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Assign API Key</div><select id="userKeySelect" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="">Use Pool (Rotation)</option>' + state.apiKeys.filter(k => k.isActive).map(k => '<option value="' + k.id + '" ' + (state.selectedUser.assignedKey?.id === k.id ? 'selected' : '') + '>' + (k.name || 'Unnamed') + (k.assignedUserEmail && k.assignedToUserId !== state.selectedUser.id ? ' (assigned to ' + k.assignedUserEmail + ')' : '') + '</option>').join('') + '</select></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Actions</div><div class="flex gap-2 flex-wrap"><button onclick="extendTrial(' + state.selectedUser.id + ', 7)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+7 Days</button><button onclick="extendTrial(' + state.selectedUser.id + ', 14)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+14 Days</button><button onclick="extendTrial(' + state.selectedUser.id + ', 30)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+30 Days</button><button onclick="updateUserSubscription(' + state.selectedUser.id + ', {status: \\'active\\'})" class="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-sm hover:bg-blue-100">Set Active</button><button onclick="updateUserSubscription(' + state.selectedUser.id + ', {status: \\'expired\\'})" class="px-3 py-1.5 bg-red-50 text-red-700 rounded-lg text-sm hover:bg-red-100">Expire</button></div></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showUserModal:false,selectedUser:null})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Close</button><button onclick="(function(){ var sel = document.getElementById(\\'userKeySelect\\'); assignKeyToUser(state.selectedUser.assignedKey?.id || null, null); var keyId = sel.value ? parseInt(sel.value) : null; if(keyId) assignKeyToUser(keyId, state.selectedUser.id); else if(state.selectedUser.assignedKey) assignKeyToUser(state.selectedUser.assignedKey.id, null); viewUser(state.selectedUser.id); })()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Save Key Assignment</button></div></div></div>' : '';
       const assignKeyModalHtml = state.showAssignKey ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">Assign Key to User</h2><div class="space-y-4"><select id="assignUserSelect" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="">Unassigned (Pool)</option>' + state.users.map(u => '<option value="' + u.id + '">' + u.email + '</option>').join('') + '</select></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAssignKey:null})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="(function(){ var sel = document.getElementById(\\'assignUserSelect\\'); assignKeyToUser(state.showAssignKey, sel.value ? parseInt(sel.value) : null); })()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Assign</button></div></div></div>' : '';
-      app.innerHTML = '<div class="max-w-6xl mx-auto p-6"><div class="flex justify-between items-center mb-8"><h1 class="text-2xl font-semibold text-brand-900">Claude PI Admin</h1><button onclick="logout()" class="text-brand-500 hover:text-brand-700">Sign Out</button></div>' + (state.error ? '<div class="bg-red-50 text-red-700 px-4 py-3 rounded-lg mb-4">' + state.error + ' <button onclick="setState({error:null})" class="ml-2 underline">Dismiss</button></div>' : '') + '<div class="flex gap-2 mb-6"><button onclick="setState({tab:\\'stats\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'stats' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Stats</button><button onclick="setState({tab:\\'users\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'users' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Users</button><button onclick="setState({tab:\\'keys\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'keys' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">API Keys</button><button onclick="setState({tab:\\'usage\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'usage' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Usage</button></div>' + (state.tab === 'stats' ? statsHtml : '') + (state.tab === 'users' ? usersHtml : '') + (state.tab === 'keys' ? keysHtml : '') + (state.tab === 'usage' ? usageHtml : '') + '<div class="mt-8 pt-6 border-t border-surface-200"><button onclick="runMaintenance()" ' + (state.loading ? 'disabled' : '') + ' class="px-4 py-2 bg-accent-600 text-white rounded-lg hover:bg-accent-500 disabled:opacity-50">' + (state.loading ? 'Running...' : 'Run Maintenance') + '</button><span class="ml-3 text-sm text-brand-500">Cleans expired tokens & resets daily usage counters</span></div></div>' + addKeyModalHtml + userModalHtml + assignKeyModalHtml;
+      app.innerHTML = '<div class="max-w-6xl mx-auto p-6"><div class="flex justify-between items-center mb-8"><h1 class="text-2xl font-semibold text-brand-900">Claude PI Admin</h1><button onclick="logout()" class="text-brand-500 hover:text-brand-700">Sign Out</button></div>' + (state.error ? '<div class="bg-red-50 text-red-700 px-4 py-3 rounded-lg mb-4">' + state.error + ' <button onclick="setState({error:null})" class="ml-2 underline">Dismiss</button></div>' : '') + '<div class="flex gap-2 mb-6"><button onclick="setState({tab:\\'stats\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'stats' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Stats</button><button onclick="setState({tab:\\'users\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'users' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Users</button><button onclick="setState({tab:\\'keys\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'keys' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">API Keys</button><button onclick="setState({tab:\\'usage\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'usage' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Usage</button></div>' + (state.tab === 'stats' ? statsHtml : '') + (state.tab === 'users' ? usersHtml : '') + (state.tab === 'keys' ? keysHtml : '') + (state.tab === 'usage' ? usageHtml : '') + '<div class="mt-8 pt-6 border-t border-surface-200"><button onclick="runMaintenance()" ' + (state.loading ? 'disabled' : '') + ' class="px-4 py-2 bg-accent-600 text-white rounded-lg hover:bg-accent-500 disabled:opacity-50">' + (state.loading ? 'Running...' : 'Run Maintenance') + '</button><span class="ml-3 text-sm text-brand-500">Cleans expired tokens & resets daily usage counters</span></div></div>' + addKeyModalHtml + addUserModalHtml + userModalHtml + assignKeyModalHtml;
     }
     render();
     const observer = new MutationObserver(() => {
       const nameInput = document.getElementById('newKeyName');
       const valueInput = document.getElementById('newKeyValue');
+      const userEmailInput = document.getElementById('newUserEmail');
+      const userPasswordInput = document.getElementById('newUserPassword');
+      const userTrialDaysInput = document.getElementById('newUserTrialDays');
+      const userStatusInput = document.getElementById('newUserStatus');
       if (nameInput && !nameInput.dataset.bound) { nameInput.dataset.bound = 'true'; nameInput.addEventListener('input', (e) => { state.newKeyName = e.target.value; }); }
       if (valueInput && !valueInput.dataset.bound) { valueInput.dataset.bound = 'true'; valueInput.addEventListener('input', (e) => { state.newKeyValue = e.target.value; }); }
+      if (userEmailInput && !userEmailInput.dataset.bound) { userEmailInput.dataset.bound = 'true'; userEmailInput.addEventListener('input', (e) => { state.newUserEmail = e.target.value; }); }
+      if (userPasswordInput && !userPasswordInput.dataset.bound) { userPasswordInput.dataset.bound = 'true'; userPasswordInput.addEventListener('input', (e) => { state.newUserPassword = e.target.value; }); }
+      if (userTrialDaysInput && !userTrialDaysInput.dataset.bound) { userTrialDaysInput.dataset.bound = 'true'; userTrialDaysInput.addEventListener('input', (e) => { state.newUserTrialDays = Number(e.target.value || 0); }); }
+      if (userStatusInput && !userStatusInput.dataset.bound) { userStatusInput.dataset.bound = 'true'; userStatusInput.addEventListener('change', (e) => { state.newUserStatus = e.target.value; }); }
     });
     observer.observe(document.getElementById('app'), { childList: true, subtree: true });
   </script>
@@ -1309,6 +1365,81 @@ app.post("/v1/usage/log", async (c) => {
   return c.json({ success: true });
 });
 
+app.post("/v1/admin/users", adminAuth, async (c) => {
+  await ensureDatabase();
+  const body = await c.req.json().catch(() => ({}));
+  const email = String(body.email || "").trim().toLowerCase();
+  const password = String(body.password || "");
+  const requestedStatus = String(body.status || "trialing");
+  const trialDaysRaw = Number(body.trialDays);
+  const trialDays = Number.isFinite(trialDaysRaw) ? Math.max(0, Math.floor(trialDaysRaw)) : 14;
+
+  if (!email || !password) {
+    return c.json({ error: "Email and password are required" }, 400);
+  }
+  if (password.length < 8) {
+    return c.json({ error: "Password must be at least 8 characters" }, 400);
+  }
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return c.json({ error: "Invalid email format" }, 400);
+  }
+
+  const existingUser = await getUserByEmail(email);
+  if (existingUser) {
+    return c.json({ error: "An account with this email already exists" }, 409);
+  }
+
+  const user = await createUser(email, hashPassword(password));
+  if (!user) {
+    return c.json({ error: "Failed to create user" }, 500);
+  }
+
+  const subscription = await createSubscription(user.id, trialDays);
+  if (!subscription) {
+    return c.json({ error: "Failed to create subscription" }, 500);
+  }
+
+  if (requestedStatus && requestedStatus !== "trialing") {
+    const status = ["active", "expired", "canceled", "past_due", "unpaid"].includes(requestedStatus)
+      ? requestedStatus
+      : "trialing";
+    await updateSubscription(user.id, { status: status as any });
+  }
+
+  const latest = await getSubscriptionByUserId(user.id);
+  return c.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      createdAt: user.created_at,
+      subscriptionStatus: latest?.status || "none",
+      trialEndsAt: latest?.trial_ends_at || null,
+      currentPeriodEnd: latest?.current_period_end || null,
+    }
+  });
+});
+
+app.delete("/v1/admin/users/:id", adminAuth, async (c) => {
+  await ensureDatabase();
+  const id = parseInt(c.req.param("id"));
+  if (!Number.isFinite(id)) {
+    return c.json({ error: "Invalid user id" }, 400);
+  }
+
+  const existing = await getUserById(id);
+  if (!existing) {
+    return c.json({ error: "User not found" }, 404);
+  }
+
+  await sql`UPDATE api_key_pool SET assigned_to_user_id = NULL WHERE assigned_to_user_id = ${id}`;
+  const result = await sql`DELETE FROM users WHERE id = ${id}`;
+  if ((result.rowCount ?? 0) === 0) {
+    return c.json({ error: "User not found" }, 404);
+  }
+  return c.json({ success: true });
+});
+
 app.get("/v1/admin/users", adminAuth, async (c) => {
   await ensureDatabase();
   const { rows } = await sql`
@@ -1380,6 +1511,11 @@ app.post("/v1/admin/maintenance", adminAuth, async (c) => {
 // Admin UI
 app.get("/admin", (c) => {
   return c.html(ADMIN_HTML);
+});
+
+// Legacy admin URL - keep compatibility while ensuring latest UI
+app.get("/admin.html", (c) => {
+  return c.redirect("/admin", 308);
 });
 
 // 404 handler

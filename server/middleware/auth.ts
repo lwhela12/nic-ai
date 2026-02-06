@@ -18,7 +18,7 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 
 // Subscription server URL
 const SUBSCRIPTION_SERVER =
-  process.env.CLAUDE_PI_SERVER || "https://api.claude-pi.com";
+  process.env.CLAUDE_PI_SERVER || "https://claude-pi-five.vercel.app";
 
 // 24 hours in milliseconds
 const VALIDATION_INTERVAL = 24 * 60 * 60 * 1000;

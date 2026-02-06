@@ -22,7 +22,7 @@ import { acquireCaseLock, releaseCaseLock } from "../lib/case-lock";
 // ============================================================================
 
 const DEV_MODE = process.env.DEV_MODE === "true" || process.env.NODE_ENV !== "production";
-const SUBSCRIPTION_SERVER = process.env.CLAUDE_PI_SERVER || "https://api.claude-pi.com";
+const SUBSCRIPTION_SERVER = process.env.CLAUDE_PI_SERVER || "https://claude-pi-five.vercel.app";
 const CONFIG_DIR = process.env.CLAUDE_PI_CONFIG_DIR || join(homedir(), ".claude-pi");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 

@@ -12,7 +12,7 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 
 // Subscription server URL
 const SUBSCRIPTION_SERVER =
-  process.env.CLAUDE_PI_SERVER || "https://api.claude-pi.com";
+  process.env.CLAUDE_PI_SERVER || "https://claude-pi-five.vercel.app";
 
 // Dev mode flag - must match middleware/auth.ts logic
 // Electron sets ELECTRON_FRONTEND_PATH, so we're only in dev mode when running directly with bun
