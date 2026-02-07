@@ -2,7 +2,12 @@ import { Hono } from "hono";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { bootstrapTeamFounder, requireTeamContext } from "../lib/team";
+import {
+  bootstrapTeamFounder,
+  ensureTeamMember,
+  requireTeamContext,
+  type TeamRole,
+} from "../lib/team";
 
 const auth = new Hono();
 
@@ -36,7 +41,7 @@ interface Config {
 async function validateFirmAccess(
   firmRoot: string | undefined,
   email: string,
-  options?: { bootstrapIfMissing?: boolean }
+  options?: { bootstrapIfMissing?: boolean; autoProvision?: boolean; provisionRole?: TeamRole }
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   if (!firmRoot) return { ok: true };
   const teamResult = await requireTeamContext(firmRoot, email);
@@ -49,6 +54,13 @@ async function validateFirmAccess(
     if (bootstrap.ok) {
       return { ok: true };
     }
+  }
+  if (
+    options?.autoProvision &&
+    (teamResult.reason === "firm_not_bootstrapped" || teamResult.reason === "invite_required")
+  ) {
+    await ensureTeamMember(firmRoot, email, options.provisionRole || "case_manager");
+    return { ok: true };
   }
   return { ok: false, reason: teamResult.reason };
 }
@@ -97,13 +109,18 @@ auth.get("/status", async (c) => {
     let teamPayload: Record<string, unknown> = {};
     let teamAllowed = true;
     if (firmRoot) {
+      const teamAccess = await validateFirmAccess(firmRoot, email, {
+        bootstrapIfMissing: true,
+        autoProvision: true,
+        provisionRole: config.accountType === "sub_user" ? "case_manager" : "attorney",
+      });
       const teamResult = await requireTeamContext(firmRoot, email);
-      if (!teamResult.ok) {
+      if (!teamAccess.ok || !teamResult.ok) {
         teamAllowed = false;
         teamPayload = {
           team: null,
-          teamConfigured: teamResult.team.members.length > 0,
-          teamError: teamResult.reason,
+          teamConfigured: teamResult.ok ? true : teamResult.team.members.length > 0,
+          teamError: teamAccess.ok ? (teamResult.ok ? null : teamResult.reason) : teamAccess.reason,
         };
       } else {
         teamPayload = {
@@ -140,13 +157,18 @@ auth.get("/status", async (c) => {
   let teamPayload: Record<string, unknown> = {};
   let teamAllowed = true;
   if (firmRoot && config.email) {
+    const teamAccess = await validateFirmAccess(firmRoot, config.email, {
+      bootstrapIfMissing: true,
+      autoProvision: true,
+      provisionRole: config.accountType === "sub_user" ? "case_manager" : "attorney",
+    });
     const teamResult = await requireTeamContext(firmRoot, config.email);
-    if (!teamResult.ok) {
+    if (!teamAccess.ok || !teamResult.ok) {
       teamAllowed = false;
       teamPayload = {
         team: null,
-        teamConfigured: teamResult.team.members.length > 0,
-        teamError: teamResult.reason,
+        teamConfigured: teamResult.ok ? true : teamResult.team.members.length > 0,
+        teamError: teamAccess.ok ? (teamResult.ok ? null : teamResult.reason) : teamAccess.reason,
       };
     } else {
       teamPayload = {
@@ -186,7 +208,7 @@ auth.post("/login", async (c) => {
     const firmAccess = await validateFirmAccess(
       typeof firmRoot === "string" ? firmRoot : undefined,
       email,
-      { bootstrapIfMissing: true }
+      { bootstrapIfMissing: true, autoProvision: true, provisionRole: "attorney" }
     );
     if (!firmAccess.ok) {
       return c.json({ error: firmAccess.reason }, 403);
@@ -232,7 +254,11 @@ auth.post("/login", async (c) => {
     const firmAccess = await validateFirmAccess(
       typeof firmRoot === "string" ? firmRoot : undefined,
       data.email,
-      { bootstrapIfMissing: true }
+      {
+        bootstrapIfMissing: true,
+        autoProvision: true,
+        provisionRole: data.accountType === "sub_user" ? "case_manager" : "attorney",
+      }
     );
     if (!firmAccess.ok) {
       return c.json({ error: firmAccess.reason }, 403);
@@ -284,7 +310,7 @@ auth.post("/signup", async (c) => {
     const firmAccess = await validateFirmAccess(
       typeof firmRoot === "string" ? firmRoot : undefined,
       email,
-      { bootstrapIfMissing: true }
+      { bootstrapIfMissing: true, autoProvision: true, provisionRole: "attorney" }
     );
     if (!firmAccess.ok) {
       return c.json({ error: firmAccess.reason }, 403);
@@ -331,7 +357,11 @@ auth.post("/signup", async (c) => {
     const firmAccess = await validateFirmAccess(
       typeof firmRoot === "string" ? firmRoot : undefined,
       data.email,
-      { bootstrapIfMissing: true }
+      {
+        bootstrapIfMissing: true,
+        autoProvision: true,
+        provisionRole: data.accountType === "sub_user" ? "case_manager" : "attorney",
+      }
     );
     if (!firmAccess.ok) {
       return c.json({ error: firmAccess.reason }, 403);

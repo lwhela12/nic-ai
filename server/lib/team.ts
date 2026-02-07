@@ -444,6 +444,38 @@ export async function listTeamForUser(firmRoot: string, actorEmail: string): Pro
   };
 }
 
+export async function ensureTeamMember(
+  firmRoot: string,
+  rawEmail: string,
+  role: TeamRole
+): Promise<{ team: TeamState; context: TeamContext }> {
+  const email = normalizeEmail(rawEmail);
+  let team = await loadTeamState(firmRoot);
+  team = expireStaleInvites(team);
+
+  const existing = findActiveMember(team, email);
+  if (existing) {
+    return { team, context: toContext(existing) };
+  }
+
+  const member: TeamMember = {
+    id: randomUUID(),
+    email,
+    role,
+    status: "active",
+    joinedAt: nowIso(),
+    invitedBy: "remote_sync",
+  };
+
+  const next: TeamState = {
+    ...team,
+    members: [...team.members, member],
+  };
+  await saveTeamState(firmRoot, next);
+
+  return { team: next, context: toContext(member) };
+}
+
 export async function bootstrapTeamFounder(
   firmRoot: string,
   rawEmail: string

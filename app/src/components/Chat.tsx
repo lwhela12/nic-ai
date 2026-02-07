@@ -688,7 +688,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                   onIndexMayHaveChanged()
                 }
                 // Check if file-writing tools were used or document agent created a file
-                const writeTools = ['Write', 'write_file']
+                const writeTools = ['Write', 'write_file', 'create_evidence_packet', 'build_evidence_packet']
                 const hasWriteTools = toolsUsed.some(t => writeTools.some(wt => t.includes(wt)))
                 const hasDocGenFile = !!data.filePath
                 if ((hasWriteTools || hasDocGenFile) && onDraftsMayHaveChanged) {

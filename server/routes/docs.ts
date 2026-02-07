@@ -13,6 +13,11 @@ import {
 } from "../lib/export";
 import type { DocxStyles } from "../lib/extract";
 import { requireCaseAccess } from "../lib/team-access";
+import {
+  buildEvidencePacket,
+  type EvidencePacketDocumentInput,
+  type EvidencePacketOrderRule,
+} from "../lib/evidence-packet";
 
 const execAsync = promisify(exec);
 
@@ -590,6 +595,145 @@ interface Exhibit {
   date?: string;
   description?: string;
 }
+
+// Build a hearing/appeal evidence packet with:
+// - pleading-paper front matter (index + affirmation/service page)
+// - deterministic document ordering
+// - merged PDF exhibits with page labels
+// - optional DOB/SSN detection/redaction
+app.post("/bundle-evidence-packet", async (c) => {
+  const {
+    caseFolder,
+    documents,
+    caption,
+    orderRules,
+    redaction,
+    service,
+    includeAffirmationPage,
+    pageStampPrefix,
+    pageStampStart,
+    outputPath = "Litigation/Claimant Evidence Packet.pdf",
+    firmBlockLines,
+  } = await c.req.json();
+
+  if (!caseFolder || !Array.isArray(documents) || documents.length === 0) {
+    return c.json({ error: "caseFolder and documents[] are required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  let claimantName = caption?.claimantName as string | undefined;
+  if (!claimantName) {
+    try {
+      const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+      const indexContent = await readFile(indexPath, "utf-8");
+      const documentIndex = JSON.parse(indexContent);
+      claimantName = documentIndex?.summary?.client;
+    } catch {
+      // no-op
+    }
+  }
+
+  if (!claimantName) {
+    return c.json({
+      error: "caption.claimantName is required (or .pi_tool/document_index.json must contain summary.client)",
+    }, 400);
+  }
+
+  const normalizedDocuments: EvidencePacketDocumentInput[] = [];
+  for (const raw of documents as any[]) {
+    if (!raw || typeof raw.path !== "string") {
+      return c.json({ error: "Each document must include a string path" }, 400);
+    }
+
+    const title = typeof raw.title === "string" && raw.title.trim()
+      ? raw.title.trim()
+      : basename(raw.path);
+
+    normalizedDocuments.push({
+      path: raw.path,
+      title,
+      date: typeof raw.date === "string" ? raw.date : undefined,
+      docType: typeof raw.docType === "string" ? raw.docType : undefined,
+      include: typeof raw.include === "boolean" ? raw.include : true,
+    });
+  }
+
+  const normalizedRules: EvidencePacketOrderRule[] | undefined = Array.isArray(orderRules)
+    ? orderRules
+      .filter((rule: any) => rule && typeof rule.id === "string")
+      .map((rule: any) => ({
+        id: rule.id,
+        required: Boolean(rule.required),
+        match: rule.match,
+        sortBy: rule.sortBy,
+        sortDirection: rule.sortDirection,
+      }))
+    : undefined;
+
+  let resolvedFirmBlockLines: string[] | undefined = Array.isArray(firmBlockLines)
+    ? firmBlockLines.filter((line: any) => typeof line === "string" && line.trim())
+    : undefined;
+
+  if (!resolvedFirmBlockLines || resolvedFirmBlockLines.length === 0) {
+    try {
+      const firmInfo = await loadFirmInfo(dirname(caseFolder));
+      if (firmInfo) {
+        resolvedFirmBlockLines = [
+          firmInfo.firmName,
+          firmInfo.address,
+          `${firmInfo.city || ""}${firmInfo.city && firmInfo.state ? ", " : ""}${firmInfo.state || ""} ${firmInfo.zip || ""}`.trim(),
+          firmInfo.phone,
+        ].filter((line): line is string => Boolean(line && line.trim()));
+      }
+    } catch {
+      // no-op
+    }
+  }
+
+  try {
+    const result = await buildEvidencePacket({
+      caseFolder,
+      documents: normalizedDocuments,
+      caption: {
+        claimantName,
+        claimNumber: caption?.claimNumber,
+        hearingNumber: caption?.hearingNumber,
+        hearingDateTime: caption?.hearingDateTime,
+        appearance: caption?.appearance,
+        introductoryCounselLine: caption?.introductoryCounselLine,
+      },
+      orderRules: normalizedRules,
+      redaction,
+      service,
+      includeAffirmationPage: includeAffirmationPage !== false,
+      pageStampPrefix: typeof pageStampPrefix === "string" ? pageStampPrefix : undefined,
+      pageStampStart: typeof pageStampStart === "number" ? pageStampStart : undefined,
+      firmBlockLines: resolvedFirmBlockLines,
+    });
+
+    const fullOutputPath = join(caseFolder, outputPath);
+    await mkdir(dirname(fullOutputPath), { recursive: true });
+    await writeFile(fullOutputPath, result.pdfBytes);
+
+    return c.json({
+      success: true,
+      outputPath,
+      fullPath: fullOutputPath,
+      totalPages: result.totalPages,
+      tocEntries: result.tocEntries,
+      orderedDocuments: result.orderedDocuments,
+      warnings: result.warnings,
+      redactionFindings: result.redactionFindings,
+    });
+  } catch (err) {
+    console.error("bundle-evidence-packet error:", err);
+    return c.json({ error: `Evidence packet build failed: ${err}` }, 500);
+  }
+});
 
 // Bundle demand letter with exhibits into a single PDF package
 app.post("/bundle-demand", async (c) => {
