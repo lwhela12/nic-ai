@@ -1097,6 +1097,7 @@ function App() {
     const url = `${API_URL}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(resolvedPath)}`
     setFileViewUrl(url)
     setFileViewName(resolvedPath.split('/').pop() || resolvedPath)
+    setSelectedFilePath(resolvedPath)
     setViewContent('')
   }, [caseFolder, documentIndex])
 
@@ -1572,6 +1573,7 @@ function App() {
             docPath={viewDocPath}
             fileUrl={fileViewUrl}
             fileName={fileViewName}
+            filePath={selectedFilePath}
             caseFolder={caseFolder}
             apiUrl={API_URL}
             documentIndex={documentIndex}

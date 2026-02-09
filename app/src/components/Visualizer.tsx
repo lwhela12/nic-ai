@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, type MouseEvent } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Document, Page, pdfjs } from 'react-pdf'
@@ -23,6 +23,7 @@ interface Props {
   docPath: string | null
   fileUrl: string | null
   fileName: string
+  filePath: string | null
   caseFolder: string
   apiUrl: string
   documentIndex: DocumentIndex | null
@@ -35,6 +36,42 @@ interface Props {
   onToggleViewMode?: () => void
   hasFile?: boolean
   hasSummary?: boolean
+}
+
+interface PiiFinding {
+  path: string
+  page: number
+  kind: 'dob' | 'ssn'
+  preview: string
+}
+
+interface RedactionBoxInput {
+  page: number
+  xPct: number
+  yPct: number
+  widthPct: number
+  heightPct: number
+}
+
+interface OverlayRedactionBox extends RedactionBoxInput {
+  id: string
+  source: 'manual' | 'detected'
+  kind?: 'dob' | 'ssn'
+  preview?: string
+}
+
+interface DraftRedactionBox {
+  startX: number
+  startY: number
+  currentX: number
+  currentY: number
+}
+
+const clamp01 = (value: number): number => {
+  if (!Number.isFinite(value)) return 0
+  if (value < 0) return 0
+  if (value > 1) return 1
+  return value
 }
 
 // Icons
@@ -125,7 +162,7 @@ const DocumentTextIcon = () => (
   </svg>
 )
 
-export default function Visualizer({ content, docPath, fileUrl, fileName, caseFolder, apiUrl, documentIndex, firmRoot: _firmRoot, onCloseFile, onIndexUpdated, onDraftsUpdated, refreshDraftsKey, viewMode = 'summary', onToggleViewMode, hasFile, hasSummary }: Props) {
+export default function Visualizer({ content, docPath, fileUrl, fileName, filePath, caseFolder, apiUrl, documentIndex, firmRoot: _firmRoot, onCloseFile, onIndexUpdated, onDraftsUpdated, refreshDraftsKey, viewMode = 'summary', onToggleViewMode, hasFile, hasSummary }: Props) {
   const [activeTab, setActiveTab] = useState<'view' | 'review' | 'drafts'>('view')
   const [verifiedItems, setVerifiedItems] = useState<Set<string>>(new Set())
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
@@ -150,6 +187,21 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
   const [pdfScale, setPdfScale] = useState(1.0)
   const pdfContainerRef = useRef<HTMLDivElement>(null)
   const [pdfContainerWidth, setPdfContainerWidth] = useState<number | null>(null)
+  const pageLayerRef = useRef<HTMLDivElement>(null)
+  const [pageLayerSize, setPageLayerSize] = useState<{ width: number; height: number } | null>(null)
+
+  const [piiFindings, setPiiFindings] = useState<PiiFinding[]>([])
+  const [piiWarnings, setPiiWarnings] = useState<string[]>([])
+  const [detectedBoxes, setDetectedBoxes] = useState<OverlayRedactionBox[]>([])
+  const [manualBoxes, setManualBoxes] = useState<OverlayRedactionBox[]>([])
+  const [showPiiPanel, setShowPiiPanel] = useState(false)
+  const [isScanningPii, setIsScanningPii] = useState(false)
+  const [isDrawMode, setIsDrawMode] = useState(false)
+  const [draftRedactionBox, setDraftRedactionBox] = useState<DraftRedactionBox | null>(null)
+  const [isSavingRedactions, setIsSavingRedactions] = useState(false)
+  const [redactionMessage, setRedactionMessage] = useState<string | null>(null)
+  const [redactionError, setRedactionError] = useState<string | null>(null)
+  const [redactedOutputPath, setRedactedOutputPath] = useState<string | null>(null)
 
   const errata: ErrataItem[] = Array.isArray(documentIndex?.errata) ? documentIndex.errata : []
   const needsReview: NeedsReviewItem[] = Array.isArray(documentIndex?.needs_review) ? documentIndex.needs_review : []
@@ -256,6 +308,235 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
     resizeObserver.observe(pdfContainerRef.current)
     return () => resizeObserver.disconnect()
   }, [fileUrl])
+
+  useEffect(() => {
+    if (!pageLayerRef.current) {
+      setPageLayerSize(null)
+      return
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setPageLayerSize({
+          width: entry.contentRect.width,
+          height: entry.contentRect.height,
+        })
+      }
+    })
+
+    observer.observe(pageLayerRef.current)
+    return () => observer.disconnect()
+  }, [fileUrl, pdfPageNumber, pdfScale, pdfContainerWidth])
+
+  useEffect(() => {
+    setPiiFindings([])
+    setPiiWarnings([])
+    setDetectedBoxes([])
+    setManualBoxes([])
+    setShowPiiPanel(false)
+    setIsDrawMode(false)
+    setDraftRedactionBox(null)
+    setRedactionMessage(null)
+    setRedactionError(null)
+    setRedactedOutputPath(null)
+  }, [filePath])
+
+  const redactionBoxKey = useCallback((box: RedactionBoxInput) => (
+    `${box.page}:${box.xPct.toFixed(5)}:${box.yPct.toFixed(5)}:${box.widthPct.toFixed(5)}:${box.heightPct.toFixed(5)}`
+  ), [])
+
+  const getOverlayPoint = (event: MouseEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+    const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top))
+    return { x, y }
+  }
+
+  const finalizeDraftRedactionBox = useCallback(() => {
+    if (!draftRedactionBox || !pageLayerSize) return
+
+    const left = Math.min(draftRedactionBox.startX, draftRedactionBox.currentX)
+    const top = Math.min(draftRedactionBox.startY, draftRedactionBox.currentY)
+    const width = Math.abs(draftRedactionBox.currentX - draftRedactionBox.startX)
+    const height = Math.abs(draftRedactionBox.currentY - draftRedactionBox.startY)
+
+    setDraftRedactionBox(null)
+
+    if (width < 6 || height < 6) return
+
+    setManualBoxes((prev) => [
+      ...prev,
+      {
+        id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        page: pdfPageNumber,
+        xPct: clamp01(left / pageLayerSize.width),
+        yPct: clamp01(top / pageLayerSize.height),
+        widthPct: clamp01(width / pageLayerSize.width),
+        heightPct: clamp01(height / pageLayerSize.height),
+        source: 'manual',
+      },
+    ])
+    setRedactionMessage(null)
+    setRedactionError(null)
+  }, [draftRedactionBox, pageLayerSize, pdfPageNumber])
+
+  const handleScanPii = useCallback(async () => {
+    if (!caseFolder || !filePath || !fileName.toLowerCase().endsWith('.pdf')) return
+
+    setIsScanningPii(true)
+    setRedactionMessage(null)
+    setRedactionError(null)
+
+    try {
+      const res = await fetch(`${apiUrl}/api/docs/scan-pii`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ caseFolder, path: filePath }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data?.error || 'PII scan failed')
+      }
+
+      const findings: PiiFinding[] = Array.isArray(data?.findings)
+        ? data.findings
+          .map((item: any) => ({
+            path: typeof item?.path === 'string' ? item.path : filePath,
+            page: typeof item?.page === 'number' ? item.page : Number(item?.page),
+            kind: item?.kind === 'ssn' ? 'ssn' : 'dob',
+            preview: typeof item?.preview === 'string' ? item.preview : '',
+          }))
+          .filter((item: PiiFinding) => Number.isFinite(item.page) && item.page >= 1)
+          .sort((a: PiiFinding, b: PiiFinding) => a.page - b.page)
+        : []
+
+      const boxes: OverlayRedactionBox[] = Array.isArray(data?.boxes)
+        ? data.boxes
+          .map((item: any, index: number) => ({
+            id: `detected-${Date.now()}-${index}`,
+            page: typeof item?.page === 'number' ? item.page : Number(item?.page),
+            xPct: clamp01(typeof item?.xPct === 'number' ? item.xPct : Number(item?.xPct)),
+            yPct: clamp01(typeof item?.yPct === 'number' ? item.yPct : Number(item?.yPct)),
+            widthPct: clamp01(typeof item?.widthPct === 'number' ? item.widthPct : Number(item?.widthPct)),
+            heightPct: clamp01(typeof item?.heightPct === 'number' ? item.heightPct : Number(item?.heightPct)),
+            source: 'detected' as const,
+            kind: item?.kind === 'ssn' ? 'ssn' : 'dob',
+            preview: typeof item?.preview === 'string' ? item.preview : '',
+          }))
+          .filter((item: OverlayRedactionBox) => Number.isFinite(item.page) && item.page >= 1 && item.widthPct > 0 && item.heightPct > 0)
+        : []
+
+      setPiiFindings(findings)
+      setPiiWarnings(Array.isArray(data?.warnings) ? data.warnings.filter((w: any) => typeof w === 'string') : [])
+      setDetectedBoxes(boxes)
+      setShowPiiPanel(true)
+      setRedactionMessage(findings.length > 0
+        ? `Found ${findings.length} possible PII item(s).`
+        : 'No likely DOB/SSN patterns found in this PDF scan.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'PII scan failed'
+      setRedactionError(message)
+    } finally {
+      setIsScanningPii(false)
+    }
+  }, [apiUrl, caseFolder, fileName, filePath])
+
+  const handleUseDetectedBoxes = useCallback(() => {
+    if (detectedBoxes.length === 0) return
+
+    setManualBoxes((prev) => {
+      const seen = new Set(prev.map((box) => redactionBoxKey(box)))
+      const next = [...prev]
+
+      for (const box of detectedBoxes) {
+        const normalized: OverlayRedactionBox = {
+          id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          page: box.page,
+          xPct: box.xPct,
+          yPct: box.yPct,
+          widthPct: box.widthPct,
+          heightPct: box.heightPct,
+          source: 'manual',
+          kind: box.kind,
+          preview: box.preview,
+        }
+        const key = redactionBoxKey(normalized)
+        if (seen.has(key)) continue
+        seen.add(key)
+        next.push(normalized)
+      }
+
+      return next
+    })
+
+    setRedactionMessage('Detected boxes copied into manual redactions.')
+    setRedactionError(null)
+  }, [detectedBoxes, redactionBoxKey])
+
+  const handleUndoManualBox = useCallback(() => {
+    setManualBoxes((prev) => {
+      if (prev.length === 0) return prev
+      const lastOnPageIndex = [...prev]
+        .map((box, index) => ({ box, index }))
+        .reverse()
+        .find(({ box }) => box.page === pdfPageNumber)?.index
+      if (lastOnPageIndex === undefined) return prev.slice(0, -1)
+      return prev.filter((_, index) => index !== lastOnPageIndex)
+    })
+  }, [pdfPageNumber])
+
+  const handleClearCurrentPageBoxes = useCallback(() => {
+    setManualBoxes((prev) => prev.filter((box) => box.page !== pdfPageNumber))
+  }, [pdfPageNumber])
+
+  const handleClearAllBoxes = useCallback(() => {
+    setManualBoxes([])
+  }, [])
+
+  const handleSaveRedactedCopy = useCallback(async () => {
+    if (!caseFolder || !filePath || manualBoxes.length === 0) return
+
+    setIsSavingRedactions(true)
+    setRedactionMessage(null)
+    setRedactionError(null)
+
+    try {
+      const boxes: RedactionBoxInput[] = manualBoxes.map((box) => ({
+        page: box.page,
+        xPct: box.xPct,
+        yPct: box.yPct,
+        widthPct: box.widthPct,
+        heightPct: box.heightPct,
+      }))
+
+      const res = await fetch(`${apiUrl}/api/docs/redact-pdf-manual`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ caseFolder, path: filePath, boxes }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data?.error || 'Failed to save redacted copy')
+      }
+
+      const outputPath = typeof data?.outputPath === 'string' ? data.outputPath : null
+      setRedactedOutputPath(outputPath)
+      setRedactionMessage(outputPath
+        ? `Saved redacted copy: ${outputPath}`
+        : 'Saved redacted copy.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save redacted copy'
+      setRedactionError(message)
+    } finally {
+      setIsSavingRedactions(false)
+    }
+  }, [apiUrl, caseFolder, filePath, manualBoxes])
+
+  const handleOpenRedactedCopy = useCallback(() => {
+    if (!caseFolder || !redactedOutputPath) return
+    const url = `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(redactedOutputPath)}#view=FitH`
+    window.open(url, '_blank', 'width=1200,height=900')
+  }, [apiUrl, caseFolder, redactedOutputPath])
 
   // Handle bundle generation
   const handleGeneratePackage = async () => {
@@ -462,6 +743,17 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
   const isMarkdown = content.startsWith('#') || content.includes('\n##') || content.includes('\n- ') || content.includes('\n* ')
   const isPdf = fileName.toLowerCase().endsWith('.pdf')
   const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(fileName)
+  const currentPageDetectedBoxes = detectedBoxes.filter((box) => box.page === pdfPageNumber)
+  const currentPageManualBoxes = manualBoxes.filter((box) => box.page === pdfPageNumber)
+
+  const draftBoxStyle = draftRedactionBox && pageLayerSize
+    ? {
+        left: Math.min(draftRedactionBox.startX, draftRedactionBox.currentX),
+        top: Math.min(draftRedactionBox.startY, draftRedactionBox.currentY),
+        width: Math.abs(draftRedactionBox.currentX - draftRedactionBox.startX),
+        height: Math.abs(draftRedactionBox.currentY - draftRedactionBox.startY),
+      }
+    : null
 
   return (
     <div className="flex flex-col h-full">
@@ -747,7 +1039,7 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
                 {isPdf ? (
                   <>
                     {/* PDF toolbar */}
-                    <div className="flex items-center gap-2 px-3 py-2 bg-surface-50 border-b border-surface-200">
+                    <div className="flex items-center gap-2 px-3 py-2 bg-surface-50 border-b border-surface-200 flex-wrap">
                       <button
                         onClick={() => setPdfPageNumber(Math.max(1, pdfPageNumber - 1))}
                         disabled={pdfPageNumber <= 1}
@@ -800,7 +1092,125 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
                       >
                         Fit
                       </button>
+
+                      <div className="w-px h-4 bg-surface-300 mx-1" />
+
+                      <button
+                        onClick={handleScanPii}
+                        disabled={!filePath || isScanningPii}
+                        className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Detect likely DOB/SSN patterns"
+                      >
+                        {isScanningPii ? 'Scanning...' : 'Scan PII'}
+                      </button>
+                      <button
+                        onClick={() => setShowPiiPanel((prev) => !prev)}
+                        disabled={piiFindings.length === 0 && piiWarnings.length === 0}
+                        className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Show possible PII findings"
+                      >
+                        Findings {piiFindings.length > 0 ? `(${piiFindings.length})` : ''}
+                      </button>
+                      <button
+                        onClick={() => setIsDrawMode((prev) => !prev)}
+                        className={`px-2.5 py-1 text-xs rounded border ${
+                          isDrawMode
+                            ? 'border-red-300 bg-red-50 text-red-700'
+                            : 'border-surface-300 bg-white hover:bg-surface-100 text-brand-700'
+                        }`}
+                        title="Draw manual redaction rectangles on the page"
+                      >
+                        {isDrawMode ? 'Drawing On' : 'Draw Redaction'}
+                      </button>
+                      <button
+                        onClick={handleUseDetectedBoxes}
+                        disabled={detectedBoxes.length === 0}
+                        className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Copy detected boxes to manual redactions"
+                      >
+                        Use Detected
+                      </button>
+                      <button
+                        onClick={handleUndoManualBox}
+                        disabled={manualBoxes.length === 0}
+                        className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Undo
+                      </button>
+                      <button
+                        onClick={handleClearCurrentPageBoxes}
+                        disabled={currentPageManualBoxes.length === 0}
+                        className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Clear Page
+                      </button>
+                      <button
+                        onClick={handleClearAllBoxes}
+                        disabled={manualBoxes.length === 0}
+                        className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Clear All
+                      </button>
+                      <button
+                        onClick={handleSaveRedactedCopy}
+                        disabled={!filePath || manualBoxes.length === 0 || isSavingRedactions}
+                        className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-brand-900 text-white hover:bg-brand-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Save a new redacted PDF copy"
+                      >
+                        {isSavingRedactions ? 'Saving...' : 'Save Redacted Copy'}
+                      </button>
                     </div>
+
+                    {(redactionMessage || redactionError || redactedOutputPath) && (
+                      <div className="px-3 py-2 border-b border-surface-200 bg-white flex items-center justify-between gap-2">
+                        <div className={`text-xs ${redactionError ? 'text-red-700' : 'text-brand-700'}`}>
+                          {redactionError || redactionMessage}
+                        </div>
+                        {redactedOutputPath && (
+                          <button
+                            onClick={handleOpenRedactedCopy}
+                            className="px-2 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700"
+                          >
+                            Open Redacted Copy
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {showPiiPanel && (
+                      <div className="px-3 py-2 border-b border-surface-200 bg-amber-50/60">
+                        <div className="flex items-center justify-between mb-1">
+                          <p className="text-xs font-semibold text-amber-800">
+                            Possible PII Findings
+                          </p>
+                          <p className="text-xs text-amber-700">
+                            Pages: {Array.from(new Set(piiFindings.map((item) => item.page))).sort((a, b) => a - b).join(', ') || 'none'}
+                          </p>
+                        </div>
+                        {piiFindings.length === 0 ? (
+                          <p className="text-xs text-amber-800">No likely DOB/SSN patterns found.</p>
+                        ) : (
+                          <div className="max-h-28 overflow-auto space-y-1">
+                            {piiFindings.map((item, index) => (
+                              <button
+                                key={`${item.page}-${item.kind}-${index}`}
+                                onClick={() => setPdfPageNumber(item.page)}
+                                className="w-full text-left px-2 py-1 text-xs rounded bg-white border border-amber-200 hover:bg-amber-100 transition-colors"
+                              >
+                                Pg {item.page} • {item.kind.toUpperCase()} • {item.preview || 'masked'}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {piiWarnings.length > 0 && (
+                          <div className="mt-2 space-y-1">
+                            {piiWarnings.map((warning, index) => (
+                              <p key={index} className="text-xs text-amber-900">{warning}</p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {/* PDF document - nested containers for proper scrollbar positioning */}
                     <div ref={pdfContainerRef} className="flex-1 overflow-hidden relative bg-surface-200">
                       <div className="absolute inset-0 overflow-auto p-4">
@@ -825,13 +1235,80 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
                               </div>
                             }
                           >
-                            <Page
-                              pageNumber={pdfPageNumber}
-                              width={pdfContainerWidth ? Math.min(pdfContainerWidth - 32, 800) * pdfScale : undefined}
-                              className="shadow-lg"
-                              renderTextLayer={true}
-                              renderAnnotationLayer={true}
-                            />
+                            <div ref={pageLayerRef} className="relative inline-block">
+                              <Page
+                                pageNumber={pdfPageNumber}
+                                width={pdfContainerWidth ? Math.min(pdfContainerWidth - 32, 800) * pdfScale : undefined}
+                                className="shadow-lg"
+                                renderTextLayer={true}
+                                renderAnnotationLayer={true}
+                              />
+                              <div
+                                className={`absolute inset-0 ${isDrawMode ? 'cursor-crosshair' : 'pointer-events-none'}`}
+                                onMouseDown={(event) => {
+                                  if (!isDrawMode) return
+                                  event.preventDefault()
+                                  const point = getOverlayPoint(event)
+                                  setDraftRedactionBox({
+                                    startX: point.x,
+                                    startY: point.y,
+                                    currentX: point.x,
+                                    currentY: point.y,
+                                  })
+                                  setRedactionMessage(null)
+                                  setRedactionError(null)
+                                }}
+                                onMouseMove={(event) => {
+                                  if (!isDrawMode || !draftRedactionBox) return
+                                  event.preventDefault()
+                                  const point = getOverlayPoint(event)
+                                  setDraftRedactionBox({
+                                    ...draftRedactionBox,
+                                    currentX: point.x,
+                                    currentY: point.y,
+                                  })
+                                }}
+                                onMouseUp={() => {
+                                  if (!isDrawMode) return
+                                  finalizeDraftRedactionBox()
+                                }}
+                                onMouseLeave={() => {
+                                  if (!isDrawMode) return
+                                  finalizeDraftRedactionBox()
+                                }}
+                              >
+                                {currentPageDetectedBoxes.map((box) => (
+                                  <div
+                                    key={box.id}
+                                    className="absolute border border-amber-500 bg-amber-300/30 pointer-events-none"
+                                    style={{
+                                      left: `${box.xPct * 100}%`,
+                                      top: `${box.yPct * 100}%`,
+                                      width: `${box.widthPct * 100}%`,
+                                      height: `${box.heightPct * 100}%`,
+                                    }}
+                                  />
+                                ))}
+                                {currentPageManualBoxes.map((box) => (
+                                  <div
+                                    key={box.id}
+                                    className="absolute border border-black bg-black/60 pointer-events-none"
+                                    style={{
+                                      left: `${box.xPct * 100}%`,
+                                      top: `${box.yPct * 100}%`,
+                                      width: `${box.widthPct * 100}%`,
+                                      height: `${box.heightPct * 100}%`,
+                                    }}
+                                  />
+                                ))}
+                                {draftBoxStyle && (
+                                  <div
+                                    className="absolute border-2 border-red-600 bg-red-400/25 pointer-events-none"
+                                    style={draftBoxStyle}
+                                  />
+                                )}
+                              </div>
+                            </div>
                           </Document>
                         </div>
                       </div>

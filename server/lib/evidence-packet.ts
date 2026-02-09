@@ -76,6 +76,25 @@ export interface EvidencePacketRedactionFinding {
   preview: string;
 }
 
+export interface EvidencePacketSensitiveDetectionBox {
+  path: string;
+  page: number;
+  kind: "dob" | "ssn";
+  preview: string;
+  xMin: number;
+  yMin: number;
+  xMax: number;
+  yMax: number;
+}
+
+export interface EvidencePacketManualRedactionBox {
+  page: number;
+  xPct: number;
+  yPct: number;
+  widthPct: number;
+  heightPct: number;
+}
+
 export interface BuildEvidencePacketResult {
   pdfBytes: Uint8Array;
   orderedDocuments: EvidencePacketDocumentInput[];
@@ -111,6 +130,13 @@ const SSN_NO_DASH_REGEX = /^\d{9}$/;
 const DATE_REGEX = /^\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}$/;
 const DOB_CONTEXT_REGEX = /\b(dob|d\.?o\.?b|date of birth|birth date)\b/i;
 const SSN_CONTEXT_REGEX = /\b(ssn|social security|social)\b/i;
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+}
 
 export async function buildEvidencePacket(
   options: BuildEvidencePacketOptions
@@ -386,6 +412,49 @@ async function redactPdfIfRequested(
   return { pdfBytes: redactedBytes, findings, warnings };
 }
 
+export async function scanPdfForSensitiveData(
+  absolutePath: string,
+  relativePath: string,
+  options: { failOnUnprocessable?: boolean } = {}
+): Promise<{
+  findings: EvidencePacketRedactionFinding[];
+  warnings: string[];
+  boxes: EvidencePacketSensitiveDetectionBox[];
+}> {
+  const warnings: string[] = [];
+
+  const bboxHtml = await extractBboxLayout(absolutePath);
+  if (!bboxHtml) {
+    const message = `Could not extract text coordinates for ${relativePath}; PII scan skipped`;
+    if (options.failOnUnprocessable) {
+      throw new Error(message);
+    }
+    warnings.push(message);
+    return { findings: [], warnings, boxes: [] };
+  }
+
+  const sensitiveBoxes = detectSensitiveBoxes(bboxHtml, relativePath);
+  const boxes: EvidencePacketSensitiveDetectionBox[] = sensitiveBoxes.map((item) => ({
+    path: relativePath,
+    page: item.page,
+    kind: item.kind,
+    preview: item.preview,
+    xMin: item.box.xMin,
+    yMin: item.box.yMin,
+    xMax: item.box.xMax,
+    yMax: item.box.yMax,
+  }));
+
+  const findings: EvidencePacketRedactionFinding[] = boxes.map((item) => ({
+    path: item.path,
+    page: item.page,
+    kind: item.kind,
+    preview: item.preview,
+  }));
+
+  return { findings, warnings, boxes };
+}
+
 async function extractBboxLayout(pdfPath: string): Promise<string | null> {
   try {
     const stdout = await runPdftotext(["-bbox-layout", pdfPath, "-"], {
@@ -501,6 +570,40 @@ async function applyRedactionBoxes(
       x,
       y,
       width,
+      height: redactionHeight,
+      color: rgb(0, 0, 0),
+      borderColor: rgb(0, 0, 0),
+      borderWidth: 0,
+    });
+  }
+
+  return pdf.save();
+}
+
+export async function applyManualRedactionBoxes(
+  pdfBytes: Uint8Array,
+  boxes: EvidencePacketManualRedactionBox[]
+): Promise<Uint8Array> {
+  const pdf = await PDFDocument.load(pdfBytes);
+
+  for (const item of boxes) {
+    if (!item || !Number.isFinite(item.page)) continue;
+    const page = pdf.getPage(Math.floor(item.page) - 1);
+    if (!page) continue;
+
+    const { width, height } = page.getSize();
+    const x = clamp01(item.xPct) * width;
+    const yFromTop = clamp01(item.yPct) * height;
+    const redactionWidth = clamp01(item.widthPct) * width;
+    const redactionHeight = clamp01(item.heightPct) * height;
+    if (redactionWidth < 1 || redactionHeight < 1) continue;
+
+    const y = Math.max(0, height - yFromTop - redactionHeight);
+
+    page.drawRectangle({
+      x,
+      y,
+      width: redactionWidth,
       height: redactionHeight,
       color: rgb(0, 0, 0),
       borderColor: rgb(0, 0, 0),

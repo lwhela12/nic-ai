@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { readdir, readFile, writeFile, mkdir, stat } from "fs/promises";
-import { join, dirname, basename } from "path";
+import { join, dirname, basename, resolve, sep } from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
@@ -16,6 +16,9 @@ import type { DocxStyles } from "../lib/extract";
 import { requireCaseAccess } from "../lib/team-access";
 import {
   buildEvidencePacket,
+  scanPdfForSensitiveData,
+  applyManualRedactionBoxes,
+  type EvidencePacketManualRedactionBox,
   type EvidencePacketDocumentInput,
   type EvidencePacketOrderRule,
 } from "../lib/evidence-packet";
@@ -58,6 +61,31 @@ async function resolveCaseName(caseFolder: string, providedCaseName?: string): P
   }
 
   return undefined;
+}
+
+function resolveCasePath(caseFolder: string, relativePath: string): string {
+  const base = resolve(caseFolder);
+  const target = resolve(base, relativePath);
+  if (target !== base && !target.startsWith(base + sep)) {
+    throw new Error(`Path is outside case folder: ${relativePath}`);
+  }
+  return target;
+}
+
+function normalizeRelativePath(path: string): string {
+  return path
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "")
+    .replace(/\/+/g, "/")
+    .trim();
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
 }
 
 const app = new Hono();
@@ -638,6 +666,155 @@ interface Exhibit {
   date?: string;
   description?: string;
 }
+
+// Scan a PDF for likely DOB/SSN locations.
+// Non-blocking by design: returns findings/warnings only.
+app.post("/scan-pii", async (c) => {
+  const { caseFolder, path } = await c.req.json();
+
+  if (!caseFolder || typeof path !== "string" || !path.trim()) {
+    return c.json({ error: "caseFolder and path are required" }, 400);
+  }
+
+  if (!path.toLowerCase().endsWith(".pdf")) {
+    return c.json({ error: "PII scan only supports PDF files" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  const relativePath = normalizeRelativePath(path);
+
+  try {
+    const fullPath = resolveCasePath(caseFolder, relativePath);
+    const scan = await scanPdfForSensitiveData(fullPath, relativePath);
+
+    const pdfBytes = await readFile(fullPath);
+    const pdf = await PDFDocument.load(pdfBytes);
+    const boxes = scan.boxes
+      .map((item) => {
+        const page = pdf.getPage(item.page - 1);
+        if (!page) return null;
+        const { width, height } = page.getSize();
+        if (width <= 0 || height <= 0) return null;
+        return {
+          page: item.page,
+          kind: item.kind,
+          preview: item.preview,
+          xPct: clamp01(item.xMin / width),
+          yPct: clamp01(item.yMin / height),
+          widthPct: clamp01((item.xMax - item.xMin) / width),
+          heightPct: clamp01((item.yMax - item.yMin) / height),
+        };
+      })
+      .filter((box): box is {
+        page: number;
+        kind: "dob" | "ssn";
+        preview: string;
+        xPct: number;
+        yPct: number;
+        widthPct: number;
+        heightPct: number;
+      } => Boolean(box));
+
+    return c.json({
+      success: true,
+      path: relativePath,
+      findings: scan.findings,
+      warnings: scan.warnings,
+      boxes,
+      pages: Array.from(new Set(scan.findings.map((finding) => finding.page))).sort((a, b) => a - b),
+      totalFindings: scan.findings.length,
+    });
+  } catch (err) {
+    console.error("scan-pii error:", err);
+    return c.json({ error: `PII scan failed: ${err}` }, 500);
+  }
+});
+
+// Apply user-drawn redaction rectangles and save a redacted copy.
+app.post("/redact-pdf-manual", async (c) => {
+  const { caseFolder, path, boxes, outputPath } = await c.req.json();
+
+  if (!caseFolder || typeof path !== "string" || !path.trim()) {
+    return c.json({ error: "caseFolder and path are required" }, 400);
+  }
+  if (!Array.isArray(boxes) || boxes.length === 0) {
+    return c.json({ error: "boxes[] is required" }, 400);
+  }
+  if (!path.toLowerCase().endsWith(".pdf")) {
+    return c.json({ error: "Manual redaction only supports PDF files" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  const relativePath = normalizeRelativePath(path);
+
+  const normalizedBoxes: EvidencePacketManualRedactionBox[] = boxes
+    .map((item: any) => ({
+      page: typeof item?.page === "number" ? item.page : Number(item?.page),
+      xPct: typeof item?.xPct === "number" ? item.xPct : Number(item?.xPct),
+      yPct: typeof item?.yPct === "number" ? item.yPct : Number(item?.yPct),
+      widthPct: typeof item?.widthPct === "number" ? item.widthPct : Number(item?.widthPct),
+      heightPct: typeof item?.heightPct === "number" ? item.heightPct : Number(item?.heightPct),
+    }))
+    .filter((item) =>
+      Number.isFinite(item.page) &&
+      Number.isFinite(item.xPct) &&
+      Number.isFinite(item.yPct) &&
+      Number.isFinite(item.widthPct) &&
+      Number.isFinite(item.heightPct) &&
+      item.page >= 1 &&
+      item.widthPct > 0 &&
+      item.heightPct > 0
+    );
+
+  if (normalizedBoxes.length === 0) {
+    return c.json({ error: "No valid redaction boxes were provided" }, 400);
+  }
+
+  const baseName = basename(relativePath, ".pdf");
+  const defaultOutputPath = normalizeRelativePath(
+    join(dirname(relativePath), `${baseName} - REDACTED.pdf`)
+  );
+  const resolvedOutputPath = typeof outputPath === "string" && outputPath.trim()
+    ? normalizeRelativePath(outputPath)
+    : defaultOutputPath;
+
+  if (!resolvedOutputPath.toLowerCase().endsWith(".pdf")) {
+    return c.json({ error: "outputPath must be a PDF path" }, 400);
+  }
+  if (resolvedOutputPath.toLowerCase() === relativePath.toLowerCase()) {
+    return c.json({ error: "outputPath must be different from source path" }, 400);
+  }
+
+  try {
+    const fullInputPath = resolveCasePath(caseFolder, relativePath);
+    const fullOutputPath = resolveCasePath(caseFolder, resolvedOutputPath);
+
+    const inputBytes = await readFile(fullInputPath);
+    const redactedBytes = await applyManualRedactionBoxes(inputBytes, normalizedBoxes);
+
+    await mkdir(dirname(fullOutputPath), { recursive: true });
+    await writeFile(fullOutputPath, redactedBytes);
+
+    return c.json({
+      success: true,
+      sourcePath: relativePath,
+      outputPath: resolvedOutputPath,
+      fullPath: fullOutputPath,
+      boxesApplied: normalizedBoxes.length,
+    });
+  } catch (err) {
+    console.error("redact-pdf-manual error:", err);
+    return c.json({ error: `Manual redaction failed: ${err}` }, 500);
+  }
+});
 
 // Build a hearing/appeal evidence packet with:
 // - pleading-paper front matter (index + affirmation/service page)
