@@ -373,11 +373,15 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
   const [isIndexing, setIsIndexing] = useState(false)
   const [showIndexDetails, setShowIndexDetails] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const indexStatusRequestIdRef = useRef(0)
+  const wasReindexingRef = useRef<boolean>(!!isReindexing)
 
   const checkIndexStatus = useCallback(async () => {
+    const requestId = ++indexStatusRequestIdRef.current
     try {
       const res = await fetch(`${apiUrl}/api/files/index-status?case=${encodeURIComponent(caseFolder)}`)
       const data = await res.json()
+      if (requestId !== indexStatusRequestIdRef.current) return
       setIndexStatus(data)
     } catch {
       // Ignore
@@ -394,6 +398,15 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
     const interval = setInterval(checkIndexStatus, 30000)
     return () => clearInterval(interval)
   }, [caseFolder, checkIndexStatus])
+
+  useEffect(() => {
+    const nowReindexing = !!isReindexing
+    if (wasReindexingRef.current && !nowReindexing && caseFolder) {
+      checkIndexStatus()
+      onIndexMayHaveChanged?.()
+    }
+    wasReindexingRef.current = nowReindexing
+  }, [isReindexing, caseFolder, checkIndexStatus, onIndexMayHaveChanged])
 
   // Notify parent when indexStatus changes (for FileViewer badges)
   useEffect(() => {

@@ -202,8 +202,12 @@ app.get("/index-status", async (c) => {
       const entries = await readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
         if (entry.name === ".pi_tool" || shouldIgnoreFile(entry.name)) continue;
+        // Keep status checks aligned with indexCase/listCaseFiles behavior.
+        // Dot-prefixed folders are linked subcases and are indexed separately.
+        if (entry.isDirectory() && entry.name.startsWith(".")) continue;
+        if (!entry.isDirectory() && entry.name.startsWith(".")) continue;
         const fullPath = join(dir, entry.name);
-        const relativePath = base ? join(base, entry.name) : entry.name;
+        const relativePath = (base ? join(base, entry.name) : entry.name).replace(/\\/g, "/");
 
         if (entry.isDirectory()) {
           const subFiles = await getAllFiles(fullPath, relativePath);
@@ -221,15 +225,27 @@ app.get("/index-status", async (c) => {
 
   const currentFiles = await getAllFiles(caseFolder);
 
-  // Helper to normalize paths (strip ./ prefix)
-  const normalizePath = (p: string) => p.replace(/^\.\//, "");
-
-  // Normalize filenames for comparison (collapse multiple spaces, trim space before extension)
-  const normalizeFilename = (p: string) => {
-    return p
-      .replace(/\s+/g, ' ')           // Collapse multiple spaces to single
-      .replace(/\s+\./g, '.')          // Remove space before dot (extension)
+  // Normalize paths for robust comparison across index shape variants.
+  const normalizePath = (p: string) =>
+    p
+      .replace(/\\/g, "/")
+      .replace(/^\.\/+/, "")
+      .replace(/^\/+/, "")
+      .replace(/\/+/g, "/")
       .trim();
+
+  const normalizeComparablePath = (p: string) =>
+    normalizePath(p)
+      .replace(/\s+/g, " ")  // Collapse repeated whitespace
+      .replace(/\s+\./g, ".") // Remove stray space before extension
+      .toLowerCase();
+
+  const joinRelativePath = (folderName: string, fileName: string): string => {
+    const folder = normalizePath(folderName);
+    const file = normalizePath(fileName);
+    if (!file) return "";
+    if (!folder || folder === "." || folder.toLowerCase() === "root") return file;
+    return `${folder}/${file}`;
   };
 
   // Try to load existing index
@@ -245,24 +261,41 @@ app.get("/index-status", async (c) => {
     const indexStats = await stat(indexPath);
     indexedAt = indexStats.mtimeMs;
 
-    // Collect all indexed file paths (build full path from folder + filename)
+    const addIndexedPath = (pathLike: unknown, folderName?: string) => {
+      if (typeof pathLike !== "string" || !pathLike.trim()) return;
+      const resolved = folderName !== undefined
+        ? joinRelativePath(folderName, pathLike)
+        : normalizePath(pathLike);
+      const normalized = normalizeComparablePath(resolved);
+      if (normalized) indexedFiles.add(normalized);
+    };
+
+    // Collect all indexed file paths.
     if (index.folders) {
       for (const [folderName, folderData] of Object.entries(index.folders)) {
-        // Handle both formats: direct array or {files: [...]} object
+        // Handle all folder formats: array, {files}, or legacy {documents}.
         let docs: any[] = [];
         if (Array.isArray(folderData)) {
           docs = folderData;
-        } else if (folderData && typeof folderData === 'object' && Array.isArray((folderData as any).files)) {
-          docs = (folderData as any).files;
+        } else if (folderData && typeof folderData === "object") {
+          const folderObj = folderData as any;
+          if (Array.isArray(folderObj.files)) {
+            docs = folderObj.files;
+          } else if (Array.isArray(folderObj.documents)) {
+            docs = folderObj.documents;
+          }
         }
 
         for (const doc of docs) {
-          // Handle both 'file' and 'filename' property names
-          const fileName = doc.file || doc.filename;
-          if (fileName) {
-            // Build full relative path: "Intake/Intake.pdf" (normalized for comparison)
-            const fullPath = normalizeFilename(join(normalizePath(folderName), fileName));
-            indexedFiles.add(fullPath);
+          if (typeof doc === "string") {
+            addIndexedPath(doc, folderName);
+            continue;
+          }
+          if (doc && typeof doc === "object") {
+            // path may already be full relative path.
+            addIndexedPath((doc as any).path);
+            addIndexedPath((doc as any).file, folderName);
+            addIndexedPath((doc as any).filename, folderName);
           }
         }
       }
@@ -270,7 +303,7 @@ app.get("/index-status", async (c) => {
     // Also check files_indexed if present (array format from old index)
     if (Array.isArray(index.files_indexed)) {
       for (const f of index.files_indexed) {
-        indexedFiles.add(normalizePath(f));
+        addIndexedPath(f);
       }
     }
   } catch {
@@ -289,7 +322,7 @@ app.get("/index-status", async (c) => {
   const modifiedFiles: string[] = [];
 
   for (const file of currentFiles) {
-    const normalizedPath = normalizeFilename(file.path);
+    const normalizedPath = normalizeComparablePath(file.path);
     if (!indexedFiles.has(normalizedPath)) {
       newFiles.push(file.path);
     } else if (file.mtime > indexedAt) {
