@@ -646,10 +646,12 @@ function addIndexPages(
   const pages: PDFPage[] = [];
   let page = pdf.addPage([612, 792]);
   pages.push(page);
-  drawPleadingPaper(page, regularFont, options.firmBlockLines, 1);
+  const firmBlockBottomY = drawPleadingPaper(page, regularFont, options.firmBlockLines, 1, true);
 
   drawCentered(page, boldFont, "NEVADA DEPARTMENT OF ADMINISTRATION", 13, 744);
   drawCentered(page, boldFont, "BEFORE THE HEARING OFFICER", 12, 724);
+
+  drawCaptionDivider(page, regularFont);
 
   page.drawText("In the Matter of the Contested", { x: 84, y: 693, size: 11, font: regularFont });
   page.drawText("Industrial Insurance Claim of", { x: 84, y: 678, size: 11, font: regularFont });
@@ -662,29 +664,32 @@ function addIndexPages(
   drawRightField(page, boldFont, regularFont, rightX, 653, "Date/Time:", options.caption.hearingDateTime ?? "");
   drawRightField(page, boldFont, regularFont, rightX, 633, "Appearance:", options.caption.appearance ?? "");
 
-  drawCentered(page, boldFont, "DOCUMENT INDEX", 14, 598);
+  drawCentered(page, boldFont, "DOCUMENT INDEX", 14, 548);
 
   const intro = options.caption.introductoryCounselLine ||
     `COMES NOW, ${options.caption.claimantName}, by and through counsel, and submits the attached documentation for consideration in the above-cited matter.`;
-  let currentY = drawWrappedText(page, intro, 84, 572, 470, regularFont, 11, 14);
+  const introStartY = typeof firmBlockBottomY === "number"
+    ? Math.min(498, firmBlockBottomY - 10)
+    : 498;
+  let currentY = drawWrappedText(page, intro, 84, introStartY, 470, regularFont, 11, 14);
   currentY -= 12;
 
   page.drawText("Document", { x: 84, y: currentY, size: 11, font: boldFont });
   page.drawText("Page(s)", { x: 500, y: currentY, size: 11, font: boldFont });
-  currentY -= 18;
+  currentY -= 22;
 
   const tableBottom = 90;
-  const rowHeight = 16;
+  const rowHeight = 24;
   let index = 0;
   while (index < tocEntries.length) {
     if (currentY < tableBottom) {
       page = pdf.addPage([612, 792]);
       pages.push(page);
-      drawPleadingPaper(page, regularFont, options.firmBlockLines, pages.length);
+      drawPleadingPaper(page, regularFont, options.firmBlockLines, pages.length, false);
       drawCentered(page, boldFont, "DOCUMENT INDEX (CONT.)", 14, 724);
       page.drawText("Document", { x: 84, y: 692, size: 11, font: boldFont });
       page.drawText("Page(s)", { x: 500, y: 692, size: 11, font: boldFont });
-      currentY = 672;
+      currentY = 666;
     }
 
     const entry = tocEntries[index];
@@ -706,7 +711,7 @@ function addAffirmationPage(
   frontMatterPageNumber: number
 ): number {
   const page = pdf.addPage([612, 792]);
-  drawPleadingPaper(page, regularFont, options.firmBlockLines, frontMatterPageNumber);
+  drawPleadingPaper(page, regularFont, options.firmBlockLines, frontMatterPageNumber, false);
 
   drawCentered(page, boldFont, "AFFIRMATION", 14, 726);
 
@@ -758,8 +763,9 @@ function drawPleadingPaper(
   page: PDFPage,
   font: PDFFont,
   firmBlockLines: string[] | undefined,
-  pageNumber: number
-): void {
+  pageNumber: number,
+  showFirmBlock = true
+): number | undefined {
   const top = 760;
   const bottom = 76;
   const totalLines = 28;
@@ -785,20 +791,31 @@ function drawPleadingPaper(
     color: rgb(0.7, 0.7, 0.7),
   });
 
-  const firmLines = firmBlockLines && firmBlockLines.length > 0
-    ? firmBlockLines
-    : ["FIRM NAME", "Address Line 1", "Address Line 2", "(000) 000-0000"];
+  let firmBlockBottomY: number | undefined;
 
-  let firmY = 520;
-  for (const line of firmLines.slice(0, 6)) {
-    page.drawText(line, {
-      x: 60,
-      y: firmY,
-      size: 8.5,
-      font,
-      color: rgb(0.2, 0.2, 0.2),
-    });
-    firmY -= 12;
+  if (showFirmBlock) {
+    const firmLines = (firmBlockLines || [])
+      .map((line) => line.trim())
+      .map((line) => line.replace(/\[[^\]]+\]/g, "").trim())
+      .filter((line) =>
+        line.length > 0 &&
+        !/not configured/i.test(line)
+      );
+
+    const visibleFirmLines = firmLines.length > 0 ? firmLines : ["Attorney for Claimant"];
+
+    let firmY = 544;
+    for (const line of visibleFirmLines.slice(0, 7)) {
+      page.drawText(line, {
+        x: 60,
+        y: firmY,
+        size: 8.5,
+        font,
+        color: rgb(0.2, 0.2, 0.2),
+      });
+      firmY -= 12;
+    }
+    firmBlockBottomY = firmY + 12;
   }
 
   page.drawText(String(pageNumber), {
@@ -808,6 +825,8 @@ function drawPleadingPaper(
     font,
     color: rgb(0, 0, 0),
   });
+
+  return firmBlockBottomY;
 }
 
 function drawRightField(
@@ -885,10 +904,10 @@ function drawTocRow(page: PDFPage, font: PDFFont, left: string, right: string, y
   const maxLeftWidth = rightX - leftX - 40;
   const safeLeft = truncateToWidth(left, font, size, maxLeftWidth);
   const leftWidth = font.widthOfTextAtSize(safeLeft, size);
-  const rightWidth = font.widthOfTextAtSize(right, size);
 
   page.drawText(safeLeft, { x: leftX, y, size, font });
-  page.drawText(right, { x: rightX + (48 - rightWidth), y, size, font });
+  // Keep page refs left-aligned under the "P" in "Page(s)".
+  page.drawText(right, { x: rightX, y, size, font });
 
   const dotWidth = font.widthOfTextAtSize(".", size);
   const dotsStart = leftX + leftWidth + 4;
@@ -897,6 +916,31 @@ function drawTocRow(page: PDFPage, font: PDFFont, left: string, right: string, y
     const count = Math.floor((dotsEnd - dotsStart) / dotWidth);
     page.drawText(".".repeat(Math.max(3, count)), { x: dotsStart, y, size, font });
   }
+}
+
+function drawCaptionDivider(page: PDFPage, font: PDFFont): void {
+  const dividerX = 336;
+  const topY = 708;
+  const bottomY = 618;
+  const parenSpacing = 14;
+
+  for (let y = topY - 2; y >= bottomY + 2; y -= parenSpacing) {
+    page.drawText(")", { x: dividerX, y, size: 11, font });
+  }
+
+  // Subtle top/bottom rules to mimic the filing caption frame.
+  page.drawLine({
+    start: { x: 84, y: topY },
+    end: { x: 550, y: topY },
+    thickness: 0.4,
+    color: rgb(0.72, 0.72, 0.72),
+  });
+  page.drawLine({
+    start: { x: 84, y: bottomY },
+    end: { x: 550, y: bottomY },
+    thickness: 0.4,
+    color: rgb(0.72, 0.72, 0.72),
+  });
 }
 
 function truncateToWidth(text: string, font: PDFFont, size: number, maxWidth: number): string {
