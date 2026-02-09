@@ -24,6 +24,7 @@ import {
 } from "./evidence-packet";
 import { loadFirmInfo } from "./export";
 import { applyResolvedFieldToSummary } from "./index-summary-sync";
+import { extractPdfText } from "./pdftotext";
 
 // Client creation - recreated when API key changes
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -1347,11 +1348,11 @@ async function executeTool(
 
         // Handle PDFs specially
         if (toolInput.path.toLowerCase().endsWith('.pdf')) {
-          const { execSync } = await import("child_process");
           try {
-            const text = execSync(`pdftotext "${filePath}" - 2>/dev/null`, {
+            const text = await extractPdfText(filePath, {
+              layout: false,
               maxBuffer: 1024 * 1024,
-              encoding: 'utf-8'
+              timeout: 30000,
             });
             return text.slice(0, 10000); // Limit output
           } catch {

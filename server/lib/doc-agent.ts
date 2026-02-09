@@ -7,10 +7,11 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import { readFile, writeFile, mkdir, readdir } from "fs/promises";
-import { join, dirname } from "path";
+import { readFile, writeFile, mkdir, readdir, stat } from "fs/promises";
+import { join, dirname, relative as pathRelative } from "path";
 import { execSync } from "child_process";
 import { loadSectionsByIds } from "../routes/knowledge";
+import { extractPdfText } from "./pdftotext";
 
 // Lazy client creation - API key is set by auth middleware before requests
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -204,6 +205,44 @@ async function loadFirmConfig(firmRoot: string): Promise<Record<string, any>> {
   }
 }
 
+const TEXT_SEARCH_EXTENSIONS = new Set([".txt", ".md", ".json"]);
+
+function normalizeRelativePath(path: string): string {
+  return path.replace(/\\/g, "/");
+}
+
+function matchesSearchPattern(
+  content: string,
+  pattern: string,
+  regex: RegExp | null
+): boolean {
+  if (regex) {
+    return regex.test(content);
+  }
+  return content.toLowerCase().includes(pattern.toLowerCase());
+}
+
+async function collectSearchTargets(searchPath: string): Promise<string[]> {
+  const targets: string[] = [];
+  const searchStat = await stat(searchPath);
+
+  if (searchStat.isFile()) {
+    targets.push(searchPath);
+    return targets;
+  }
+
+  const glob = new Bun.Glob("**/*");
+  for await (const relPath of glob.scan({ cwd: searchPath, onlyFiles: true })) {
+    const dotIndex = relPath.lastIndexOf(".");
+    const ext = dotIndex >= 0 ? relPath.slice(dotIndex).toLowerCase() : "";
+    if (TEXT_SEARCH_EXTENSIONS.has(ext)) {
+      targets.push(join(searchPath, relPath));
+    }
+  }
+
+  return targets;
+}
+
 /**
  * Execute a tool and return the result.
  */
@@ -238,9 +277,10 @@ async function executeTool(
         // Handle PDFs
         if (toolInput.path.toLowerCase().endsWith('.pdf')) {
           try {
-            const text = execSync(`pdftotext "${filePath}" - 2>/dev/null`, {
+            const text = await extractPdfText(filePath, {
+              layout: false,
               maxBuffer: 2 * 1024 * 1024,
-              encoding: 'utf-8'
+              timeout: 30000,
             });
             return { result: text.slice(0, 20000) };
           } catch {
@@ -268,6 +308,11 @@ async function executeTool(
 
       case "grep": {
         const searchPath = toolInput.path ? join(caseFolder, toolInput.path) : caseFolder;
+        const rawPattern = String(toolInput.pattern ?? "").trim();
+
+        if (!rawPattern) {
+          return { result: "Error: pattern is required" };
+        }
 
         // Security check
         if (!searchPath.startsWith(caseFolder)) {
@@ -275,17 +320,35 @@ async function executeTool(
         }
 
         try {
-          // Use grep -r for recursive search, limit output
-          const result = execSync(
-            `grep -r -l --include="*.txt" --include="*.md" --include="*.json" "${toolInput.pattern}" "${searchPath}" 2>/dev/null | head -20`,
-            { encoding: 'utf-8', maxBuffer: 1024 * 1024 }
-          );
-          if (!result.trim()) {
+          let regex: RegExp | null = null;
+          try {
+            regex = new RegExp(rawPattern, "i");
+          } catch {
+            regex = null;
+          }
+
+          const candidates = await collectSearchTargets(searchPath);
+          const matchedFiles: string[] = [];
+
+          for (const candidate of candidates) {
+            if (matchedFiles.length >= 20) break;
+
+            try {
+              const content = await readFile(candidate, "utf-8");
+              if (matchesSearchPattern(content, rawPattern, regex)) {
+                const relPath = normalizeRelativePath(pathRelative(caseFolder, candidate));
+                matchedFiles.push(relPath);
+              }
+            } catch {
+              // Skip unreadable files
+            }
+          }
+
+          if (matchedFiles.length === 0) {
             return { result: "No matches found" };
           }
-          // Convert absolute paths to relative
-          const relativePaths = result.trim().split('\n').map(p => p.replace(caseFolder + '/', ''));
-          return { result: `Files containing "${toolInput.pattern}":\n${relativePaths.join('\n')}` };
+
+          return { result: `Files containing "${rawPattern}":\n${matchedFiles.join('\n')}` };
         } catch {
           return { result: "No matches found" };
         }

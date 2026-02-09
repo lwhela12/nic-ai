@@ -2,30 +2,7 @@ import mammoth from "mammoth";
 import { readFile } from "fs/promises";
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
-import { exec } from "child_process";
-import { promisify } from "util";
-import { existsSync } from "fs";
-import { join } from "path";
-
-const execAsync = promisify(exec);
-
-/**
- * Get the path to pdftotext executable.
- * In production (Electron), uses bundled version from resources.
- * In dev, uses system pdftotext from PATH.
- */
-function getPdftotextPath(): string {
-  // Check for bundled version (Electron production)
-  const resourcesPath = process.env.RESOURCES_PATH;
-  if (resourcesPath) {
-    const bundledPath = join(resourcesPath, "tools", "pdftotext", "pdftotext.exe");
-    if (existsSync(bundledPath)) {
-      return `"${bundledPath}"`;
-    }
-  }
-  // Fall back to system pdftotext
-  return "pdftotext";
-}
+import { extractPdfText } from "./pdftotext";
 
 /**
  * Extracted style information from a DOCX file.
@@ -67,18 +44,11 @@ export interface DocxStyles {
  */
 export async function extractTextFromPdf(filePath: string): Promise<string> {
   try {
-    // Use pdftotext from poppler-utils (bundled or system)
-    // -layout preserves the physical layout of the text
-    // "-" outputs to stdout
-    // Normalize path to forward slashes - backslashes get mangled by shell escaping
-    const normalizedPath = filePath.replace(/\\/g, '/');
-    const pdftotextCmd = getPdftotextPath();
-    const { stdout } = await execAsync(`${pdftotextCmd} -layout "${normalizedPath}" -`, {
-      timeout: 30000, // 30 second timeout
-      maxBuffer: 10 * 1024 * 1024, // 10MB buffer for large PDFs
+    const text = await extractPdfText(filePath, {
+      layout: true,
+      timeout: 30000,
+      maxBuffer: 10 * 1024 * 1024,
     });
-
-    const text = stdout.trim();
 
     if (text.length > 50) {
       return text;

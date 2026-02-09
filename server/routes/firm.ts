@@ -1043,7 +1043,7 @@ OUTPUT FORMAT - Return ONLY valid JSON:
 
 IMPORTANT:
 - Return ONLY the JSON object, no markdown, no explanation
-- For PDFs: use pdftotext "filename" - 2>/dev/null | head -200
+- For PDFs: prefer the Read tool directly (cross-platform). If needed, run: pdftotext "filename" -
 - For all other files: use the Read tool directly
 - If a file cannot be read or parsed, return the JSON with key_info explaining the issue`;
 
@@ -1108,7 +1108,7 @@ OUTPUT FORMAT - Return ONLY valid JSON:
 
 IMPORTANT:
 - Return ONLY the JSON object, no markdown, no explanation
-- For PDFs: use pdftotext "filename" - 2>/dev/null | head -200
+- For PDFs: prefer the Read tool directly (cross-platform). If needed, run: pdftotext "filename" -
 - For all other files: use the Read tool directly
 - If a file cannot be read or parsed, return the JSON with key_info explaining the issue`;
 

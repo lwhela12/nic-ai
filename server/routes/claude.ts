@@ -966,7 +966,7 @@ app.post("/document/feedback", async (c) => {
 ${feedback}
 
 **Instructions:**
-1. Read the document using pdftotext: \`pdftotext "${documentPath}" - 2>/dev/null\`
+1. Read the document using the Read tool (or run \`pdftotext "${documentPath}" -\` if needed)
 2. Re-extract the information, paying special attention to the user's feedback
 3. Read the current index from .pi_tool/document_index.json
 4. Update ONLY this document's entry in the appropriate folder

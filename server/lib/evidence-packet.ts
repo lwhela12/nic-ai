@@ -1,10 +1,7 @@
-import { execFile } from "child_process";
 import { readFile } from "fs/promises";
 import { resolve, sep } from "path";
-import { promisify } from "util";
 import { PDFDocument, PDFFont, PDFPage, StandardFonts, rgb } from "pdf-lib";
-
-const execFileAsync = promisify(execFile);
+import { runPdftotext } from "./pdftotext";
 
 type SortBy = "none" | "date" | "title" | "path";
 type SortDirection = "asc" | "desc";
@@ -391,8 +388,9 @@ async function redactPdfIfRequested(
 
 async function extractBboxLayout(pdfPath: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync("pdftotext", ["-bbox-layout", pdfPath, "-"], {
+    const stdout = await runPdftotext(["-bbox-layout", pdfPath, "-"], {
       maxBuffer: 30 * 1024 * 1024,
+      timeout: 30000,
     });
     return stdout;
   } catch {
