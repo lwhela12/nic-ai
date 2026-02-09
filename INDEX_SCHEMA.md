@@ -111,7 +111,7 @@ Each folder is an object with:
 
 ### File Object
 - `filename` (string): Name of the file (e.g., "Intake.pdf")
-- `type` (string): Document type (e.g., "intake_form", "lor", "demand", "medical_record")
+- `type` (string): Document type (e.g., "intake_form", "lor", "demand", "medical_record", "hearing_decision")
 - `key_info` (string): Brief summary of important information extracted
 
 ### Case Note Object

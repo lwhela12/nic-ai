@@ -11,7 +11,21 @@ interface Props {
   onIndexMayHaveChanged?: () => void
   onDraftsMayHaveChanged?: () => void
   onShowFile?: (filePath: string) => void
+  onDocumentView?: (view: AgentDocumentViewPayload) => void
   onIndexStatusChange?: (status: IndexStatus | null) => void
+  onStartReindex?: (forceFullReindex?: boolean) => void
+  isReindexing?: boolean
+}
+
+interface AgentDocumentViewPayload {
+  id: string
+  name: string
+  description?: string
+  paths: string[]
+  sortBy?: 'folder' | 'date' | 'type'
+  sortDirection?: 'asc' | 'desc'
+  createdAt: string
+  totalMatches: number
 }
 
 interface Message {
@@ -46,29 +60,6 @@ const DocumentIcon = () => (
   </svg>
 )
 
-const MagnifyingGlassIcon = () => (
-  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-  </svg>
-)
-
-const PencilSquareIcon = () => (
-  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
-  </svg>
-)
-
-const CalculatorIcon = () => (
-  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 15.75V18m-7.5-6.75h.008v.008H8.25v-.008zm0 2.25h.008v.008H8.25V13.5zm0 2.25h.008v.008H8.25v-.008zm0 2.25h.008v.008H8.25V18zm2.498-6.75h.007v.008h-.007v-.008zm0 2.25h.007v.008h-.007V13.5zm0 2.25h.007v.008h-.007v-.008zm0 2.25h.007v.008h-.007V18zm2.504-6.75h.008v.008h-.008v-.008zm0 2.25h.008v.008h-.008V13.5zm0 2.25h.008v.008h-.008v-.008zm0 2.25h.008v.008h-.008V18zm2.498-6.75h.008v.008h-.008v-.008zm0 2.25h.008v.008h-.008V13.5zM8.25 6h7.5v2.25h-7.5V6zM12 2.25c-1.892 0-3.758.11-5.593.322C5.307 2.7 4.5 3.65 4.5 4.757V19.5a2.25 2.25 0 002.25 2.25h10.5a2.25 2.25 0 002.25-2.25V4.757c0-1.108-.806-2.057-1.907-2.185A48.507 48.507 0 0012 2.25z" />
-  </svg>
-)
-
-const ClockIcon = () => (
-  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-  </svg>
-)
 
 const ArchiveBoxIcon = () => (
   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -88,11 +79,6 @@ const ChevronUpIcon = () => (
   </svg>
 )
 
-const CurrencyDollarIcon = () => (
-  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-  </svg>
-)
 
 const PaperAirplaneIcon = () => (
   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -100,25 +86,10 @@ const PaperAirplaneIcon = () => (
   </svg>
 )
 
-// Static data moved outside component to prevent recreation on every render
-const quickActions = [
-  { label: 'Case Memo', prompt: 'Generate a case memo summarizing this case', icon: DocumentIcon },
-  { label: 'Gap Analysis', prompt: 'Identify missing documents and gaps in this case', icon: MagnifyingGlassIcon },
-  { label: 'Draft Demand', prompt: 'Draft a demand letter for this case', icon: PencilSquareIcon },
-  { label: 'Settlement Calc', prompt: 'Calculate the settlement disbursement', icon: CalculatorIcon },
-  { label: 'Timeline', prompt: 'Show me a timeline of this case', icon: ClockIcon },
-  { label: 'Financials', prompt: 'Show me a financial breakdown of medical expenses', icon: CurrencyDollarIcon },
-]
 
 const ExclamationTriangleIcon = () => (
   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-  </svg>
-)
-
-const CheckCircleIcon = () => (
-  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
   </svg>
 )
 
@@ -232,10 +203,9 @@ const MESSAGE_THRESHOLD = 8
 const KEEP_RECENT = 2
 
 // Context usage thresholds
-const CONTEXT_WARNING_PERCENT = 50  // Yellow warning
 const CONTEXT_DANGER_PERCENT = 55   // Red warning, trigger auto-summarize (lowered for earlier prevention)
 
-export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onShowFile, onIndexStatusChange }: Props) {
+export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onShowFile, onDocumentView, onIndexStatusChange, onStartReindex, isReindexing }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -247,7 +217,8 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
   const [contextUsage, setContextUsage] = useState<{ inputTokens: number; outputTokens: number; percent: number } | null>(null)
   const [archives, setArchives] = useState<ChatArchive[]>([])
   const [showArchives, setShowArchives] = useState(false)
-  const [isArchiving, setIsArchiving] = useState(false)
+  const [viewingArchiveId, setViewingArchiveId] = useState<string | null>(null)
+  const [sourceArchiveId, setSourceArchiveId] = useState<string | null>(null) // Track original archive for overwrites
   const [historyLoaded, setHistoryLoaded] = useState(false)
   const lastUserMessageRef = useRef<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -263,6 +234,8 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
     setHistoryLoaded(false)
     setArchives([])
     setShowArchives(false)
+    setViewingArchiveId(null)
+    setSourceArchiveId(null)
   }, [caseFolder])
 
   // Load chat history when case folder changes
@@ -323,32 +296,66 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
     return () => clearTimeout(timeout)
   }, [messages, caseFolder, apiUrl, historyLoaded])
 
-  // Archive conversation
-  const archiveConversation = async () => {
-    if (isArchiving || messages.length === 0) return
+  // Start new chat (clears UI, archives current conversation if needed)
+  const archiveConversation = () => {
+    if (messages.length === 0) return
 
-    setIsArchiving(true)
-    try {
-      const res = await fetch(`${apiUrl}/api/claude/history/archive`, {
+    // If viewing an already-archived conversation without changes, just clear
+    const shouldArchive = !viewingArchiveId
+    const archiveIdToOverwrite = sourceArchiveId
+
+    // Clear UI immediately for instant feedback
+    setMessages([])
+    setSessionId(null)
+    setConversationSummary(null)
+    setContextUsage(null)
+    setViewingArchiveId(null)
+    setSourceArchiveId(null)
+
+    // Archive in background if this was a new conversation OR had new messages added
+    if (shouldArchive) {
+      fetch(`${apiUrl}/api/claude/history/archive`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ caseFolder }),
+        body: JSON.stringify({ caseFolder, overwriteId: archiveIdToOverwrite }),
       })
+        .then(res => res.ok ? res.json() : null)
+        .then(data => {
+          if (data?.archive) {
+            if (archiveIdToOverwrite) {
+              // Replace existing archive in list
+              setArchives(prev => prev.map(a => a.id === archiveIdToOverwrite ? data.archive : a))
+            } else {
+              // Add new archive to list
+              setArchives(prev => [data.archive, ...prev])
+            }
+          }
+        })
+        .catch(() => {
+          // Ignore archive errors
+        })
+    }
+  }
 
+  // Load an archived conversation (read-only view)
+  const loadArchive = async (archiveId: string) => {
+    try {
+      const res = await fetch(`${apiUrl}/api/claude/history/archive/${archiveId}?case=${encodeURIComponent(caseFolder)}`)
       if (res.ok) {
         const data = await res.json()
-        // Add new archive to list
-        setArchives(prev => [data.archive, ...prev])
-        // Clear messages and session
-        setMessages([])
-        setSessionId(null)
-        setConversationSummary(null)
-        setContextUsage(null)
+        if (data.messages) {
+          setMessages(data.messages)
+          setSessionId(null)
+          setConversationSummary(null)
+          setContextUsage(null)
+          setShowArchives(false)
+          setViewingArchiveId(archiveId) // Mark as viewing archived conversation
+          setSourceArchiveId(archiveId) // Track for potential overwrite
+        }
       }
     } catch {
-      // Ignore archive errors
+      // Ignore load errors
     }
-    setIsArchiving(false)
   }
 
   // Set input from initialPrompt when provided and auto-send
@@ -394,11 +401,17 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
   }, [indexStatus]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const runReindex = async (forceFullReindex = false) => {
+    if (onStartReindex) {
+      // Delegate to App-level indexing (survives navigation)
+      onStartReindex(forceFullReindex)
+      return
+    }
+
+    // Fallback: local SSE (only if App doesn't provide callback)
     if (isIndexing) return
     setIsIndexing(true)
 
     try {
-      // First check what files need updating (unless forcing full reindex)
       let filesToIndex: string[] | undefined
 
       if (!forceFullReindex) {
@@ -406,21 +419,17 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
         const status = await statusRes.json()
 
         if (!status.needsIndex) {
-          // Index is already up to date
           setIndexStatus(status)
           setIsIndexing(false)
           return
         }
 
-        // Combine new and modified files for incremental indexing
         const changedFiles = [...(status.newFiles || []), ...(status.modifiedFiles || [])]
         if (changedFiles.length > 0 && status.reason !== 'no_index') {
           filesToIndex = changedFiles
-          console.log(`[Incremental] Indexing ${changedFiles.length} changed file(s)`)
         }
       }
 
-      // Use the dedicated /init endpoint which has the explicit schema
       const response = await fetch(`${apiUrl}/api/claude/init`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -433,7 +442,6 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
       const reader = response.body?.getReader()
       if (!reader) return
 
-      // Parse SSE events to capture the diff summary
       const decoder = new TextDecoder()
       let buffer = ''
       let diffSummary: string | null = null
@@ -443,9 +451,8 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
         if (done) break
         buffer += decoder.decode(value, { stream: true })
 
-        // Parse SSE lines from buffer
         const lines = buffer.split('\n')
-        buffer = lines.pop() || '' // Keep incomplete line in buffer
+        buffer = lines.pop() || ''
         for (const line of lines) {
           if (line.startsWith('data:')) {
             try {
@@ -463,7 +470,6 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
       await checkIndexStatus()
       onIndexMayHaveChanged?.()
 
-      // Show reindex summary as a chat message
       if (diffSummary) {
         setMessages(prev => [...prev, {
           role: 'assistant' as const,
@@ -543,6 +549,8 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
     lastUserMessageRef.current = userMessage
     setIsLoading(true)
     setCurrentTools([])
+    // If viewing an archived conversation, mark it as active now (will be saved on New Chat)
+    setViewingArchiveId(null)
     let compactionDetected = false
 
     try {
@@ -556,11 +564,25 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
         ? `[Previous conversation summary: ${conversationSummary}]\n\n${userMessage}`
         : userMessage
 
+      const requestBody: {
+        caseFolder: string
+        message: string
+        history: Array<{ role: 'user' | 'assistant'; content: string }>
+        sessionId?: string
+      } = {
+        caseFolder,
+        message: messageWithContext,
+        history: historyForApi,
+      }
+      if (sessionId) {
+        requestBody.sessionId = sessionId
+      }
+
       // Use direct API chat endpoint (faster, no agent SDK overhead)
       const response = await fetch(`${apiUrl}/api/claude/chat-v2`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ caseFolder, message: messageWithContext, history: historyForApi }),
+        body: JSON.stringify(requestBody),
       })
 
       const reader = response.body?.getReader()
@@ -622,6 +644,10 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
               if (data.type === 'tool') {
                 toolsUsed = [...toolsUsed, data.name]
                 setCurrentTools(toolsUsed)
+              }
+
+              if (data.type === 'document_view' && data.view) {
+                onDocumentView?.(data.view)
               }
 
               if (data.type === 'usage') {
@@ -764,22 +790,6 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
     }
   }
 
-  const clearSession = async () => {
-    try {
-      await fetch(`${apiUrl}/api/claude/clear-session`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ caseFolder }),
-      })
-      setSessionId(null)
-      setMessages([])
-      setConversationSummary(null)
-      setContextUsage(null) // Reset context tracking
-    } catch {
-      // Ignore
-    }
-  }
-
   return (
     <div className="flex flex-col h-full">
       {/* Index status banner */}
@@ -806,16 +816,16 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
             <div className="flex gap-2">
               <button
                 onClick={() => runReindex()}
-                disabled={isIndexing}
+                disabled={isIndexing || isReindexing}
                 className="px-4 py-2 text-sm font-medium bg-amber-600 hover:bg-amber-700 text-white
                            rounded-lg disabled:opacity-50 transition-colors"
                 title="Index only new and modified files"
               >
-                {isIndexing ? 'Indexing...' : 'Update Index'}
+                {(isIndexing || isReindexing) ? 'Indexing...' : 'Update Index'}
               </button>
               <button
                 onClick={() => runReindex(true)}
-                disabled={isIndexing}
+                disabled={isIndexing || isReindexing}
                 className="px-3 py-2 text-sm font-medium bg-surface-200 hover:bg-surface-300 text-brand-700
                            rounded-lg disabled:opacity-50 transition-colors"
                 title="Re-index all files from scratch"
@@ -843,98 +853,6 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
         </div>
       )}
 
-      {/* Header with session info and quick actions */}
-      <div className="px-6 py-4 border-b border-surface-200 bg-white">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2 text-sm">
-            {sessionId ? (
-              <span className="inline-flex items-center gap-1.5 text-brand-500">
-                <span className="w-2 h-2 bg-emerald-400 rounded-full"></span>
-                Session active
-              </span>
-            ) : (
-              <span className="text-brand-400">New conversation</span>
-            )}
-            {indexStatus && !indexStatus.needsIndex && (
-              <span className="inline-flex items-center gap-1.5 text-emerald-600 ml-3">
-                <CheckCircleIcon />
-                <span>Index current</span>
-              </span>
-            )}
-          </div>
-          {/* Context usage indicator */}
-          {contextUsage && (
-            <div className="flex items-center gap-2">
-              <div className="flex items-center gap-1.5">
-                <div className="w-20 h-1.5 bg-surface-200 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full transition-all ${
-                      contextUsage.percent >= CONTEXT_DANGER_PERCENT
-                        ? 'bg-red-500'
-                        : contextUsage.percent >= CONTEXT_WARNING_PERCENT
-                        ? 'bg-amber-500'
-                        : 'bg-emerald-500'
-                    }`}
-                    style={{ width: `${Math.min(contextUsage.percent, 100)}%` }}
-                  />
-                </div>
-                <span className={`text-xs font-medium ${
-                  contextUsage.percent >= CONTEXT_DANGER_PERCENT
-                    ? 'text-red-600'
-                    : contextUsage.percent >= CONTEXT_WARNING_PERCENT
-                    ? 'text-amber-600'
-                    : 'text-brand-400'
-                }`}>
-                  {contextUsage.percent}%
-                </span>
-              </div>
-              <span className="text-xs text-brand-300" title={`${contextUsage.inputTokens.toLocaleString()} tokens`}>
-                context
-              </span>
-            </div>
-          )}
-          {/* Archive and Clear buttons */}
-          <div className="flex items-center gap-2">
-            {messages.length > 0 && (
-              <button
-                onClick={archiveConversation}
-                disabled={isArchiving}
-                className="flex items-center gap-1.5 text-sm text-brand-500 hover:text-accent-600 transition-colors
-                           disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Archive this conversation"
-              >
-                <ArchiveBoxIcon />
-                <span>{isArchiving ? 'Archiving...' : 'Archive'}</span>
-              </button>
-            )}
-            {sessionId && (
-              <button
-                onClick={clearSession}
-                className="text-sm text-brand-400 hover:text-brand-600 transition-colors"
-              >
-                Clear session
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div className="flex gap-2 flex-wrap">
-          {quickActions.map((action) => (
-            <button
-              key={action.label}
-              onClick={() => sendMessage(action.prompt)}
-              disabled={isLoading}
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg
-                         bg-surface-100 text-brand-700
-                         hover:bg-brand-900 hover:text-white
-                         disabled:opacity-50 transition-colors"
-            >
-              <action.icon />
-              {action.label}
-            </button>
-          ))}
-        </div>
-      </div>
 
       {/* Archives Panel (collapsible) */}
       {archives.length > 0 && (
@@ -953,9 +871,10 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
             <div className="px-6 pb-4 max-h-48 overflow-y-auto">
               <div className="space-y-2">
                 {archives.map((archive) => (
-                  <div
+                  <button
                     key={archive.id}
-                    className="p-3 bg-white rounded-lg border border-surface-200 hover:border-accent-300 transition-colors"
+                    onClick={() => loadArchive(archive.id)}
+                    className="w-full text-left p-3 bg-white rounded-lg border border-surface-200 hover:border-accent-300 hover:bg-surface-50 transition-colors"
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex-1 min-w-0">
@@ -970,7 +889,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                         {archive.messageCount} msgs
                       </span>
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </div>
@@ -979,7 +898,22 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
       )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
+      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6 relative">
+        {/* Floating New Chat button */}
+        {messages.length > 0 && (
+          <button
+            onClick={archiveConversation}
+            className="sticky top-0 float-right -mt-2 mb-2 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                       bg-white text-brand-600 rounded-lg border border-surface-200 shadow-sm
+                       hover:bg-surface-50 hover:border-surface-300 transition-colors z-10"
+            title="Archive and start new chat"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+            </svg>
+            New Chat
+          </button>
+        )}
         {messages.length === 0 && (
           <div className="text-center py-12">
             <div className="w-16 h-16 rounded-full bg-surface-100 flex items-center justify-center mx-auto mb-4">

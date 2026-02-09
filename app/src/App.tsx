@@ -4,7 +4,6 @@ import FileViewer from './components/FileViewer'
 import Chat from './components/Chat'
 import Visualizer from './components/Visualizer'
 import ResizablePanelLayout from './components/ResizablePanelLayout'
-import CaseLoader from './components/CaseLoader'
 import FolderPicker from './components/FolderPicker'
 import FirmDashboard from './components/FirmDashboard'
 import Login from './components/Login'
@@ -22,7 +21,6 @@ interface FirmTodo {
   createdAt: string
 }
 const FIRM_ROOT_KEY = 'claude-pi-firm-root'
-const PRACTICE_AREA_KEY = 'claude-pi-practice-area'
 
 type PracticeArea = 'Personal Injury' | 'Workers\' Compensation'
 
@@ -47,9 +45,24 @@ const setUrlParam = (key: string, value: string | null, replace = false) => {
   }
 }
 
+const normalizePracticeArea = (value: unknown): PracticeArea | null => {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) return null
+  if (normalized === 'wc' || normalized.includes('worker') || normalized.includes('comp')) {
+    return 'Workers\' Compensation'
+  }
+  if (normalized === 'pi' || normalized.includes('personal') || normalized.includes('injury')) {
+    return 'Personal Injury'
+  }
+  return null
+}
+
 // Dev mode - skip auth in Vite dev server
 // Set VITE_AUTH_ENABLED=true to force auth even in dev mode
 const DEV_MODE = import.meta.env.DEV && import.meta.env.VITE_AUTH_ENABLED !== 'true'
+const MAX_SAVED_AGENT_VIEWS = 4
+const AGENT_VIEWS_STORAGE_KEY = 'claude-pi-agent-views-by-case-v1'
 
 type TeamRole = 'attorney' | 'case_manager_lead' | 'case_manager' | 'case_manager_assistant'
 
@@ -180,6 +193,63 @@ export interface DocumentIndex {
   chat_archives?: ChatArchive[]
 }
 
+export interface AgentDocumentView {
+  id: string
+  name: string
+  description?: string
+  paths: string[]
+  sortBy?: 'folder' | 'date' | 'type'
+  sortDirection?: 'asc' | 'desc'
+  createdAt: string
+  totalMatches: number
+}
+
+const normalizeAgentViewPath = (path: string): string =>
+  path.replace(/\\/g, '/').trim().toLowerCase()
+
+const getAgentViewCaseKey = (caseFolder: string): string =>
+  encodeURIComponent(caseFolder)
+
+const getAgentViewSignature = (view: AgentDocumentView): string => {
+  const sortBy = view.sortBy || ''
+  const sortDirection = view.sortDirection || ''
+  const paths = view.paths.map(normalizeAgentViewPath).join('|')
+  return `${sortBy}:${sortDirection}:${paths}`
+}
+
+const dedupeAndCapAgentViews = (views: AgentDocumentView[]): AgentDocumentView[] => {
+  const deduped: AgentDocumentView[] = []
+  const seenSignatures = new Set<string>()
+
+  for (const view of views) {
+    if (!view || typeof view.id !== 'string' || typeof view.name !== 'string' || !Array.isArray(view.paths)) {
+      continue
+    }
+    const paths = view.paths.filter((path): path is string => typeof path === 'string' && path.trim().length > 0)
+    if (paths.length === 0) continue
+
+    const normalizedView: AgentDocumentView = {
+      ...view,
+      paths,
+      totalMatches: typeof view.totalMatches === 'number' && view.totalMatches > 0
+        ? view.totalMatches
+        : paths.length,
+      createdAt: typeof view.createdAt === 'string' && view.createdAt
+        ? view.createdAt
+        : new Date().toISOString(),
+    }
+
+    const signature = getAgentViewSignature(normalizedView)
+    if (seenSignatures.has(signature)) continue
+
+    seenSignatures.add(signature)
+    deduped.push(normalizedView)
+    if (deduped.length >= MAX_SAVED_AGENT_VIEWS) break
+  }
+
+  return deduped
+}
+
 const getFolderFiles = (data: DocumentFolder): DocumentFile[] => {
   if (Array.isArray(data)) return data
   if (data && typeof data === 'object' && 'files' in data && Array.isArray(data.files)) {
@@ -233,11 +303,12 @@ function App() {
   const [firmRoot, setFirmRoot] = useState<string | null>(() => {
     return localStorage.getItem(FIRM_ROOT_KEY)
   })
-  const [practiceArea, setPracticeArea] = useState<PracticeArea>(() => {
-    const stored = localStorage.getItem(PRACTICE_AREA_KEY)
-    return (stored === 'Workers\' Compensation') ? 'Workers\' Compensation' : 'Personal Injury'
-  })
+  const [practiceArea, setPracticeArea] = useState<PracticeArea | null>(null)
   const [pendingFolderPath, setPendingFolderPath] = useState<string | null>(null)
+  const [pendingPracticeArea, setPendingPracticeArea] = useState<PracticeArea | null>(null)
+  const [pendingPracticeAreaLoading, setPendingPracticeAreaLoading] = useState(false)
+  const [savingFolderSetup, setSavingFolderSetup] = useState(false)
+  const [folderSetupError, setFolderSetupError] = useState<string | null>(null)
   const [caseFolder, setCaseFolderState] = useState<string | null>(() => {
     return getUrlParam('case')
   })
@@ -254,10 +325,83 @@ function App() {
   const [showPicker, setShowPicker] = useState(false)
   const [fileViewUrl, setFileViewUrl] = useState<string | null>(null)
   const [fileViewName, setFileViewName] = useState<string>('')
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)  // Track selected file for view toggling
+  const [visualizerMode, setVisualizerMode] = useState<'summary' | 'document'>('summary')
   const [reviewPrompt, setReviewPrompt] = useState<string>('')
   const [viewDocPath, setViewDocPath] = useState<string | null>(null)
   const [refreshDraftsKey, setRefreshDraftsKey] = useState(0)
   const [indexStatusForViewer, setIndexStatusForViewer] = useState<{ needsIndex: boolean; newFiles: string[]; modifiedFiles: string[] } | null>(null)
+  const [agentDocumentView, setAgentDocumentView] = useState<AgentDocumentView | null>(null)
+  const [savedAgentViews, setSavedAgentViews] = useState<AgentDocumentView[]>([])
+
+  // Ref to track current caseFolder for async completions
+  const caseFolderRef = useRef(caseFolder)
+  caseFolderRef.current = caseFolder
+
+  // Agent-generated document views are case-specific and persist per-case locally
+  useEffect(() => {
+    setAgentDocumentView(null)
+    if (!caseFolder) {
+      setSavedAgentViews([])
+      return
+    }
+
+    try {
+      const raw = localStorage.getItem(AGENT_VIEWS_STORAGE_KEY)
+      if (!raw) {
+        setSavedAgentViews([])
+        return
+      }
+
+      const byCase = JSON.parse(raw) as Record<string, AgentDocumentView[]>
+      const caseKey = getAgentViewCaseKey(caseFolder)
+      const storedViews = Array.isArray(byCase?.[caseKey]) ? byCase[caseKey] : []
+      setSavedAgentViews(dedupeAndCapAgentViews(storedViews))
+    } catch {
+      setSavedAgentViews([])
+    }
+  }, [caseFolder])
+
+  useEffect(() => {
+    if (!caseFolder) return
+    try {
+      const raw = localStorage.getItem(AGENT_VIEWS_STORAGE_KEY)
+      const byCase = raw ? (JSON.parse(raw) as Record<string, AgentDocumentView[]>) : {}
+      const caseKey = getAgentViewCaseKey(caseFolder)
+
+      if (savedAgentViews.length > 0) {
+        byCase[caseKey] = dedupeAndCapAgentViews(savedAgentViews)
+      } else {
+        delete byCase[caseKey]
+      }
+
+      localStorage.setItem(AGENT_VIEWS_STORAGE_KEY, JSON.stringify(byCase))
+    } catch {
+      // Ignore localStorage persistence failures
+    }
+  }, [caseFolder, savedAgentViews])
+
+  const handleDocumentView = useCallback((view: AgentDocumentView) => {
+    setAgentDocumentView(view)
+    setSavedAgentViews((prev) => {
+      const incomingSignature = getAgentViewSignature(view)
+      const withoutDuplicate = prev.filter((existing) => getAgentViewSignature(existing) !== incomingSignature)
+      return dedupeAndCapAgentViews([view, ...withoutDuplicate])
+    })
+  }, [])
+
+  const handleApplySavedAgentView = useCallback((view: AgentDocumentView) => {
+    setAgentDocumentView(view)
+    setSavedAgentViews((prev) => {
+      const reordered = [view, ...prev.filter((item) => item.id !== view.id)]
+      return dedupeAndCapAgentViews(reordered)
+    })
+  }, [])
+
+  const handleClearSavedAgentViews = useCallback(() => {
+    setAgentDocumentView(null)
+    setSavedAgentViews([])
+  }, [])
 
   // Contact card state
   const [isContactCardOpen, setIsContactCardOpen] = useState(false)
@@ -270,6 +414,35 @@ function App() {
   const [hasAttemptedGenerate, setHasAttemptedGenerate] = useState(false)
   const [firmChatPrompt, setFirmChatPrompt] = useState<string>('')
   const [forceShowFirmChat, setForceShowFirmChat] = useState(false)
+
+  // Indexing progress state — persists across navigation
+  const [indexingProgress, setIndexingProgress] = useState<{
+    caseFolder: string
+    caseName: string
+    isRunning: boolean
+    status: string
+    progress: string[]
+    filesTotal: number
+    filesComplete: number
+    currentFile: string
+    error: string | null
+  } | null>(null)
+  const [showIndexingModal, setShowIndexingModal] = useState(false)
+  const indexingAbortRef = useRef<AbortController | null>(null)
+  const [firmCasesVersion, setFirmCasesVersion] = useState(0)
+
+  // Batch indexing state — lifted from FirmDashboard so it survives navigation
+  const [batchProgress, setBatchProgress] = useState<{
+    isRunning: boolean
+    totalCases: number
+    currentText: string
+    toolsUsed: string[]
+    logs: string[]
+    filesTotal: number
+    filesComplete: number
+    currentFile: string
+  } | null>(null)
+  const [showBatchModal, setShowBatchModal] = useState(false)
 
   // Knowledge init state — shown when selecting a firm root without knowledge
   const [showKnowledgeInit, setShowKnowledgeInit] = useState(false)
@@ -318,6 +491,309 @@ function App() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadTodos()
   }, [loadTodos])
+
+  const saveFolderPracticeArea = useCallback(async (root: string, area: PracticeArea): Promise<boolean> => {
+    let existingConfig: Record<string, unknown> = {}
+
+    try {
+      const existingRes = await fetch(`${API_URL}/api/knowledge/firm-config?root=${encodeURIComponent(root)}`)
+      if (existingRes.status === 401) {
+        setAuthState({ authenticated: false })
+        return false
+      }
+      if (existingRes.ok) {
+        existingConfig = await existingRes.json()
+      }
+    } catch {
+      // Continue with a minimal config payload.
+    }
+
+    try {
+      const saveRes = await fetch(`${API_URL}/api/knowledge/firm-config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          root,
+          ...existingConfig,
+          practiceArea: area,
+        }),
+      })
+
+      if (saveRes.status === 401) {
+        setAuthState({ authenticated: false })
+        return false
+      }
+
+      return saveRes.ok
+    } catch {
+      return false
+    }
+  }, [])
+
+  const resolveFolderPracticeArea = useCallback(async (root: string): Promise<PracticeArea | null> => {
+    let configArea: PracticeArea | null = null
+
+    try {
+      const configRes = await fetch(`${API_URL}/api/knowledge/firm-config?root=${encodeURIComponent(root)}`)
+      if (configRes.status === 401) {
+        setAuthState({ authenticated: false })
+        return null
+      }
+      if (configRes.ok) {
+        const config = await configRes.json()
+        configArea = normalizePracticeArea(config?.practiceArea)
+        if (configArea) return configArea
+      }
+    } catch {
+      // Continue to manifest fallback.
+    }
+
+    try {
+      const manifestRes = await fetch(`${API_URL}/api/knowledge/manifest?root=${encodeURIComponent(root)}`)
+      if (manifestRes.status === 401) {
+        setAuthState({ authenticated: false })
+        return null
+      }
+      if (manifestRes.ok) {
+        const manifest = await manifestRes.json()
+        const manifestArea = normalizePracticeArea(manifest?.practiceArea)
+        if (manifestArea) {
+          if (!configArea) {
+            await saveFolderPracticeArea(root, manifestArea)
+          }
+          return manifestArea
+        }
+      }
+    } catch {
+      // Folder has no knowledge manifest yet.
+    }
+
+    return null
+  }, [saveFolderPracticeArea])
+
+  const loadKnowledgeTemplates = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/knowledge/templates`)
+      if (res.status === 401) {
+        setAuthState({ authenticated: false })
+        return [] as Array<{ id: string; practiceArea: string; jurisdiction: string }>
+      }
+      const data = await res.json()
+      return Array.isArray(data) ? data : []
+    } catch {
+      return [] as Array<{ id: string; practiceArea: string; jurisdiction: string }>
+    }
+  }, [])
+
+  const clearCaseView = useCallback(() => {
+    setCaseFolder(null)
+    setDocumentIndex(null)
+    setViewContent('')
+    setFileViewUrl(null)
+  }, [])
+
+  const beginFolderSetup = useCallback(async (path: string, options?: { forcePrompt?: boolean }) => {
+    setShowKnowledgeInit(false)
+    setFolderSetupError(null)
+    setPendingPracticeAreaLoading(true)
+
+    const resolved = await resolveFolderPracticeArea(path)
+    setPendingPracticeAreaLoading(false)
+
+    // Default behavior: if folder already has an area configured, continue directly.
+    if (resolved && !options?.forcePrompt) {
+      clearCaseView()
+      setPendingFolderPath(null)
+      setPendingPracticeArea(null)
+      setPracticeArea(resolved)
+      setFirmRoot(path)
+      return
+    }
+
+    // Folder needs explicit setup (or user explicitly asked to change area).
+    clearCaseView()
+    setFirmRoot(null)
+    setPracticeArea(null)
+    localStorage.removeItem(FIRM_ROOT_KEY)
+    setPendingFolderPath(path)
+    setPendingPracticeArea(resolved)
+  }, [clearCaseView, resolveFolderPracticeArea])
+
+  const confirmFolderSetup = useCallback(async () => {
+    if (!pendingFolderPath) return
+    if (!pendingPracticeArea) {
+      setFolderSetupError('Select an area of law for this folder.')
+      return
+    }
+
+    setSavingFolderSetup(true)
+    setFolderSetupError(null)
+
+    const saved = await saveFolderPracticeArea(pendingFolderPath, pendingPracticeArea)
+    if (!saved) {
+      setFolderSetupError('Could not save the area of law in this folder.')
+      setSavingFolderSetup(false)
+      return
+    }
+
+    clearCaseView()
+    setPracticeArea(pendingPracticeArea)
+    setFirmRoot(pendingFolderPath)
+    setPendingFolderPath(null)
+    setPendingPracticeArea(null)
+    setSavingFolderSetup(false)
+  }, [clearCaseView, pendingFolderPath, pendingPracticeArea, saveFolderPracticeArea])
+
+  const startCaseIndexing = useCallback(async (targetFolder: string, files?: string[]) => {
+    // Abort any existing indexing SSE
+    if (indexingAbortRef.current) {
+      indexingAbortRef.current.abort()
+    }
+    const abort = new AbortController()
+    indexingAbortRef.current = abort
+
+    const caseName = targetFolder.split('/').pop() || targetFolder
+    setIndexingProgress({
+      caseFolder: targetFolder,
+      caseName,
+      isRunning: true,
+      status: 'Initializing case...',
+      progress: ['Starting indexing...'],
+      filesTotal: 0,
+      filesComplete: 0,
+      currentFile: '',
+      error: null,
+    })
+    setShowIndexingModal(true)
+
+    try {
+      const response = await fetch(`${API_URL}/api/claude/init`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ caseFolder: targetFolder, ...(files ? { files } : {}) }),
+        signal: abort.signal,
+      })
+
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('No reader')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data:') && !line.startsWith('data: ')) continue
+          const jsonStr = line.startsWith('data: ') ? line.slice(6) : line.slice(5)
+          try {
+            const data = JSON.parse(jsonStr.trim())
+
+            if (data.type === 'status') {
+              setIndexingProgress(prev => prev ? {
+                ...prev,
+                status: data.message || data.text || '',
+                progress: [...prev.progress.slice(-50), data.message || data.text || ''],
+              } : prev)
+            }
+
+            if (data.type === 'progress' || data.type === 'output') {
+              const text = (data.text || '').trim()
+              if (text) {
+                setIndexingProgress(prev => prev ? {
+                  ...prev,
+                  status: text.length > 60 ? text.slice(0, 60) + '...' : text,
+                  progress: [...prev.progress.slice(-50), text],
+                } : prev)
+              }
+            }
+
+            if (data.type === 'files_found') {
+              setIndexingProgress(prev => prev ? {
+                ...prev,
+                filesTotal: data.count,
+                progress: [...prev.progress, `Found ${data.count} files to extract`],
+              } : prev)
+            }
+
+            if (data.type === 'file_start') {
+              setIndexingProgress(prev => prev ? {
+                ...prev,
+                currentFile: data.filename,
+              } : prev)
+            }
+
+            if (data.type === 'file_done') {
+              setIndexingProgress(prev => prev ? {
+                ...prev,
+                filesComplete: prev.filesComplete + 1,
+                currentFile: '',
+                // Fallback: set filesTotal from file_done's totalFiles if files_found was missed
+                ...(prev.filesTotal === 0 && data.totalFiles ? { filesTotal: data.totalFiles } : {}),
+                progress: [...prev.progress.slice(-50), `✓ ${data.filename}${data.docType ? ` (${data.docType})` : ''}`],
+              } : prev)
+            }
+
+            if (data.type === 'file_error') {
+              setIndexingProgress(prev => prev ? {
+                ...prev,
+                filesComplete: prev.filesComplete + 1,
+                progress: [...prev.progress.slice(-50), `✗ ${data.filename}: ${data.error}`],
+              } : prev)
+            }
+
+            if (data.type === 'done' || data.type === 'case_done') {
+              setIndexingProgress(prev => prev ? {
+                ...prev,
+                isRunning: false,
+                status: 'Complete',
+                progress: [...prev.progress, 'Indexing complete!'],
+              } : prev)
+              // Auto-reopen modal so user sees completion
+              setShowIndexingModal(true)
+              // Refresh dashboard case list
+              setFirmCasesVersion(v => v + 1)
+            }
+
+            if (data.type === 'error') {
+              setIndexingProgress(prev => prev ? {
+                ...prev,
+                isRunning: false,
+                error: data.error || 'Unknown error',
+                progress: [...prev.progress, `Error: ${data.error || 'Unknown error'}`],
+              } : prev)
+            }
+          } catch {
+            // Ignore parse errors
+          }
+        }
+      }
+
+      // Reload case data if user is currently viewing this case
+      if (caseFolderRef.current === targetFolder) {
+        try {
+          const res = await fetch(`${API_URL}/api/files/index?case=${encodeURIComponent(targetFolder)}`)
+          if (res.ok) {
+            const index = await res.json()
+            setDocumentIndex(index)
+            loadGeneratedDocs(targetFolder)
+          }
+        } catch { /* ignore */ }
+      }
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return
+      setIndexingProgress(prev => prev ? {
+        ...prev,
+        isRunning: false,
+        error: err instanceof Error ? err.message : 'Failed to initialize case',
+      } : prev)
+    }
+  }, [])
 
   // Handle browser back/forward navigation
   useEffect(() => {
@@ -369,12 +845,13 @@ function App() {
         // No index exists
       }
 
-      // No index - need to initialize the case
-      setIsLoading(true)
+      // No index - start background indexing and go back to dashboard
+      startCaseIndexing(caseFolder)
+      setCaseFolder(null)
     }
 
     loadCaseData()
-  }, [caseFolder, documentIndex, isLoading])
+  }, [caseFolder, documentIndex, isLoading, startCaseIndexing])
 
   const handleToggleTodo = async (id: string) => {
     const updatedTodos = todos.map(t =>
@@ -437,29 +914,39 @@ function App() {
     setForceShowFirmChat(false)
   }
 
-  const handleKnowledgeInit = async (templateId: string) => {
-    if (!firmRoot) return
+  const handleKnowledgeInit = useCallback(async (templateId: string, rootOverride?: string): Promise<boolean> => {
+    const targetRoot = rootOverride || firmRoot
+    if (!targetRoot) return false
+
     setKnowledgeInitLoading(true)
     try {
       const res = await fetch(`${API_URL}/api/knowledge/init`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ root: firmRoot, templateId }),
+        body: JSON.stringify({ root: targetRoot, templateId }),
       })
       if (res.status === 401) {
         setAuthState({ authenticated: false })
-        return
+        return false
       }
-      if (res.ok) {
-        setShowKnowledgeInit(false)
-        setKnowledgeVersion(v => v + 1) // Trigger FirmDashboard to re-fetch knowledge
+      if (!res.ok) return false
+
+      const data = await res.json()
+      const initializedArea = normalizePracticeArea(data?.practiceArea)
+      if (initializedArea) {
+        setPracticeArea(initializedArea)
+        await saveFolderPracticeArea(targetRoot, initializedArea)
       }
+
+      setShowKnowledgeInit(false)
+      setKnowledgeVersion(v => v + 1) // Trigger FirmDashboard to re-fetch knowledge
+      return true
     } catch {
-      // Ignore
+      return false
     } finally {
       setKnowledgeInitLoading(false)
     }
-  }
+  }, [firmRoot, saveFolderPracticeArea])
 
   // Check auth status on mount
   useEffect(() => {
@@ -485,43 +972,101 @@ function App() {
     }
   }, [checkAuthStatus])
 
-  // Save firm root and practice area to localStorage and check for knowledge base
+  // Sync folder-scoped practice area and ensure knowledge context matches it.
   useEffect(() => {
-    if (firmRoot) {
-      localStorage.setItem(FIRM_ROOT_KEY, firmRoot)
-      localStorage.setItem(PRACTICE_AREA_KEY, practiceArea)
+    if (!firmRoot) return
 
-      // Check if knowledge base exists for this firm root
-      fetch(`${API_URL}/api/knowledge/manifest?root=${encodeURIComponent(firmRoot)}`)
-        .then(res => {
-          if (res.status === 401) {
-            setAuthState({ authenticated: false })
+    let cancelled = false
+    localStorage.setItem(FIRM_ROOT_KEY, firmRoot)
+    checkAuthStatus()
+
+    const syncFolderContext = async () => {
+      const detectedArea = await resolveFolderPracticeArea(firmRoot)
+      if (cancelled) return
+
+      if (!detectedArea) {
+        setPracticeArea(null)
+        setPendingFolderPath(firmRoot)
+        setPendingPracticeArea(null)
+        setFolderSetupError('Select an area of law for this folder.')
+        localStorage.removeItem(FIRM_ROOT_KEY)
+        setFirmRoot(null)
+        return
+      }
+
+      setPracticeArea(detectedArea)
+      setFolderSetupError(null)
+
+      try {
+        const manifestRes = await fetch(`${API_URL}/api/knowledge/manifest?root=${encodeURIComponent(firmRoot)}`)
+        if (cancelled) return
+        if (manifestRes.status === 401) {
+          setAuthState({ authenticated: false })
+          return
+        }
+        if (manifestRes.ok) {
+          const manifest = await manifestRes.json()
+          const manifestArea = normalizePracticeArea(manifest?.practiceArea)
+          if (manifestArea && manifestArea !== detectedArea) {
+            const templates = await loadKnowledgeTemplates()
+            if (cancelled) return
+            setKnowledgeTemplates(templates)
+
+            const matchingTemplate = templates.find((template) => {
+              return normalizePracticeArea(template.practiceArea) === detectedArea
+            })
+
+            if (matchingTemplate) {
+              const initialized = await handleKnowledgeInit(matchingTemplate.id, firmRoot)
+              if (cancelled) return
+              if (!initialized) {
+                setShowKnowledgeInit(templates.length > 0)
+              }
+            } else {
+              setShowKnowledgeInit(templates.length > 0)
+            }
             return
           }
-          if (!res.ok) {
-            // No knowledge — fetch templates and show init modal
-            return fetch(`${API_URL}/api/knowledge/templates`)
-              .then(r => {
-                if (r.status === 401) {
-                  setAuthState({ authenticated: false })
-                  return []
-                }
-                return r.json()
-              })
-              .then(data => {
-                const templates = Array.isArray(data) ? data : []
-                setKnowledgeTemplates(templates)
-                setShowKnowledgeInit(templates.length > 0)
-              })
-          }
-          // Knowledge exists — nothing to do
-        })
-        .catch(() => {})
+          setShowKnowledgeInit(false)
+          return
+        }
+      } catch {
+        // Continue to template initialization.
+      }
 
-      // Reload auth status with team context for this firm root
-      checkAuthStatus()
+      const templates = await loadKnowledgeTemplates()
+      if (cancelled) return
+      setKnowledgeTemplates(templates)
+
+      const matchingTemplate = templates.find((template) => {
+        return normalizePracticeArea(template.practiceArea) === detectedArea
+      })
+
+      if (matchingTemplate) {
+        const initialized = await handleKnowledgeInit(matchingTemplate.id, firmRoot)
+        if (cancelled) return
+        if (!initialized) {
+          setShowKnowledgeInit(templates.length > 0)
+        }
+        return
+      }
+
+      setShowKnowledgeInit(templates.length > 0)
     }
-  }, [firmRoot, practiceArea, checkAuthStatus])
+
+    syncFolderContext()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    checkAuthStatus,
+    firmRoot,
+    handleKnowledgeInit,
+    loadKnowledgeTemplates,
+    resolveFolderPracticeArea,
+    saveFolderPracticeArea,
+  ])
 
   const handleShowFile = useCallback((filePath: string) => {
     if (!caseFolder) return
@@ -565,7 +1110,10 @@ function App() {
     setAuthState({ authenticated: false })
     setCaseFolder(null)
     setDocumentIndex(null)
+    setPracticeArea(null)
     setPendingFolderPath(null)
+    setPendingPracticeArea(null)
+    setFolderSetupError(null)
     localStorage.removeItem(FIRM_ROOT_KEY)
   }
 
@@ -575,7 +1123,10 @@ function App() {
     setFirmRoot(null)
     setCaseFolder(null)
     setDocumentIndex(null)
+    setPracticeArea(null)
     setPendingFolderPath(null)
+    setPendingPracticeArea(null)
+    setFolderSetupError(null)
     localStorage.removeItem(FIRM_ROOT_KEY)
     setAuthState({
       authenticated: true,
@@ -608,12 +1159,6 @@ function App() {
   const handleCaseSelect = (folder: string) => {
     // Just set the folder - the useEffect will handle loading the case data
     setCaseFolder(folder)
-  }
-
-  const handleInitComplete = (index: DocumentIndex) => {
-    setDocumentIndex(index)
-    setIsLoading(false)
-    if (caseFolder) loadGeneratedDocs(caseFolder)
   }
 
   const loadGeneratedDocs = async (folder: string) => {
@@ -658,7 +1203,9 @@ function App() {
             </div>
             <h1 className="font-serif text-3xl text-brand-900">Claude PI</h1>
           </div>
-          <p className="text-brand-500 mb-8">Legal Case Management</p>
+          <p className="text-brand-500 mb-8">
+            {pendingFolderPath ? 'Confirm folder settings to continue' : 'Legal Case Management'}
+          </p>
 
           <button
             onClick={() => setShowPicker(true)}
@@ -672,25 +1219,34 @@ function App() {
                 <FolderIcon />
               </div>
               <p className="text-base font-medium text-brand-700 group-hover:text-brand-900">
-                Select Cases Folder
+                {pendingFolderPath ? 'Change Folder (Optional)' : 'Select Cases Folder'}
               </p>
               <p className="mt-1 text-sm text-brand-400">
-                Choose the folder containing all your case files first
+                {pendingFolderPath
+                  ? 'Use this only if you want a different folder'
+                  : 'Choose the folder containing all your case files first'}
               </p>
             </div>
           </button>
 
           {pendingFolderPath && (
             <div className="mt-6 border border-surface-200 rounded-xl p-4 bg-surface-50">
+              <p className="text-xs font-medium text-brand-700 mb-1">Confirm Folder Settings</p>
               <p className="text-xs text-brand-500 mb-2">Selected folder</p>
               <p className="text-sm text-brand-700 break-all">{pendingFolderPath}</p>
+              <p className="text-xs text-brand-500 mt-2">
+                Area of law is saved per folder and reused automatically.
+              </p>
               <div className="mt-4">
-                <label className="block text-sm font-medium text-brand-700 mb-2">Practice Area</label>
+                <label className="block text-sm font-medium text-brand-700 mb-2">Area of Law</label>
+                {pendingPracticeAreaLoading && (
+                  <p className="text-xs text-brand-500 mb-3">Checking existing folder settings...</p>
+                )}
                 <div className="grid grid-cols-2 gap-3">
                   <button
-                    onClick={() => setPracticeArea('Personal Injury')}
+                    onClick={() => setPendingPracticeArea('Personal Injury')}
                     className={`px-4 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
-                      practiceArea === 'Personal Injury'
+                      pendingPracticeArea === 'Personal Injury'
                         ? 'border-accent-500 bg-accent-50 text-accent-700'
                         : 'border-surface-200 text-brand-600 hover:border-accent-300 hover:bg-surface-50'
                     }`}
@@ -698,9 +1254,9 @@ function App() {
                     Personal Injury
                   </button>
                   <button
-                    onClick={() => setPracticeArea('Workers\' Compensation')}
+                    onClick={() => setPendingPracticeArea('Workers\' Compensation')}
                     className={`px-4 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
-                      practiceArea === 'Workers\' Compensation'
+                      pendingPracticeArea === 'Workers\' Compensation'
                         ? 'border-accent-500 bg-accent-50 text-accent-700'
                         : 'border-surface-200 text-brand-600 hover:border-accent-300 hover:bg-surface-50'
                     }`}
@@ -709,11 +1265,15 @@ function App() {
                   </button>
                 </div>
               </div>
+              {folderSetupError && (
+                <p className="mt-3 text-xs text-red-700">{folderSetupError}</p>
+              )}
               <button
-                onClick={() => setFirmRoot(pendingFolderPath)}
-                className="mt-4 w-full px-4 py-3 bg-brand-900 text-white rounded-lg font-medium hover:bg-brand-800 transition-colors"
+                onClick={confirmFolderSetup}
+                disabled={savingFolderSetup || !pendingPracticeArea}
+                className="mt-4 w-full px-4 py-3 bg-brand-900 text-white rounded-lg font-medium hover:bg-brand-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Continue
+                {savingFolderSetup ? 'Saving...' : 'Save & Open Folder'}
               </button>
             </div>
           )}
@@ -728,7 +1288,7 @@ function App() {
             apiUrl={API_URL}
             onSelect={(path) => {
               setShowPicker(false)
-              setPendingFolderPath(path)
+              beginFolderSetup(path)
             }}
             onCancel={() => setShowPicker(false)}
           />
@@ -741,6 +1301,14 @@ function App() {
 
   // Firm dashboard - show all cases
   if (!caseFolder) {
+    if (!practiceArea) {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-surface-50">
+          <div className="animate-pulse text-brand-400">Loading folder settings...</div>
+        </div>
+      )
+    }
+
     return (
       <>
         <FirmDashboard
@@ -749,7 +1317,7 @@ function App() {
           practiceArea={practiceArea}
           onSelectCase={(path) => handleCaseSelect(path)}
           onChangeFirmRoot={() => setShowPicker(true)}
-          onChangePracticeArea={setPracticeArea}
+          onChangePracticeAreaForFolder={() => beginFolderSetup(firmRoot, { forcePrompt: true })}
           userEmail={authState?.email}
           onLogout={handleLogout}
           todos={todos}
@@ -760,13 +1328,20 @@ function App() {
           onFirmChatPromptUsed={handleFirmChatPromptUsed}
           knowledgeVersion={knowledgeVersion}
           teamContext={authState?.team}
+          indexingProgress={indexingProgress}
+          firmCasesVersion={firmCasesVersion}
+          batchProgress={batchProgress}
+          showBatchModal={showBatchModal}
+          onBatchProgressChange={setBatchProgress}
+          onShowBatchModalChange={setShowBatchModal}
+          onBatchComplete={() => setFirmCasesVersion(v => v + 1)}
         />
         {showPicker && (
           <FolderPicker
             apiUrl={API_URL}
             onSelect={(path) => {
               setShowPicker(false)
-              setFirmRoot(path)
+              beginFolderSetup(path)
             }}
             onCancel={() => setShowPicker(false)}
           />
@@ -783,18 +1358,8 @@ function App() {
         />
 
         {showKnowledgeInit && <KnowledgeInitModal />}
+        <IndexingUI />
       </>
-    )
-  }
-
-  // Loading / initializing screen
-  if (isLoading && !documentIndex) {
-    return (
-      <CaseLoader
-        caseFolder={caseFolder}
-        onComplete={handleInitComplete}
-        apiUrl={API_URL}
-      />
     )
   }
 
@@ -802,9 +1367,9 @@ function App() {
   return (
     <div className="h-screen flex flex-col bg-surface-50">
       {/* Header */}
-      <header className="bg-brand-900 text-white px-6 py-4 shadow-lg">
+      <header className="bg-brand-900/95 text-white px-6 py-4 shadow-lg backdrop-blur">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center justify-end gap-2 flex-wrap">
             <div className="w-9 h-9 rounded-lg bg-white/10 flex items-center justify-center">
               <ScaleIcon />
             </div>
@@ -848,8 +1413,8 @@ function App() {
                   setReviewPrompt(`Review the ${count} document conflicts. Analyze them, make recommendations for the easy ones, and present them in batches for my approval.`)
                 }}
                 className="flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-lg
-                           bg-amber-500 text-white hover:bg-amber-600 transition-colors
-                           animate-pulse hover:animate-none"
+                           bg-red-600 text-white hover:bg-red-700 transition-colors
+                           ring-1 ring-red-300/30 shadow-card"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
@@ -865,8 +1430,8 @@ function App() {
               <button
                 ref={contactButtonRef}
                 onClick={() => setIsContactCardOpen(!isContactCardOpen)}
-                className="flex items-center gap-2 text-sm text-brand-300 hover:text-white
-                           transition-colors px-3 py-2 rounded-lg hover:bg-white/10"
+                className="flex items-center gap-2 text-sm text-brand-200 hover:text-white
+                           transition-colors px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10"
                 title="Client Contact Info"
               >
                 <UserCircleIcon />
@@ -887,8 +1452,8 @@ function App() {
             {/* Tasks button */}
             <button
               onClick={() => setIsDrawerOpen(true)}
-              className="relative flex items-center gap-2 text-sm text-brand-300 hover:text-white
-                         transition-colors px-3 py-2 rounded-lg hover:bg-white/10"
+              className="relative flex items-center gap-2 text-sm text-brand-200 hover:text-white
+                         transition-colors px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10"
               title="View Tasks"
             >
               <ClipboardListIcon />
@@ -907,8 +1472,8 @@ function App() {
                 setViewContent('')
                 setFileViewUrl(null)
               }}
-              className="flex items-center gap-2 text-sm text-brand-300 hover:text-white
-                         transition-colors px-3 py-2 rounded-lg hover:bg-white/10"
+              className="flex items-center gap-2 text-sm text-brand-200 hover:text-white
+                         transition-colors px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10"
             >
               <ArrowLeftIcon />
               <span>Dashboard</span>
@@ -938,16 +1503,33 @@ function App() {
             generatedDocs={generatedDocs}
             caseFolder={caseFolder}
             apiUrl={API_URL}
-            onDocSelect={(doc, docPath) => {
-              setFileViewUrl(null)
+            onDocSelect={(doc, docPath, filePath) => {
               handleViewUpdate(doc, docPath)
+              setSelectedFilePath(filePath || null)
+              // Also compute file URL so we can toggle to document view
+              if (filePath) {
+                const url = `${API_URL}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(filePath)}`
+                setFileViewUrl(url)
+                setFileViewName(filePath.split('/').pop() || filePath)
+              } else {
+                setFileViewUrl(null)
+              }
+              setVisualizerMode('summary')
             }}
-            onFileView={(url, filename) => {
-              setViewContent('')
+            onFileView={(url, filename, filePath) => {
               setFileViewUrl(url)
               setFileViewName(filename)
+              setSelectedFilePath(filePath)
+              // Keep the summary content if we have it, don't clear it
+              setVisualizerMode('document')
             }}
             indexStatus={indexStatusForViewer}
+            agentView={agentDocumentView}
+            onClearAgentView={() => setAgentDocumentView(null)}
+            savedAgentViews={savedAgentViews}
+            activeAgentViewId={agentDocumentView?.id || null}
+            onApplyAgentView={handleApplySavedAgentView}
+            onClearSavedAgentViews={handleClearSavedAgentViews}
           />
         }
         centerPanel={
@@ -960,7 +1542,28 @@ function App() {
             onIndexMayHaveChanged={reloadDocumentIndex}
             onDraftsMayHaveChanged={() => setRefreshDraftsKey(k => k + 1)}
             onShowFile={handleShowFile}
+            onDocumentView={handleDocumentView}
             onIndexStatusChange={setIndexStatusForViewer}
+            onStartReindex={(forceFullReindex) => {
+              if (forceFullReindex) {
+                startCaseIndexing(caseFolder)
+              } else {
+                // Check for changed files first, then start indexing only those
+                fetch(`${API_URL}/api/files/index-status?case=${encodeURIComponent(caseFolder)}`)
+                  .then(res => res.json())
+                  .then(status => {
+                    if (!status.needsIndex) return
+                    const changedFiles = [...(status.newFiles || []), ...(status.modifiedFiles || [])]
+                    if (changedFiles.length > 0 && status.reason !== 'no_index') {
+                      startCaseIndexing(caseFolder, changedFiles)
+                    } else {
+                      startCaseIndexing(caseFolder)
+                    }
+                  })
+                  .catch(() => startCaseIndexing(caseFolder))
+              }
+            }}
+            isReindexing={indexingProgress?.isRunning && indexingProgress?.caseFolder === caseFolder}
           />
         }
         rightPanel={
@@ -973,10 +1576,19 @@ function App() {
             apiUrl={API_URL}
             documentIndex={documentIndex}
             firmRoot={firmRoot || undefined}
-            onCloseFile={() => setFileViewUrl(null)}
+            onCloseFile={() => {
+              setFileViewUrl(null)
+              setSelectedFilePath(null)
+              setViewContent('')
+              setVisualizerMode('summary')
+            }}
             onIndexUpdated={reloadDocumentIndex}
             onDraftsUpdated={() => loadGeneratedDocs(caseFolder)}
             refreshDraftsKey={refreshDraftsKey}
+            viewMode={visualizerMode}
+            onToggleViewMode={() => setVisualizerMode(m => m === 'summary' ? 'document' : 'summary')}
+            hasFile={!!selectedFilePath}
+            hasSummary={!!viewContent}
           />
         }
       />
@@ -995,19 +1607,222 @@ function App() {
 
       {/* Knowledge init modal — shown when firm root has no knowledge base */}
       {showKnowledgeInit && <KnowledgeInitModal />}
+      <IndexingUI />
     </div>
   )
 
+  function IndexingUI() {
+    // Batch indexing floating pill — shown when batch is running and modal is hidden
+    // (rendered here in App.tsx so it survives navigation away from the dashboard)
+    const batchPill = batchProgress?.isRunning && !showBatchModal ? (
+      <div
+        onClick={() => {
+          // Navigate back to dashboard and open the modal
+          if (caseFolder) {
+            setCaseFolder(null)
+            setDocumentIndex(null)
+            setViewContent('')
+            setFileViewUrl(null)
+          }
+          setShowBatchModal(true)
+        }}
+        className="fixed bottom-6 right-6 z-50 flex items-center gap-3 px-4 py-3 bg-brand-900 text-white
+                   rounded-full shadow-elevated cursor-pointer hover:bg-brand-800 transition-colors"
+      >
+        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+        <span className="text-sm font-medium">
+          Indexing {batchProgress.totalCases} case{batchProgress.totalCases !== 1 ? 's' : ''}
+        </span>
+        {batchProgress.filesTotal > 0 && (
+          <span className="text-xs text-brand-300">
+            {batchProgress.filesComplete}/{batchProgress.filesTotal} files
+          </span>
+        )}
+      </div>
+    ) : null
+
+    if (!indexingProgress) return batchPill
+
+    const pct = indexingProgress.filesTotal > 0
+      ? Math.round((indexingProgress.filesComplete / indexingProgress.filesTotal) * 100)
+      : 0
+
+    // Floating pill — shown when running and modal is hidden
+    if (indexingProgress.isRunning && !showIndexingModal) {
+      return (
+        <>
+          <div
+            onClick={() => setShowIndexingModal(true)}
+            className={`fixed ${batchPill ? 'bottom-20' : 'bottom-6'} right-6 z-50 flex items-center gap-3 px-4 py-3 bg-brand-900 text-white
+                       rounded-full shadow-elevated cursor-pointer hover:bg-brand-800 transition-colors`}
+          >
+            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            <span className="text-sm font-medium truncate max-w-48">{indexingProgress.caseName}</span>
+            {indexingProgress.filesTotal > 0 && (
+              <span className="text-xs text-brand-300">
+                {indexingProgress.filesComplete}/{indexingProgress.filesTotal} files
+              </span>
+            )}
+          </div>
+          {batchPill}
+        </>
+      )
+    }
+
+    // Modal — shown when showIndexingModal is true
+    if (!showIndexingModal) return batchPill
+
+    return (
+      <div
+        className="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"
+        onClick={() => { if (indexingProgress.isRunning) setShowIndexingModal(false) }}
+      >
+        <div
+          className="bg-white rounded-2xl shadow-elevated w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden"
+          onClick={e => e.stopPropagation()}
+        >
+          {/* Header */}
+          <div className="px-6 py-5 border-b border-surface-200">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-xl bg-brand-900 flex items-center justify-center text-white">
+                  <ScaleIcon />
+                </div>
+                <div>
+                  <h2 className="text-lg font-semibold text-brand-900">
+                    {indexingProgress.isRunning ? 'Indexing Case...' : indexingProgress.error ? 'Indexing Error' : 'Indexing Complete'}
+                  </h2>
+                  <p className="text-sm text-brand-500 mt-0.5 truncate max-w-md" title={indexingProgress.caseFolder}>
+                    {indexingProgress.caseName}
+                    {indexingProgress.filesTotal > 0 && ` — ${indexingProgress.filesComplete}/${indexingProgress.filesTotal} files`}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowIndexingModal(false)}
+                className="p-2 text-brand-400 hover:text-brand-600 hover:bg-surface-100 rounded-lg transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Progress bar */}
+            {indexingProgress.filesTotal > 0 && (
+              <div className="mt-4">
+                <div className="flex items-center justify-between text-xs text-brand-500 mb-1.5">
+                  <span className="truncate mr-4">
+                    {indexingProgress.currentFile || (indexingProgress.isRunning ? indexingProgress.status : 'Complete')}
+                  </span>
+                  <span>{pct}%</span>
+                </div>
+                <div className="h-2 bg-surface-200 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${
+                      indexingProgress.error ? 'bg-red-500' : 'bg-accent-500'
+                    }`}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+              </div>
+            )}
+            {indexingProgress.filesTotal === 0 && indexingProgress.isRunning && (
+              <div className="mt-4">
+                <div className="flex items-center justify-between text-xs text-brand-500 mb-1.5">
+                  <span>{indexingProgress.status}</span>
+                </div>
+                <div className="h-1.5 bg-surface-200 rounded-full overflow-hidden">
+                  <div className="h-full bg-gradient-to-r from-accent-500 to-accent-600 rounded-full w-full animate-pulse" />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Error display */}
+          {indexingProgress.error && (
+            <div className="mx-6 mt-4 bg-red-50 border border-red-200 rounded-xl p-4">
+              <p className="text-red-800 text-sm font-medium">Error</p>
+              <p className="text-red-700 text-sm mt-1">{indexingProgress.error}</p>
+              <button
+                onClick={() => startCaseIndexing(indexingProgress.caseFolder)}
+                className="mt-3 px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-medium
+                           hover:bg-red-700 transition-colors"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {/* Terminal log */}
+          <div className="flex-1 overflow-auto p-4 bg-brand-950 font-mono text-xs">
+            {indexingProgress.progress.map((line, i) => {
+              const isCheck = line.startsWith('✓')
+              const isError = line.startsWith('✗') || line.startsWith('Error:')
+              return (
+                <div key={i} className={`py-0.5 ${isError ? 'text-red-400' : isCheck ? 'text-emerald-400' : 'text-brand-300'}`}>
+                  <span className="text-brand-600 mr-2 select-none">$</span>
+                  {line}
+                </div>
+              )
+            })}
+            {indexingProgress.isRunning && (
+              <div className="text-emerald-400 py-0.5">
+                <span className="text-brand-600 mr-2 select-none">$</span>
+                {indexingProgress.currentFile || indexingProgress.status || 'Working...'}
+                <span className="ml-1 animate-pulse">_</span>
+              </div>
+            )}
+          </div>
+
+          {/* Footer */}
+          <div className="px-6 py-4 border-t border-surface-200 flex justify-end gap-3 bg-surface-50">
+            {indexingProgress.isRunning ? (
+              <>
+                <div className="flex items-center gap-3 text-sm text-brand-600 mr-auto">
+                  <div className="w-4 h-4 border-2 border-accent-600 border-t-transparent rounded-full animate-spin" />
+                  Processing...
+                </div>
+                <button
+                  onClick={() => setShowIndexingModal(false)}
+                  className="px-4 py-2 text-sm text-brand-500 hover:text-brand-700 transition-colors"
+                >
+                  Minimize
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={() => {
+                  setIndexingProgress(null)
+                  setShowIndexingModal(false)
+                }}
+                className="px-5 py-2.5 bg-brand-900 text-white rounded-lg hover:bg-brand-800 font-medium transition-colors"
+              >
+                Done
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   function KnowledgeInitModal() {
+    const templates = Array.isArray(knowledgeTemplates) ? knowledgeTemplates : []
+    const matchingTemplates = practiceArea
+      ? templates.filter((template) => normalizePracticeArea(template.practiceArea) === practiceArea)
+      : templates
+    const templatesToShow = matchingTemplates.length > 0 ? matchingTemplates : templates
+
     return (
       <div className="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50">
         <div className="bg-white rounded-2xl shadow-elevated w-full max-w-md p-6">
           <h2 className="text-lg font-semibold text-brand-900 mb-2">Set Up Practice Knowledge</h2>
           <p className="text-sm text-brand-500 mb-5">
-            Choose a practice area to initialize the knowledge base for this folder. You can customize sections after setup.
+            Initialize the knowledge base for this folder. You can customize sections after setup.
           </p>
           <div className="space-y-3">
-            {(Array.isArray(knowledgeTemplates) ? knowledgeTemplates : []).map(t => (
+            {templatesToShow.map(t => (
               <button
                 key={t.id}
                 onClick={() => handleKnowledgeInit(t.id)}

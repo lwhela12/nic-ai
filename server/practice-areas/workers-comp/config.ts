@@ -21,6 +21,8 @@ export const WC_DOC_TYPES = [
   "vocational_report",      // Vocational rehabilitation report
   "wage_statement",         // Wage documentation
   "d9_form",                // Request for Hearing
+  "hearing_notice",         // Notice of hearing
+  "hearing_decision",       // AO/HO decision and order
   "d16_form",               // Petition to Reopen
   "aoe_coe_investigation",  // Compensability investigation
   "utilization_review",     // UR decision

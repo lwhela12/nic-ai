@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, type SetStateAction, type Dispatch } from 'react'
 import FirmChat from './FirmChat'
 import KnowledgeEditor from './KnowledgeEditor'
 import KnowledgeChat from './KnowledgeChat'
@@ -99,13 +99,24 @@ interface FirmData {
   }
 }
 
+interface BatchProgress {
+  isRunning: boolean
+  totalCases: number
+  currentText: string
+  toolsUsed: string[]
+  logs: string[]
+  filesTotal: number
+  filesComplete: number
+  currentFile: string
+}
+
 interface Props {
   apiUrl: string
   firmRoot: string
   practiceArea: PracticeArea
   onSelectCase: (casePath: string) => void
   onChangeFirmRoot: () => void
-  onChangePracticeArea: (pa: PracticeArea) => void
+  onChangePracticeAreaForFolder: () => void
   userEmail?: string
   onLogout?: () => void
   // Todo props - managed by App.tsx
@@ -129,20 +140,27 @@ interface Props {
       canEditKnowledge: boolean
     }
   }
-}
-
-interface BatchProgress {
-  isRunning: boolean
-  totalCases: number
-  currentText: string
-  toolsUsed: string[]
-  logs: string[]
-  filesTotal: number
-  filesComplete: number
-  currentFile: string
+  // Single-case indexing progress from App.tsx
+  indexingProgress?: {
+    caseFolder: string
+    caseName: string
+    isRunning: boolean
+    filesTotal: number
+    filesComplete: number
+    currentFile: string
+  } | null
+  // Incremented when a case finishes indexing — triggers case list refresh
+  firmCasesVersion?: number
+  // Batch indexing state — lifted to App.tsx so it survives navigation
+  batchProgress?: BatchProgress | null
+  showBatchModal?: boolean
+  onBatchProgressChange?: Dispatch<SetStateAction<BatchProgress | null>>
+  onShowBatchModalChange?: Dispatch<SetStateAction<boolean>>
+  onBatchComplete?: () => void
 }
 
 type SortField = 'name' | 'phase' | 'sol' | 'specials'
+type TableDensity = 'comfortable' | 'compact'
 
 // Icons
 const ScaleIcon = () => (
@@ -232,11 +250,18 @@ const ClipboardDocumentListIcon = () => (
 )
 
 export default function FirmDashboard({
-  apiUrl, firmRoot, practiceArea, onSelectCase, onChangeFirmRoot, onChangePracticeArea, userEmail, onLogout,
+  apiUrl, firmRoot, practiceArea, onSelectCase, onChangeFirmRoot, onChangePracticeAreaForFolder, userEmail, onLogout,
   todos, onDrawerOpen, onTodosUpdated,
   firmChatPrompt, forceShowFirmChat, onFirmChatPromptUsed,
   knowledgeVersion,
-  teamContext
+  teamContext,
+  indexingProgress,
+  firmCasesVersion,
+  batchProgress: batchProgressProp,
+  showBatchModal: showBatchModalProp,
+  onBatchProgressChange,
+  onShowBatchModalChange,
+  onBatchComplete,
 }: Props) {
   const isWC = practiceArea === 'Workers\' Compensation'
   const [firmData, setFirmData] = useState<FirmData | null>(null)
@@ -244,7 +269,14 @@ export default function FirmDashboard({
   const [error, setError] = useState<string | null>(null)
   const [sortField, setSortField] = useState<SortField>('sol')
   const [filterPhase, setFilterPhase] = useState<string>('all')
-  const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null)
+  const [tableDensity, setTableDensity] = useState<TableDensity>('comfortable')
+  // Use App-level batch state when available, local state as fallback
+  const [localBatchProgress, setLocalBatchProgress] = useState<BatchProgress | null>(null)
+  const [localShowBatchModal, setLocalShowBatchModal] = useState(false)
+  const batchProgress = onBatchProgressChange ? (batchProgressProp ?? null) : localBatchProgress
+  const showBatchModal = onShowBatchModalChange ? (showBatchModalProp ?? false) : localShowBatchModal
+  const setBatchProgress = onBatchProgressChange || setLocalBatchProgress
+  const setShowBatchModal = onShowBatchModalChange || setLocalShowBatchModal
   const [view, setViewState] = useState<'dashboard' | 'firmChat' | 'knowledge'>(() => {
     const urlView = getUrlParam('view')
     if (urlView === 'firmChat' || urlView === 'knowledge') return urlView
@@ -385,8 +417,7 @@ export default function FirmDashboard({
     setLoading(true)
     setError(null)
     try {
-      const practiceAreaParam = isWC ? 'WC' : 'PI'
-      const res = await fetch(`${apiUrl}/api/firm/cases?root=${encodeURIComponent(firmRoot)}&practiceArea=${practiceAreaParam}`)
+      const res = await fetch(`${apiUrl}/api/firm/cases?root=${encodeURIComponent(firmRoot)}`)
       if (!res.ok) throw new Error('Failed to load cases')
       const data = await res.json()
       setFirmData(data)
@@ -451,6 +482,13 @@ export default function FirmDashboard({
     loadCases()
     loadTeamMembers()
   }, [loadCases, loadTeamMembers])
+
+  // Reload cases when a case finishes indexing
+  useEffect(() => {
+    if (firmCasesVersion && firmCasesVersion > 0) {
+      loadCases()
+    }
+  }, [firmCasesVersion]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!teamContext?.role) return
@@ -621,121 +659,128 @@ export default function FirmDashboard({
       filesComplete: 0,
       currentFile: ''
     })
+    setShowBatchModal(true)
 
     try {
       const res = await fetch(`${apiUrl}/api/firm/batch-index`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ root: firmRoot, cases: casePaths, practiceArea })
+        body: JSON.stringify({ root: firmRoot, cases: casePaths })
       })
 
       const reader = res.body?.getReader()
       if (!reader) throw new Error('No reader')
 
       const decoder = new TextDecoder()
+      let sseBuffer = ''
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
 
-        const chunk = decoder.decode(value)
-        const lines = chunk.split('\n')
+        sseBuffer += decoder.decode(value, { stream: true })
+        const lines = sseBuffer.split('\n')
+        sseBuffer = lines.pop() || ''
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6))
+          if (!line.startsWith('data:') && !line.startsWith('data: ')) continue
+          const jsonStr = line.startsWith('data: ') ? line.slice(6) : line.slice(5)
+          try {
+            const data = JSON.parse(jsonStr.trim())
 
-              if (data.type === 'start') {
-                setBatchProgress(prev => prev ? {
-                  ...prev,
-                  totalCases: data.totalCases,
-                  logs: [...prev.logs, `Found ${data.totalCases} cases to index`]
-                } : prev)
-              }
-
-              if (data.type === 'text') {
-                setBatchProgress(prev => prev ? {
-                  ...prev,
-                  currentText: data.content,
-                  logs: [...prev.logs.slice(-100), data.content]
-                } : prev)
-              }
-
-              if (data.type === 'tool') {
-                const toolMsg = data.detail || `Using: ${data.name}`
-                setBatchProgress(prev => prev ? {
-                  ...prev,
-                  toolsUsed: [...prev.toolsUsed, data.name],
-                  logs: [...prev.logs.slice(-100), toolMsg]
-                } : prev)
-              }
-
-              if (data.type === 'tool_result') {
-                setBatchProgress(prev => prev ? {
-                  ...prev,
-                  logs: [...prev.logs.slice(-100), `  → ${data.content}`]
-                } : prev)
-              }
-
-              if (data.type === 'done') {
-                setBatchProgress(prev => prev ? {
-                  ...prev,
-                  isRunning: false,
-                  logs: [...prev.logs, data.success ? 'Batch indexing complete!' : 'Batch indexing finished with errors']
-                } : prev)
-              }
-
-              if (data.type === 'error') {
-                setBatchProgress(prev => prev ? {
-                  ...prev,
-                  isRunning: false,
-                  logs: [...prev.logs, `Error: ${data.error}`]
-                } : prev)
-              }
-
-              // File-level progress events
-              if (data.type === 'files_found') {
-                setBatchProgress(prev => prev ? {
-                  ...prev,
-                  filesTotal: data.count,
-                  logs: [...prev.logs, `Found ${data.count} files to extract`]
-                } : prev)
-              }
-
-              if (data.type === 'file_start') {
-                setBatchProgress(prev => prev ? {
-                  ...prev,
-                  currentFile: data.filename
-                } : prev)
-              }
-
-              if (data.type === 'file_done') {
-                setBatchProgress(prev => prev ? {
-                  ...prev,
-                  filesComplete: prev.filesComplete + 1,
-                  currentFile: '',
-                  logs: [...prev.logs.slice(-50), `✓ ${data.filename} (${data.docType})`]
-                } : prev)
-              }
-
-              if (data.type === 'file_error') {
-                setBatchProgress(prev => prev ? {
-                  ...prev,
-                  filesComplete: prev.filesComplete + 1,
-                  logs: [...prev.logs.slice(-50), `✗ ${data.filename}: ${data.error}`]
-                } : prev)
-              }
-
-              if (data.type === 'status') {
-                setBatchProgress(prev => prev ? {
-                  ...prev,
-                  currentText: data.message,
-                  logs: [...prev.logs.slice(-50), data.message]
-                } : prev)
-              }
-            } catch {
-              // Ignore parse errors
+            if (data.type === 'start') {
+              setBatchProgress(prev => prev ? {
+                ...prev,
+                totalCases: data.totalCases,
+                logs: [...prev.logs, `Found ${data.totalCases} cases to index`]
+              } : prev)
             }
+
+            if (data.type === 'text') {
+              setBatchProgress(prev => prev ? {
+                ...prev,
+                currentText: data.content,
+                logs: [...prev.logs.slice(-100), data.content]
+              } : prev)
+            }
+
+            if (data.type === 'tool') {
+              const toolMsg = data.detail || `Using: ${data.name}`
+              setBatchProgress(prev => prev ? {
+                ...prev,
+                toolsUsed: [...prev.toolsUsed, data.name],
+                logs: [...prev.logs.slice(-100), toolMsg]
+              } : prev)
+            }
+
+            if (data.type === 'tool_result') {
+              setBatchProgress(prev => prev ? {
+                ...prev,
+                logs: [...prev.logs.slice(-100), `  → ${data.content}`]
+              } : prev)
+            }
+
+            if (data.type === 'done') {
+              setBatchProgress(prev => prev ? {
+                ...prev,
+                isRunning: false,
+                logs: [...prev.logs, data.success ? 'Batch indexing complete!' : 'Batch indexing finished with errors']
+              } : prev)
+              setShowBatchModal(true)
+              onBatchComplete?.()
+            }
+
+            if (data.type === 'error') {
+              setBatchProgress(prev => prev ? {
+                ...prev,
+                isRunning: false,
+                logs: [...prev.logs, `Error: ${data.error}`]
+              } : prev)
+            }
+
+            // File-level progress events
+            if (data.type === 'files_found') {
+              setBatchProgress(prev => prev ? {
+                ...prev,
+                filesTotal: data.count,
+                logs: [...prev.logs, `Found ${data.count} files to extract`]
+              } : prev)
+            }
+
+            if (data.type === 'file_start') {
+              setBatchProgress(prev => prev ? {
+                ...prev,
+                currentFile: data.filename
+              } : prev)
+            }
+
+            if (data.type === 'file_done') {
+              setBatchProgress(prev => prev ? {
+                ...prev,
+                filesComplete: prev.filesComplete + 1,
+                currentFile: '',
+                // Fallback: set filesTotal from file_done's totalFiles if files_found was missed
+                ...(prev.filesTotal === 0 && data.totalFiles ? { filesTotal: data.totalFiles } : {}),
+                logs: [...prev.logs.slice(-50), `✓ ${data.filename} (${data.docType})`]
+              } : prev)
+            }
+
+            if (data.type === 'file_error') {
+              setBatchProgress(prev => prev ? {
+                ...prev,
+                filesComplete: prev.filesComplete + 1,
+                logs: [...prev.logs.slice(-50), `✗ ${data.filename}: ${data.error}`]
+              } : prev)
+            }
+
+            if (data.type === 'status') {
+              setBatchProgress(prev => prev ? {
+                ...prev,
+                currentText: data.message,
+                logs: [...prev.logs.slice(-50), data.message]
+              } : prev)
+            }
+          } catch {
+            // Ignore parse errors
           }
         }
       }
@@ -947,6 +992,31 @@ export default function FirmDashboard({
       }
     }) || []
 
+  const visibleCasePaths = useMemo(
+    () => sortedCases.filter((c) => !c.isContainer).map((c) => c.path),
+    [sortedCases]
+  )
+
+  const selectedVisibleCount = useMemo(
+    () => visibleCasePaths.filter((path) => selectedCases.has(path)).length,
+    [selectedCases, visibleCasePaths]
+  )
+
+  const handleIndexSelected = () => {
+    const paths = Array.from(selectedCases)
+    if (paths.length === 0) return
+    setSelectedCases(new Set())
+    startBatchIndex(paths)
+  }
+
+  const isCompact = tableDensity === 'compact'
+  const headerCellPad = isCompact ? 'px-6 py-3' : 'px-6 py-4'
+  const checkboxHeaderCellPad = isCompact ? 'px-4 py-3 w-10' : 'px-4 py-4 w-10'
+  const checkboxBodyCellPad = isCompact ? 'px-4 py-3 w-10' : 'px-4 py-4 w-10'
+  const bodyCellPad = isCompact ? 'px-6 py-3' : 'px-6 py-4'
+  const containerRowCellPad = isCompact ? 'px-6 py-2.5' : 'px-6 py-3'
+  const containerCheckboxCellPad = isCompact ? 'px-4 py-2.5 w-10' : 'px-4 py-3 w-10'
+
   const phases = [...new Set(firmData?.cases.map(c => c.casePhase).filter(Boolean))]
 
   if (loading) {
@@ -977,7 +1047,7 @@ export default function FirmDashboard({
   return (
     <div className="flex flex-col h-full bg-surface-50">
       {/* Header */}
-      <div className="bg-brand-900 text-white px-8 py-6">
+      <div className="bg-brand-900/95 text-white px-8 py-6 backdrop-blur">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-4">
             <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center">
@@ -990,70 +1060,50 @@ export default function FirmDashboard({
               <p className="text-sm text-brand-300 mt-0.5">{firmRoot}</p>
             </div>
           </div>
-          <div className="flex gap-3">
-            {selectedCases.size > 0 ? (
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <div className="flex items-center gap-2 rounded-xl bg-white/5 px-2 py-1">
+              {selectedCases.size === 0 && unindexedCases.length > 0 && (
+                <button
+                  onClick={() => startBatchIndex(unindexedCases.map(c => c.path))}
+                  disabled={batchProgress?.isRunning}
+                  className="px-4 py-2 text-sm font-medium bg-accent-600 text-white rounded-lg
+                             hover:bg-accent-500 disabled:opacity-50 transition-colors shadow-card"
+                >
+                  {batchProgress?.isRunning ? 'Indexing...' : `Index All (${unindexedCases.length})`}
+                </button>
+              )}
               <button
-                onClick={() => {
-                  const paths = Array.from(selectedCases)
-                  setSelectedCases(new Set())
-                  startBatchIndex(paths)
-                }}
-                disabled={batchProgress?.isRunning}
-                className="px-4 py-2 text-sm font-medium bg-accent-600 text-white rounded-lg
-                           hover:bg-accent-500 disabled:opacity-50 transition-colors"
+                onClick={loadCases}
+                className="p-2 text-brand-200 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors"
+                title="Refresh"
               >
-                {batchProgress?.isRunning ? 'Indexing...' : `Index Selected (${selectedCases.size})`}
-              </button>
-            ) : unindexedCases.length > 0 ? (
-              <button
-                onClick={() => startBatchIndex(unindexedCases.map(c => c.path))}
-                disabled={batchProgress?.isRunning}
-                className="px-4 py-2 text-sm font-medium bg-accent-600 text-white rounded-lg
-                           hover:bg-accent-500 disabled:opacity-50 transition-colors"
-              >
-                {batchProgress?.isRunning ? 'Indexing...' : `Index All (${unindexedCases.length})`}
-              </button>
-            ) : null}
-            <button
-              onClick={loadCases}
-              className="p-2 text-brand-300 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
-              title="Refresh"
-            >
-              <RefreshIcon />
-            </button>
-            <button
-              onClick={onChangeFirmRoot}
-              className="px-4 py-2 text-sm text-brand-300 hover:text-white hover:bg-white/10
-                         rounded-lg transition-colors flex items-center gap-2"
-            >
-              <FolderIcon />
-              <span>Change Folder</span>
-            </button>
-            {/* Practice Area toggle */}
-            <div className="flex bg-white/10 rounded-lg p-1 ml-2">
-              <button
-                onClick={() => onChangePracticeArea('Personal Injury')}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                  !isWC
-                    ? 'bg-white text-brand-900'
-                    : 'text-brand-300 hover:text-white'
-                }`}
-              >
-                PI
+                <RefreshIcon />
               </button>
               <button
-                onClick={() => onChangePracticeArea('Workers\' Compensation')}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                  isWC
-                    ? 'bg-white text-brand-900'
-                    : 'text-brand-300 hover:text-white'
-                }`}
+                onClick={onChangeFirmRoot}
+                className="px-4 py-2 text-sm text-brand-200 hover:text-white bg-white/5 hover:bg-white/10
+                           rounded-lg transition-colors flex items-center gap-2"
               >
-                WC
+                <FolderIcon />
+                <span>Change Folder</span>
               </button>
+              <div className="h-6 w-px bg-white/15" />
+              <div className="flex items-center gap-2">
+                <div className="px-3 py-1.5 text-xs font-medium rounded-lg bg-white/10 text-brand-100">
+                  {isWC ? 'Workers\' Comp' : 'Personal Injury'}
+                </div>
+                <button
+                  onClick={onChangePracticeAreaForFolder}
+                  className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-white/5 text-brand-200 hover:text-white hover:bg-white/10 transition-colors"
+                  title="Change area of law for this folder"
+                >
+                  Change
+                </button>
+              </div>
             </div>
+
             {/* View toggle */}
-            <div className="flex bg-white/10 rounded-lg p-1 ml-2">
+            <div className="flex bg-white/10 rounded-lg p-1">
               <button
                 onClick={() => setView('dashboard')}
                 className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
@@ -1088,27 +1138,31 @@ export default function FirmDashboard({
                 Knowledge
               </button>
             </div>
-            {/* Tasks drawer toggle */}
-            <button
-              onClick={onDrawerOpen}
-              className="relative p-2 text-brand-300 hover:text-white hover:bg-white/10 rounded-lg transition-colors ml-2"
-              title="View Tasks"
-            >
-              <ClipboardDocumentListIcon />
-              {todos.filter(t => t.status === 'pending').length > 0 && (
-                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 text-[10px] font-semibold
-                               bg-accent-500 text-white rounded-full flex items-center justify-center">
-                  {todos.filter(t => t.status === 'pending').length}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={() => openFirmSettings('firm')}
-              className="p-2 text-brand-300 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
-              title="Settings"
-            >
-              <CogIcon />
-            </button>
+
+            <div className="flex items-center gap-2 rounded-xl bg-white/5 px-2 py-1">
+              {/* Tasks drawer toggle */}
+              <button
+                onClick={onDrawerOpen}
+                className="relative p-2 text-brand-200 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors"
+                title="View Tasks"
+              >
+                <ClipboardDocumentListIcon />
+                {todos.filter(t => t.status === 'pending').length > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 text-[10px] font-semibold
+                                 bg-accent-500 text-white rounded-full flex items-center justify-center">
+                    {todos.filter(t => t.status === 'pending').length}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => openFirmSettings('firm')}
+                className="p-2 text-brand-200 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors"
+                title="Settings"
+              >
+                <CogIcon />
+              </button>
+            </div>
+
             {userEmail && (
               <div className="flex items-center gap-3 border-l border-brand-700 pl-4">
                 <span className="text-sm text-brand-300">{userEmail}</span>
@@ -1230,7 +1284,7 @@ export default function FirmDashboard({
       ) : (
         <>
           {/* Filters */}
-          <div className="bg-white border-b border-surface-200 px-8 py-4 flex gap-6 items-center">
+          <div className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-surface-200 px-8 py-4 flex gap-6 items-center">
             <div className="flex items-center gap-2">
               <div className="relative">
                 <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -1307,18 +1361,67 @@ export default function FirmDashboard({
                 </select>
               </div>
             )}
-            <div className="ml-auto text-sm text-brand-500">
-              {sortedCases.filter(c => !c.isContainer).length} case{sortedCases.filter(c => !c.isContainer).length !== 1 ? 's' : ''}
+            <div className="ml-auto flex items-center gap-4">
+              <div className="flex items-center gap-1 rounded-lg bg-surface-100 p-1">
+                <button
+                  onClick={() => setTableDensity('comfortable')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                    tableDensity === 'comfortable'
+                      ? 'bg-white text-brand-900 shadow-sm'
+                      : 'text-brand-500 hover:text-brand-700'
+                  }`}
+                >
+                  Comfortable
+                </button>
+                <button
+                  onClick={() => setTableDensity('compact')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                    tableDensity === 'compact'
+                      ? 'bg-white text-brand-900 shadow-sm'
+                      : 'text-brand-500 hover:text-brand-700'
+                  }`}
+                >
+                  Compact
+                </button>
+              </div>
+              <div className="text-sm text-brand-500">
+                {visibleCasePaths.length} case{visibleCasePaths.length !== 1 ? 's' : ''}
+              </div>
             </div>
           </div>
 
           {/* Cases table */}
           <div className="flex-1 overflow-auto px-8 py-6">
+        {selectedCases.size > 0 && (
+          <div className="mb-4 flex items-center gap-3 rounded-xl border border-accent-200 bg-accent-50 px-4 py-3">
+            <div className="text-sm text-brand-700">
+              <span className="font-semibold text-brand-900">{selectedCases.size}</span> case{selectedCases.size !== 1 ? 's' : ''} selected
+              {selectedVisibleCount !== selectedCases.size && (
+                <span className="text-brand-500"> ({selectedVisibleCount} in current view)</span>
+              )}
+            </div>
+            <button
+              onClick={handleIndexSelected}
+              disabled={batchProgress?.isRunning}
+              className="px-3.5 py-2 text-sm font-medium bg-accent-600 text-white rounded-lg
+                         hover:bg-accent-500 disabled:opacity-50 transition-colors"
+            >
+              {batchProgress?.isRunning ? 'Indexing...' : 'Index Selected'}
+            </button>
+            <button
+              onClick={() => setSelectedCases(new Set())}
+              className="px-3.5 py-2 text-sm font-medium text-brand-700 bg-white border border-surface-200 rounded-lg
+                         hover:bg-surface-100 transition-colors"
+            >
+              Clear Selection
+            </button>
+          </div>
+        )}
         <div className="bg-white rounded-xl shadow-card border border-surface-200 overflow-hidden">
           <table className="w-full">
-            <thead>
+            <thead className="sticky top-0 z-10 bg-white">
               <tr className="border-b border-surface-200">
-                <th className="px-4 py-4 w-10">
+                <th className={checkboxHeaderCellPad}>
                   <input
                     type="checkbox"
                     checked={sortedCases.filter(c => !c.isContainer).length > 0 && sortedCases.filter(c => !c.isContainer).every(c => selectedCases.has(c.path))}
@@ -1326,29 +1429,29 @@ export default function FirmDashboard({
                     className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
                   />
                 </th>
-                <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Client</th>
-                <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Phase</th>
-                <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">
+                <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Client</th>
+                <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Phase</th>
+                <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>
                   {isWC ? 'Date of Injury' : 'Date of Loss'}
                 </th>
                 {isWC ? (
                   <>
-                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Employer</th>
-                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">TTD Status</th>
-                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">AMW / Rate</th>
-                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Hearings</th>
+                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Employer</th>
+                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>TTD Status</th>
+                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>AMW / Rate</th>
+                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Hearings</th>
                   </>
                 ) : (
                   <>
-                    <th className="text-right px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Specials</th>
-                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Policy Limits</th>
-                    <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">SOL</th>
+                    <th className={`text-right ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Specials</th>
+                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Policy Limits</th>
+                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>SOL</th>
                   </>
                 )}
                 {teamMembers.length > 0 && (
-                  <th className="text-left px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Assigned To</th>
+                  <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Assigned To</th>
                 )}
-                <th className="text-center px-6 py-4 text-xs font-semibold text-brand-500 uppercase tracking-wider">Status</th>
+                <th className={`text-center ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Status</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-surface-100">
@@ -1371,7 +1474,7 @@ export default function FirmDashboard({
                       onClick={() => toggleContainer(c.path)}
                       className="bg-brand-50 hover:bg-brand-100 cursor-pointer transition-colors"
                     >
-                      <td className="px-4 py-3 w-10" onClick={e => e.stopPropagation()}>
+                      <td className={containerCheckboxCellPad} onClick={e => e.stopPropagation()}>
                         <input
                           type="checkbox"
                           checked={allDoiCasesSelected}
@@ -1380,7 +1483,7 @@ export default function FirmDashboard({
                           className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
                         />
                       </td>
-                      <td className="px-6 py-3" colSpan={isWC ? 9 : 7}>
+                      <td className={containerRowCellPad} colSpan={isWC ? 9 : 7}>
                         <div className="flex items-center gap-3">
                           <span className={`text-brand-600 transition-transform ${isExpanded ? 'rotate-0' : '-rotate-90'}`}>
                             <ChevronDownIcon />
@@ -1409,7 +1512,7 @@ export default function FirmDashboard({
                       ? 'hover:bg-surface-50 cursor-pointer border-l-2 border-l-transparent hover:border-l-accent-500'
                       : 'bg-surface-50/50 opacity-60'} ${c.isSubcase || isDOICase ? 'bg-surface-25' : ''} transition-all`}
                   >
-                    <td className="px-4 py-4 w-10" onClick={e => e.stopPropagation()}>
+                    <td className={checkboxBodyCellPad} onClick={e => e.stopPropagation()}>
                       <input
                         type="checkbox"
                         checked={selectedCases.has(c.path)}
@@ -1417,7 +1520,7 @@ export default function FirmDashboard({
                         className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
                       />
                     </td>
-                    <td className={`py-4 ${c.isSubcase || isDOICase ? 'pl-10 pr-6' : 'px-6'}`}>
+                    <td className={`${isCompact ? 'py-3' : 'py-4'} ${c.isSubcase || isDOICase ? 'pl-10 pr-6' : 'px-6'}`}>
                       <div className="flex items-center gap-3">
                         {(c.isSubcase || isDOICase) && (
                           <span className="text-brand-300 mr-1 -ml-4">└</span>
@@ -1445,28 +1548,28 @@ export default function FirmDashboard({
                         </div>
                       </div>
                     </td>
-                    <td className="px-6 py-4">{getPhaseBadge(c.casePhase)}</td>
-                    <td className="px-6 py-4 text-sm text-brand-600">
+                    <td className={bodyCellPad}>{getPhaseBadge(c.casePhase)}</td>
+                    <td className={`${bodyCellPad} text-sm text-brand-600`}>
                       {isDOICase ? c.injuryDate : formatDate(c.dateOfLoss)}
                     </td>
                     {isWC ? (
                       <>
-                        <td className="px-6 py-4 text-sm text-brand-600">{c.employer || '—'}</td>
-                        <td className="px-6 py-4">{getTTDStatusBadge(c.ttdStatus)}</td>
-                        <td className="px-6 py-4 text-sm text-brand-600 tabular-nums">{formatAMW(c.amw, c.compensationRate)}</td>
-                        <td className="px-6 py-4 text-sm text-brand-600">{formatHearings(c.openHearings)}</td>
+                        <td className={`${bodyCellPad} text-sm text-brand-600`}>{c.employer || '—'}</td>
+                        <td className={bodyCellPad}>{getTTDStatusBadge(c.ttdStatus)}</td>
+                        <td className={`${bodyCellPad} text-sm text-brand-600 tabular-nums`}>{formatAMW(c.amw, c.compensationRate)}</td>
+                        <td className={`${bodyCellPad} text-sm text-brand-600`}>{formatHearings(c.openHearings)}</td>
                       </>
                     ) : (
                       <>
-                        <td className="px-6 py-4 text-sm text-brand-900 text-right font-semibold tabular-nums">
+                        <td className={`${bodyCellPad} text-sm text-brand-900 text-right font-semibold tabular-nums`}>
                           {formatCurrency(c.totalSpecials)}
                         </td>
-                        <td className="px-6 py-4 text-sm text-brand-600">{formatPolicyLimits(c.policyLimits)}</td>
-                        <td className="px-6 py-4">{getSolBadge(c.solDaysRemaining)}</td>
+                        <td className={`${bodyCellPad} text-sm text-brand-600`}>{formatPolicyLimits(c.policyLimits)}</td>
+                        <td className={bodyCellPad}>{getSolBadge(c.solDaysRemaining)}</td>
                       </>
                     )}
                     {teamMembers.length > 0 && (
-                      <td className="px-6 py-4" onClick={e => e.stopPropagation()}>
+                      <td className={bodyCellPad} onClick={e => e.stopPropagation()}>
                         <CaseAssignmentDropdown
                           casePath={c.path}
                           assignments={c.assignments || []}
@@ -1489,9 +1592,26 @@ export default function FirmDashboard({
                         />
                       </td>
                     )}
-                    <td className="px-6 py-4">
+                    <td className={bodyCellPad}>
                       <div className="flex items-center justify-center">
-                        {!c.indexed ? (
+                        {indexingProgress?.isRunning && indexingProgress.caseFolder === c.path ? (
+                          <div className="flex flex-col items-center gap-1 min-w-24">
+                            <div className="w-24 h-1.5 bg-surface-200 rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-accent-500 rounded-full transition-all duration-300"
+                                style={{ width: indexingProgress.filesTotal > 0
+                                  ? `${(indexingProgress.filesComplete / indexingProgress.filesTotal) * 100}%`
+                                  : '100%'
+                                }}
+                              />
+                            </div>
+                            <span className="text-[10px] text-brand-500 truncate max-w-24">
+                              {indexingProgress.filesTotal > 0
+                                ? `${indexingProgress.filesComplete}/${indexingProgress.filesTotal} files`
+                                : 'Indexing...'}
+                            </span>
+                          </div>
+                        ) : !c.indexed ? (
                           <span className="text-xs text-brand-400">Not indexed</span>
                         ) : c.needsReindex ? (
                           <span className="inline-flex items-center gap-1.5 text-amber-600">
@@ -1665,9 +1785,12 @@ export default function FirmDashboard({
       )}
 
       {/* Batch indexing progress modal */}
-      {batchProgress && (
-        <div className="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl shadow-elevated w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden">
+      {batchProgress && showBatchModal && (
+        <div
+          className="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"
+          onClick={() => { if (batchProgress.isRunning) setShowBatchModal(false) }}
+        >
+          <div className="bg-white rounded-2xl shadow-elevated w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
             <div className="px-6 py-5 border-b border-surface-200">
               <div className="flex items-center justify-between">
                 <div>
@@ -1679,14 +1802,19 @@ export default function FirmDashboard({
                     {batchProgress.filesTotal > 0 && ` • ${batchProgress.filesComplete}/${batchProgress.filesTotal} files`}
                   </p>
                 </div>
-                {!batchProgress.isRunning && (
-                  <button
-                    onClick={() => setBatchProgress(null)}
-                    className="p-2 text-brand-400 hover:text-brand-600 hover:bg-surface-100 rounded-lg transition-colors"
-                  >
-                    <XMarkIcon />
-                  </button>
-                )}
+                <button
+                  onClick={() => {
+                    if (batchProgress.isRunning) {
+                      setShowBatchModal(false)
+                    } else {
+                      setBatchProgress(null)
+                      setShowBatchModal(false)
+                    }
+                  }}
+                  className="p-2 text-brand-400 hover:text-brand-600 hover:bg-surface-100 rounded-lg transition-colors"
+                >
+                  <XMarkIcon />
+                </button>
               </div>
 
               {/* Progress bar */}
@@ -1728,15 +1856,23 @@ export default function FirmDashboard({
               )}
             </div>
 
-            <div className="px-6 py-4 border-t border-surface-200 flex justify-end bg-surface-50">
+            <div className="px-6 py-4 border-t border-surface-200 flex justify-end gap-3 bg-surface-50">
               {batchProgress.isRunning ? (
-                <div className="flex items-center gap-3 text-sm text-brand-600">
-                  <div className="w-4 h-4 border-2 border-accent-600 border-t-transparent rounded-full animate-spin"></div>
-                  Processing...
-                </div>
+                <>
+                  <div className="flex items-center gap-3 text-sm text-brand-600 mr-auto">
+                    <div className="w-4 h-4 border-2 border-accent-600 border-t-transparent rounded-full animate-spin"></div>
+                    Processing...
+                  </div>
+                  <button
+                    onClick={() => setShowBatchModal(false)}
+                    className="px-4 py-2 text-sm text-brand-500 hover:text-brand-700 transition-colors"
+                  >
+                    Minimize
+                  </button>
+                </>
               ) : (
                 <button
-                  onClick={() => setBatchProgress(null)}
+                  onClick={() => { setBatchProgress(null); setShowBatchModal(false) }}
                   className="px-5 py-2.5 bg-brand-900 text-white rounded-lg hover:bg-brand-800
                              font-medium transition-colors"
                 >

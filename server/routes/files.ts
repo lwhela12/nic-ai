@@ -3,6 +3,101 @@ import { readdir, stat, readFile, writeFile, mkdir } from "fs/promises";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
+import { applyResolvedFieldToSummary } from "../lib/index-summary-sync";
+
+// System/temporary files to ignore during file enumeration
+const IGNORED_FILES = new Set([
+  '.DS_Store',
+  '._.DS_Store',
+  'Thumbs.db',
+  'ehthumbs.db',
+  'desktop.ini',
+  '.Spotlight-V100',
+  '.Trashes',
+  '.TemporaryItems',
+]);
+
+const IGNORED_PATTERNS = [
+  /^\._/,           // macOS resource forks (._filename)
+  /\.swp$/,         // vim swap files
+  /\.swo$/,         // vim swap files
+  /~$/,             // backup files (file~)
+  /^~\$/,           // Office temp files (~$document.docx)
+  /^\.~lock\./,     // LibreOffice locks
+];
+
+function shouldIgnoreFile(name: string): boolean {
+  if (IGNORED_FILES.has(name)) return true;
+  return IGNORED_PATTERNS.some(pattern => pattern.test(name));
+}
+
+function normalizeFieldName(value: string): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_:]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[''`]/g, "'");
+}
+
+function findMatchingFieldIndexes(needsReview: any[], field: string): number[] {
+  const normalizedField = normalizeFieldName(field);
+  if (!normalizedField) return [];
+
+  const indexes: number[] = [];
+  for (let i = 0; i < needsReview.length; i++) {
+    if (normalizeFieldName(needsReview[i]?.field || "") === normalizedField) {
+      indexes.push(i);
+    }
+  }
+  return indexes;
+}
+
+function dedupeNeedsReviewEntries(needsReview: any[]): any[] {
+  const merged = new Map<string, {
+    field: string;
+    conflicting_values: Set<string>;
+    sources: Set<string>;
+    reasons: Set<string>;
+  }>();
+
+  for (const item of needsReview || []) {
+    const field = item?.field;
+    const key = normalizeFieldName(field || "");
+    if (!key) continue;
+
+    let existing = merged.get(key);
+    if (!existing) {
+      existing = {
+        field: field || "",
+        conflicting_values: new Set<string>(),
+        sources: new Set<string>(),
+        reasons: new Set<string>(),
+      };
+      merged.set(key, existing);
+    }
+
+    for (const value of Array.isArray(item?.conflicting_values) ? item.conflicting_values : []) {
+      existing.conflicting_values.add(String(value));
+    }
+    for (const source of Array.isArray(item?.sources) ? item.sources : []) {
+      existing.sources.add(String(source));
+    }
+    if (item?.reason) {
+      existing.reasons.add(String(item.reason));
+    }
+  }
+
+  return Array.from(merged.values()).map((item) => {
+    const reasons = Array.from(item.reasons);
+    return {
+      field: item.field,
+      conflicting_values: Array.from(item.conflicting_values),
+      sources: Array.from(item.sources),
+      reason: reasons.length > 0 ? reasons.join(" | ") : "Conflicting values found",
+    };
+  });
+}
 
 const app = new Hono();
 
@@ -75,7 +170,11 @@ app.get("/index", async (c) => {
 
   try {
     const content = await readFile(indexPath, "utf-8");
-    return c.json(JSON.parse(content));
+    const index = JSON.parse(content);
+    if (Array.isArray(index.needs_review)) {
+      index.needs_review = dedupeNeedsReviewEntries(index.needs_review);
+    }
+    return c.json(index);
   } catch (error) {
     return c.json({ error: "No document index found. Run /init-case first." }, 404);
   }
@@ -102,7 +201,7 @@ app.get("/index-status", async (c) => {
     try {
       const entries = await readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.name === ".pi_tool") continue;
+        if (entry.name === ".pi_tool" || shouldIgnoreFile(entry.name)) continue;
         const fullPath = join(dir, entry.name);
         const relativePath = base ? join(base, entry.name) : entry.name;
 
@@ -253,7 +352,7 @@ app.get("/list", async (c) => {
     const results: any[] = [];
 
     for (const entry of entries) {
-      if (entry.name === ".pi_tool") continue;
+      if (entry.name === ".pi_tool" || shouldIgnoreFile(entry.name)) continue;
 
       const fullPath = join(dir, entry.name);
       const relativePath = base ? join(base, entry.name) : entry.name;
@@ -367,26 +466,30 @@ app.post("/resolve", async (c) => {
     const index = JSON.parse(content);
 
     // Find the item in needs_review
-    const needsReview: any[] = index.needs_review || [];
-    const itemIndex = needsReview.findIndex((item: any) => item.field === field);
+    const needsReview: any[] = dedupeNeedsReviewEntries(index.needs_review || []);
+    const matchingIndexes = findMatchingFieldIndexes(needsReview, field);
 
-    if (itemIndex === -1) {
+    if (matchingIndexes.length === 0) {
       return c.json({ error: `Field "${field}" not found in needs_review` }, 404);
     }
 
-    const resolvedItem = needsReview[itemIndex];
-    const rejectedValues = resolvedItem.conflicting_values?.filter(
-      (v: any) => String(v) !== String(resolvedValue)
-    ) || [];
+    const resolvedItems = matchingIndexes.map((idx) => needsReview[idx]);
+    const resolvedField = resolvedItems[0]?.field || field;
+    const rejectedValues = Array.from(new Set(
+      resolvedItems
+        .flatMap((item) => Array.isArray(item?.conflicting_values) ? item.conflicting_values : [])
+        .map((v: any) => String(v))
+        .filter((v) => v !== String(resolvedValue))
+    ));
 
-    // Remove from needs_review
-    needsReview.splice(itemIndex, 1);
-    index.needs_review = needsReview;
+    // Remove all matching duplicates from needs_review
+    const indexSet = new Set(matchingIndexes);
+    index.needs_review = needsReview.filter((_: any, idx: number) => !indexSet.has(idx));
 
     // Add to errata
     const errata: any[] = index.errata || [];
     const errataEntry = {
-      field,
+      field: resolvedField,
       decision: resolvedValue,
       rejected_values: rejectedValues,
       evidence: evidence || "User confirmed correct value",
@@ -400,8 +503,8 @@ app.post("/resolve", async (c) => {
     let caseNotes: any[] = Array.isArray(index.case_notes) ? index.case_notes : [];
     const noteEntry = {
       id: `note-${Date.now()}`,
-      content: `Resolved ${field}: ${resolvedValue} (was conflicting: ${rejectedValues.join(", ")}). ${evidence || ""}`.trim(),
-      field_updated: field,
+      content: `Resolved ${resolvedField}: ${resolvedValue} (was conflicting: ${rejectedValues.join(", ")}). ${evidence || ""}`.trim(),
+      field_updated: resolvedField,
       previous_value: rejectedValues,
       source: "chat",
       createdAt: new Date().toISOString(),
@@ -413,8 +516,8 @@ app.post("/resolve", async (c) => {
     let summaryUpdated = false;
 
     // For charges fields, update the provider entry in summary.providers if it exists
-    if (field.startsWith("charges:") && index.summary?.providers) {
-      const providerName = field.replace("charges:", "");
+    if (resolvedField.startsWith("charges:") && index.summary?.providers) {
+      const providerName = resolvedField.replace("charges:", "");
       const numericValue = parseFloat(String(resolvedValue).replace(/[$,]/g, ""));
 
       // Find matching provider in summary.providers (handles both array-of-strings and array-of-objects)
@@ -450,8 +553,8 @@ app.post("/resolve", async (c) => {
     }
 
     // If resolving claim_numbers, update summary
-    if (field.startsWith("claim_numbers:") && index.summary) {
-      const claimKey = field.replace("claim_numbers:", "");
+    if (resolvedField.startsWith("claim_numbers:") && index.summary) {
+      const claimKey = resolvedField.replace("claim_numbers:", "");
       if (!index.summary.claim_numbers) {
         index.summary.claim_numbers = {};
       }
@@ -460,9 +563,9 @@ app.post("/resolve", async (c) => {
     }
 
     // If resolving policy_limits, update summary
-    if (field.startsWith("policy_limits:") && index.summary) {
+    if (resolvedField.startsWith("policy_limits:") && index.summary) {
       // Handle nested paths like "policy_limits:3P:bodily_injury"
-      const parts = field.replace("policy_limits:", "").split(":");
+      const parts = resolvedField.replace("policy_limits:", "").split(":");
       if (parts.length >= 1) {
         if (!index.summary.policy_limits) {
           index.summary.policy_limits = {};
@@ -480,33 +583,36 @@ app.post("/resolve", async (c) => {
     }
 
     // If resolving date fields, update summary.dol and summary.incident_date
-    if ((field === "date_of_loss" || field === "date_of_injury" || field === "doi" || field === "dol") && index.summary) {
+    if ((resolvedField === "date_of_loss" || resolvedField === "date_of_injury" || resolvedField === "doi" || resolvedField === "dol") && index.summary) {
       index.summary.dol = resolvedValue;
       index.summary.incident_date = resolvedValue;
       summaryUpdated = true;
     }
 
     // If resolving AMW/compensation_rate, update disability_status
-    if ((field === "amw" || field === "aww" || field === "average_monthly_wage") && index.summary) {
+    if ((resolvedField === "amw" || resolvedField === "aww" || resolvedField === "average_monthly_wage") && index.summary) {
       if (!index.summary.disability_status) index.summary.disability_status = {};
       index.summary.disability_status.amw = parseFloat(String(resolvedValue).replace(/[$,]/g, "")) || undefined;
       summaryUpdated = true;
     }
-    if ((field === "compensation_rate" || field === "weekly_compensation_rate") && index.summary) {
+    if ((resolvedField === "compensation_rate" || resolvedField === "weekly_compensation_rate") && index.summary) {
       if (!index.summary.disability_status) index.summary.disability_status = {};
       index.summary.disability_status.compensation_rate = parseFloat(String(resolvedValue).replace(/[$,]/g, "")) || undefined;
       summaryUpdated = true;
     }
+
+    // Apply generic summary synchronization for dashboard-visible fields
+    summaryUpdated = applyResolvedFieldToSummary(index, resolvedField, resolvedValue) || summaryUpdated;
 
     // Write updated index
     await writeFile(indexPath, JSON.stringify(index, null, 2));
 
     return c.json({
       success: true,
-      field,
+      field: resolvedField,
       resolvedValue,
       rejectedValues,
-      remainingConflicts: needsReview.length,
+      remainingConflicts: index.needs_review.length,
       summaryUpdated,
       errataEntry,
     });

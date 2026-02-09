@@ -7,6 +7,9 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { loadSectionsByIds } from "../routes/knowledge";
+import { PI_PHASES } from "../practice-areas/personal-injury/config";
+import { WC_PHASES } from "../practice-areas/workers-comp/config";
+import { PRACTICE_AREAS } from "./index-schema";
 
 // Lazy client creation - API key is set by auth middleware before requests
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -37,28 +40,32 @@ export interface CaseSummaryResult {
   };
 }
 
-// Schema for structured output
-const CASE_SUMMARY_SCHEMA = {
-  type: "object" as const,
-  properties: {
-    case_summary: {
-      type: "string" as const,
-      description: "Brief narrative summary of the case (2-4 sentences). Include: type of accident, injuries sustained, treatment status, and current case posture."
+function buildCaseSummarySchema(practiceArea?: string) {
+  const phaseEnum = practiceArea === PRACTICE_AREAS.WC
+    ? [...WC_PHASES]
+    : [...PI_PHASES];
+  return {
+    type: "object" as const,
+    properties: {
+      case_summary: {
+        type: "string" as const,
+        description: "Brief narrative summary of the case (2-4 sentences). Include incident type, injuries, treatment/procedural status, and current posture."
+      },
+      case_phase: {
+        type: "string" as const,
+        enum: phaseEnum,
+        description: "Current lifecycle phase based on documents present."
+      }
     },
-    case_phase: {
-      type: "string" as const,
-      enum: ["Intake", "Investigation", "Treatment", "Demand", "Negotiation", "Settlement", "Complete"],
-      description: "Current phase based on documents present. Intake=just signed, Investigation=gathering records, Treatment=ongoing care, Demand=demand sent, Negotiation=back-and-forth, Settlement=finalizing, Complete=closed."
-    }
-  },
-  required: ["case_summary", "case_phase"] as const
-};
+    required: ["case_summary", "case_phase"] as const
+  };
+}
 
 /**
  * Determine case phase from document types present.
  * This provides a reasonable default that Haiku can refine.
  */
-function inferPhaseFromDocuments(folders: Record<string, any>): string {
+function inferPhaseFromDocuments(folders: Record<string, any>, practiceArea?: string): string {
   const allTypes = new Set<string>();
 
   for (const folderData of Object.values(folders)) {
@@ -70,7 +77,29 @@ function inferPhaseFromDocuments(folders: Record<string, any>): string {
     }
   }
 
-  // Work backwards from most advanced phase
+  if (practiceArea === PRACTICE_AREAS.WC) {
+    if (allTypes.has("release") || allTypes.has("settlement_agreement")) {
+      return "Closed";
+    }
+    if (allTypes.has("d9_form") || allTypes.has("d16_form") || allTypes.has("hearing") || allTypes.has("settlement")) {
+      return "Settlement/Hearing";
+    }
+    if (allTypes.has("ppd_rating") || allTypes.has("ime_report") || allTypes.has("fce_report")) {
+      return "MMI Evaluation";
+    }
+    if (allTypes.has("wage_statement") || allTypes.has("utilization_review") || allTypes.has("aoe_coe_investigation")) {
+      return "Benefits Resolution";
+    }
+    if (allTypes.has("work_status_report") || allTypes.has("medical_record") || allTypes.has("medical_bill")) {
+      return "Treatment";
+    }
+    if (allTypes.has("c4_claim") || allTypes.has("c3_employer_report") || allTypes.has("c4_supplemental")) {
+      return "Investigation";
+    }
+    return "Intake";
+  }
+
+  // PI - work backwards from most advanced phase
   if (allTypes.has("settlement") || allTypes.has("release")) {
     return "Settlement";
   }
@@ -122,21 +151,60 @@ function buildCondensedIndex(documentIndex: Record<string, any>): string {
  */
 export async function generateCaseSummary(
   documentIndex: Record<string, any>,
-  firmRoot?: string
+  options?: {
+    firmRoot?: string;
+    practiceArea?: string;
+  }
 ): Promise<CaseSummaryResult> {
   console.log(`[CaseSummary] Starting Haiku summary generation`);
   const startTime = Date.now();
+  const practiceAreaInput = options?.practiceArea || documentIndex.practice_area;
+  const practiceArea = practiceAreaInput === PRACTICE_AREAS.WC
+    ? PRACTICE_AREAS.WC
+    : PRACTICE_AREAS.PI;
+  const isWC = practiceArea === PRACTICE_AREAS.WC;
+  const practiceLabel = isWC ? "Workers' Compensation" : "Personal Injury";
 
   // Load knowledge for context
-  const knowledge = await loadSectionsByIds(firmRoot, SUMMARY_SECTION_IDS);
+  const knowledge = await loadSectionsByIds(options?.firmRoot, SUMMARY_SECTION_IDS);
 
   // Build condensed index view
   const condensedIndex = buildCondensedIndex(documentIndex);
 
   // Get initial phase inference as hint
-  const inferredPhase = inferPhaseFromDocuments(documentIndex.folders || {});
+  const inferredPhase = inferPhaseFromDocuments(documentIndex.folders || {}, practiceArea);
 
-  const systemPrompt = `You are a case intake specialist for a Personal Injury law firm.
+  const contextLines: string[] = [];
+  if (typeof documentIndex.case_name === "string" && documentIndex.case_name.trim()) {
+    contextLines.push(`Case Name: ${documentIndex.case_name.trim()}`);
+  }
+  if (documentIndex.is_doi_case && typeof documentIndex.injury_date === "string") {
+    contextLines.push(`DOI Case: yes (injury date ${documentIndex.injury_date})`);
+  }
+  if (Array.isArray(documentIndex.related_cases) && documentIndex.related_cases.length > 0) {
+    contextLines.push(`Related Claims: ${documentIndex.related_cases.length}`);
+  }
+  const contextBlock = contextLines.length > 0
+    ? contextLines.join("\n")
+    : "No extra case metadata provided.";
+
+  const phaseDefinitions = isWC
+    ? `- **Intake**: Initial WC claim setup and onboarding
+- **Investigation**: Compensability and records investigation in progress
+- **Treatment**: Active treatment and work-status management
+- **MMI Evaluation**: MMI/PPD evaluation stage
+- **Benefits Resolution**: Wage/benefit disputes and resolution work
+- **Settlement/Hearing**: Hearing prep/active litigation or settlement execution
+- **Closed**: Matter resolved/closed`
+    : `- **Intake**: Client just signed, gathering initial documents
+- **Investigation**: Collecting records, police reports, insurance info
+- **Treatment**: Client receiving ongoing medical care
+- **Demand**: Demand letter has been sent to insurance
+- **Negotiation**: Back-and-forth with adjuster on settlement
+- **Settlement**: Terms agreed, finalizing paperwork
+- **Complete**: Case closed and resolved`;
+
+  const systemPrompt = `You are a case intake specialist for a ${practiceLabel} law firm.
 
 Your job: Write a brief case summary and determine the current case phase.
 
@@ -146,13 +214,7 @@ ${knowledge}
 
 ## PHASE DEFINITIONS
 
-- **Intake**: Client just signed, gathering initial documents
-- **Investigation**: Collecting records, police reports, insurance info
-- **Treatment**: Client receiving ongoing medical care
-- **Demand**: Demand letter has been sent to insurance
-- **Negotiation**: Back-and-forth with adjuster on settlement
-- **Settlement**: Terms agreed, finalizing paperwork
-- **Complete**: Case closed and resolved
+${phaseDefinitions}
 
 ## INSTRUCTIONS
 
@@ -166,7 +228,10 @@ ${knowledge}
 
 Use the case_summary tool to return your analysis.`;
 
-  const userPrompt = `CASE DOCUMENTS:
+  const userPrompt = `CASE CONTEXT:
+${contextBlock}
+
+CASE DOCUMENTS:
 ${condensedIndex}
 
 Initial phase inference (you may adjust): ${inferredPhase}
@@ -182,7 +247,7 @@ Analyze the case and use the case_summary tool to return your summary and phase 
       tools: [{
         name: "case_summary",
         description: "Output the case summary and phase determination",
-        input_schema: CASE_SUMMARY_SCHEMA
+        input_schema: buildCaseSummarySchema(practiceArea)
       }],
       tool_choice: { type: "tool", name: "case_summary" }
     });

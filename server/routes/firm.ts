@@ -23,6 +23,7 @@ import {
   type DocumentIndex,
 } from "../lib/index-schema";
 import { practiceAreaRegistry, PRACTICE_AREAS } from "../practice-areas";
+import { normalizePracticeArea, resolveFirmPracticeArea } from "../lib/practice-area";
 import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
 
 // ============================================================================
@@ -537,13 +538,13 @@ async function buildCaseSummary(
   }
 ): Promise<CaseSummary> {
   const indexPath = join(casePath, ".pi_tool", "document_index.json");
-  // Accept both short code ("WC") and full name ("Workers' Compensation")
-  const isWC = options?.practiceArea === PRACTICE_AREAS.WC || options?.practiceArea === "WC";
+  const configuredPracticeArea = normalizePracticeArea(options?.practiceArea);
 
   const caseSummary: CaseSummary = {
     path: casePath,
     name: caseName,
     indexed: false,
+    practiceArea: configuredPracticeArea,
     isSubcase: !!options?.subcaseInfo,
     parentPath: options?.subcaseInfo?.parentPath,
     parentName: options?.subcaseInfo?.parentName,
@@ -616,10 +617,13 @@ async function buildCaseSummary(
       caseSummary.providers = index.summary.providers;
     }
 
-    // Practice area - use firm-level setting, fallback to index
-    caseSummary.practiceArea = options?.practiceArea || index.practice_area || index.practiceArea;
+    // Practice area - prefer folder setting, fallback to existing case index metadata
+    const indexPracticeArea = normalizePracticeArea(index.practice_area || index.practiceArea);
+    caseSummary.practiceArea = configuredPracticeArea || indexPracticeArea;
 
-    // WC-specific fields (based on firm-level practice area setting)
+    const isWC = caseSummary.practiceArea === PRACTICE_AREAS.WC;
+
+    // WC-specific fields
     if (isWC) {
       // Employer
       caseSummary.employer = index.summary?.employer?.name || index.summary?.employer;
@@ -731,7 +735,7 @@ async function buildDOICaseSummary(
 // Get all cases in a firm's root folder
 app.get("/cases", async (c) => {
   const root = c.req.query("root");
-  const practiceArea = c.req.query("practiceArea"); // Firm-level setting from UI
+  const requestedPracticeArea = c.req.query("practiceArea"); // Backward compatibility
 
   if (!root) {
     return c.json({ error: "root query param required" }, 400);
@@ -742,8 +746,12 @@ app.get("/cases", async (c) => {
     return access.response;
   }
 
-  // Accept both short code ("WC") and full name ("Workers' Compensation")
-  const isWC = practiceArea === PRACTICE_AREAS.WC || practiceArea === "WC";
+  const configuredPracticeArea = await resolveFirmPracticeArea(root);
+  const practiceArea =
+    configuredPracticeArea ||
+    normalizePracticeArea(requestedPracticeArea) ||
+    PRACTICE_AREAS.PI;
+  const isWC = practiceArea === PRACTICE_AREAS.WC;
 
   try {
     const entries = await readdir(root, { withFileTypes: true });
@@ -845,6 +853,7 @@ app.get("/cases", async (c) => {
 
     return c.json({
       root,
+      practiceArea,
       cases: sortedCases,
       summary: {
         total: sortedCases.filter(c => !c.isContainer).length, // Don't count containers
@@ -2322,13 +2331,23 @@ async function indexCase(
     // Step 5: Run hypergraph and case summary generation IN PARALLEL
     onProgress({ type: "status", caseName, message: "Analyzing documents and generating summary..." });
 
-    // Build initial index object for case summary (needs folders structure)
-    const initialIndexForSummary = { folders };
+    // Build summary context object (include practice and linked-claim context)
+    const initialIndexForSummary = {
+      folders,
+      case_name: initialIndex.case_name,
+      practice_area: initialIndex.practice_area,
+      is_doi_case: initialIndex.is_doi_case,
+      injury_date: initialIndex.injury_date,
+      related_cases: initialIndex.related_cases,
+    };
 
     // Run both Haiku calls in parallel
     const [hypergraphResult, caseSummaryResult] = await Promise.all([
       generateHypergraph(caseFolder, { folders }, options?.practiceArea),
-      generateCaseSummary(initialIndexForSummary, options?.firmRoot)
+      generateCaseSummary(initialIndexForSummary, {
+        firmRoot: options?.firmRoot,
+        practiceArea: options?.practiceArea,
+      })
     ]);
 
     // Save hypergraph to file
@@ -2544,7 +2563,7 @@ interface ContainerToIndex {
 }
 
 app.post("/batch-index", async (c) => {
-  const { root, cases: casesToIndex, practiceArea } = await c.req.json();
+  const { root, cases: casesToIndex, practiceArea: requestedPracticeArea } = await c.req.json();
 
   if (!root) {
     return c.json({ error: "root is required" }, 400);
@@ -2555,8 +2574,12 @@ app.post("/batch-index", async (c) => {
     return access.response;
   }
 
-  // Accept both short code ("WC") and full name ("Workers' Compensation")
-  const isWC = practiceArea === PRACTICE_AREAS.WC || practiceArea === "WC";
+  const configuredPracticeArea = await resolveFirmPracticeArea(root);
+  const practiceArea =
+    configuredPracticeArea ||
+    normalizePracticeArea(requestedPracticeArea) ||
+    PRACTICE_AREAS.PI;
+  const isWC = practiceArea === PRACTICE_AREAS.WC;
 
   // Build list of cases to index (including subcases and DOI cases)
   let targetCases: BatchIndexTarget[] = [];

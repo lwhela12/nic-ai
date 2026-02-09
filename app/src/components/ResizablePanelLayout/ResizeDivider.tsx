@@ -93,30 +93,41 @@ export default function ResizeDivider({
 
   return (
     <div
-      className="relative flex-shrink-0 group"
+      className="relative flex-shrink-0 group touch-none"
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
       {/* Draggable area */}
       <div
-        className={`w-1 h-full cursor-col-resize transition-colors ${
-          isDragging ? 'bg-accent-500' : 'bg-surface-200 hover:bg-accent-400'
+        className={`relative w-2 h-full cursor-col-resize transition-colors ${
+          isDragging ? 'bg-accent-100' : 'bg-transparent hover:bg-surface-100'
         }`}
         onMouseDown={handleMouseDown}
         onDoubleClick={onDoubleClick}
-      />
+      >
+        <div
+          className={`absolute inset-y-0 left-1/2 -translate-x-1/2 w-px ${
+            isDragging ? 'bg-accent-500' : 'bg-surface-300 group-hover:bg-accent-400'
+          }`}
+        />
+        <div
+          className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-11 rounded-full ${
+            isDragging ? 'bg-accent-400/40' : 'bg-surface-200/80 group-hover:bg-surface-300'
+          }`}
+        />
+      </div>
 
       {/* Collapse button - appears on hover */}
       <button
         onClick={onToggleCollapse}
         className={`
-          absolute top-3 -translate-x-1/2 left-1/2
+          absolute top-2.5 -translate-x-1/2 left-1/2
           w-6 h-6 rounded-full
-          bg-white border border-surface-300 shadow-sm
+          bg-white/95 border border-surface-300 shadow-sm
           flex items-center justify-center
           text-brand-500 hover:text-brand-700 hover:border-surface-400
-          transition-all duration-150
-          ${isHovered && !isDragging ? 'opacity-100 scale-100' : 'opacity-0 scale-75'}
+          transition-all duration-150 focus-visible:opacity-100
+          ${isHovered && !isDragging ? 'opacity-100 scale-100' : 'opacity-70 scale-95'}
         `}
         title={isCollapsed ? 'Expand panel' : 'Collapse panel'}
       >

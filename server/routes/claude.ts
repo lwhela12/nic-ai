@@ -16,6 +16,8 @@ import { isPathWithinBounds, extractPathsFromBash } from "../lib/path-validator"
 import { directChat, type ChatMessage as DirectChatMessage } from "../lib/direct-chat";
 import { requireCaseAccess } from "../lib/team-access";
 import { acquireCaseLock, releaseCaseLock } from "../lib/case-lock";
+import { applyResolvedFieldToSummary } from "../lib/index-summary-sync";
+import { normalizePracticeArea, resolveFirmPracticeArea } from "../lib/practice-area";
 
 // ============================================================================
 // Usage Reporting
@@ -714,6 +716,10 @@ app.post("/chat-v2", async (c) => {
           await stream.writeSSE({
             data: JSON.stringify({ type: "status", message: event.content }),
           });
+        } else if (event.type === "document_view" && event.view) {
+          await stream.writeSSE({
+            data: JSON.stringify({ type: "document_view", view: event.view }),
+          });
         } else if (event.type === "done") {
           // Report usage to subscription server
           if (event.usage) {
@@ -772,13 +778,16 @@ app.post("/init", async (c) => {
       // Pass incrementalFiles if provided for incremental indexing
       // Derive firmRoot as parent directory of caseFolder
       const firmRoot = dirname(caseFolder);
-      // Detect practice area from existing index so reindex preserves it
-      let practiceArea: string | undefined;
-      try {
-        const existingIndex = JSON.parse(await readFile(join(caseFolder, '.pi_tool', 'document_index.json'), 'utf-8'));
-        practiceArea = existingIndex.practice_area;
-      } catch {
-        // No existing index
+      // Resolve practice area from folder metadata first.
+      // Fallback to existing index for backward compatibility.
+      let practiceArea = await resolveFirmPracticeArea(firmRoot);
+      if (!practiceArea) {
+        try {
+          const existingIndex = JSON.parse(await readFile(join(caseFolder, '.pi_tool', 'document_index.json'), 'utf-8'));
+          practiceArea = normalizePracticeArea(existingIndex.practice_area ?? existingIndex.practiceArea);
+        } catch {
+          // No existing index.
+        }
       }
       const options = files?.length
         ? { incrementalFiles: files, firmRoot, practiceArea }
@@ -1210,7 +1219,7 @@ app.get("/history/archives", async (c) => {
 
 // POST /history/archive - Archive current conversation
 app.post("/history/archive", async (c) => {
-  const { caseFolder } = await c.req.json();
+  const { caseFolder, overwriteId } = await c.req.json();
 
   if (!caseFolder) {
     return c.json({ error: "caseFolder required" }, 400);
@@ -1240,6 +1249,25 @@ app.post("/history/archive", async (c) => {
       return c.json({ error: "No messages to archive" }, 400);
     }
 
+    // Load existing index to check for overwrite
+    let index: any = {};
+    try {
+      const indexContent = await readFile(indexPath, "utf-8");
+      index = JSON.parse(indexContent);
+    } catch {
+      // No index yet
+    }
+
+    if (!index.chat_archives) {
+      index.chat_archives = [];
+    }
+
+    // Check if we're overwriting an existing archive
+    let existingEntry: ChatArchiveEntry | undefined;
+    if (overwriteId) {
+      existingEntry = index.chat_archives.find((a: ChatArchiveEntry) => a.id === overwriteId);
+    }
+
     // Generate summary using Haiku
     let summary = "Conversation archived";
     try {
@@ -1248,7 +1276,7 @@ app.post("/history/archive", async (c) => {
         .map(m => `${m.role.toUpperCase()}: ${m.content.slice(0, 200)}`)
         .join('\n\n');
 
-      const summaryPrompt = `Summarize this PI case conversation in 1-2 sentences. Focus on what was discussed or accomplished:\n\n${conversationText}\n\nSUMMARY:`;
+      const summaryPrompt = `Write a SHORT label (5-10 words max) for this conversation. Be direct, like "Resolved 8 document conflicts" or "Generated demand letter" or "Discussed medical expenses". No full sentences.\n\n${conversationText}\n\nLABEL:`;
 
       for await (const msg of query({
         prompt: summaryPrompt,
@@ -1274,30 +1302,30 @@ app.post("/history/archive", async (c) => {
       // Continue with default summary
     }
 
-    // Create archive file
+    // Create/update archive file
     await mkdir(archivesDir, { recursive: true });
     const dateStr = new Date().toISOString().split('T')[0];
-    const archiveId = `archive-${Date.now()}`;
-    const archiveFileName = `${dateStr}_session.json`;
-    const archivePath = join(archivesDir, archiveFileName);
+
+    let archiveId: string;
+    let archiveFileName: string;
+    let archivePath: string;
+
+    if (existingEntry) {
+      // Overwrite existing archive
+      archiveId = existingEntry.id;
+      archivePath = join(piToolDir, existingEntry.file);
+      archiveFileName = existingEntry.file.replace('chat_archives/', '');
+    } else {
+      // Create new archive
+      archiveId = `archive-${Date.now()}`;
+      archiveFileName = `${dateStr}_${archiveId}.json`;
+      archivePath = join(archivesDir, archiveFileName);
+    }
 
     await writeFile(archivePath, JSON.stringify({
       ...history,
       archivedAt: new Date().toISOString(),
     }, null, 2));
-
-    // Update document index with archive entry
-    let index: any = {};
-    try {
-      const indexContent = await readFile(indexPath, "utf-8");
-      index = JSON.parse(indexContent);
-    } catch {
-      // No index yet
-    }
-
-    if (!index.chat_archives) {
-      index.chat_archives = [];
-    }
 
     const archiveEntry: ChatArchiveEntry = {
       id: archiveId,
@@ -1307,7 +1335,16 @@ app.post("/history/archive", async (c) => {
       file: `chat_archives/${archiveFileName}`,
     };
 
-    index.chat_archives.unshift(archiveEntry); // Add to beginning
+    if (existingEntry) {
+      // Update existing entry in place
+      const idx = index.chat_archives.findIndex((a: ChatArchiveEntry) => a.id === overwriteId);
+      if (idx >= 0) {
+        index.chat_archives[idx] = archiveEntry;
+      }
+    } else {
+      // Add new entry to beginning
+      index.chat_archives.unshift(archiveEntry);
+    }
     await writeFile(indexPath, JSON.stringify(index, null, 2));
 
     // Clear active chat history
@@ -1411,18 +1448,7 @@ app.post("/errata-correct", async (c) => {
     }
 
     // Propagate correction to summary fields so dashboard reflects it immediately
-    if ((field === "date_of_loss" || field === "date_of_injury" || field === "doi" || field === "dol") && index.summary) {
-      index.summary.dol = correctedValue;
-      index.summary.incident_date = correctedValue;
-    }
-    if ((field === "amw" || field === "aww" || field === "average_monthly_wage") && index.summary) {
-      if (!index.summary.disability_status) index.summary.disability_status = {};
-      index.summary.disability_status.amw = parseFloat(String(correctedValue).replace(/[$,]/g, "")) || undefined;
-    }
-    if ((field === "compensation_rate" || field === "weekly_compensation_rate") && index.summary) {
-      if (!index.summary.disability_status) index.summary.disability_status = {};
-      index.summary.disability_status.compensation_rate = parseFloat(String(correctedValue).replace(/[$,]/g, "")) || undefined;
-    }
+    applyResolvedFieldToSummary(index, field, correctedValue);
 
     await writeFile(indexPath, JSON.stringify(index, null, 2));
     return c.json({ success: true });

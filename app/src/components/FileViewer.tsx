@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react'
-import type { DocumentIndex, NeedsReviewItem, DocumentFile, DocumentFolder, GeneratedDoc } from '../App'
+import { useEffect, useMemo, useState } from 'react'
+import type { AgentDocumentView, DocumentFile, DocumentFolder, DocumentIndex, GeneratedDoc, NeedsReviewItem } from '../App'
 
 interface IndexStatus {
   needsIndex: boolean
@@ -12,13 +12,262 @@ interface Props {
   generatedDocs: GeneratedDoc[]
   caseFolder: string
   apiUrl: string
-  onDocSelect: (content: string, docPath?: string) => void
-  onFileView: (url: string, filename: string) => void
+  onDocSelect: (content: string, docPath?: string, filePath?: string) => void
+  onFileView: (url: string, filename: string, filePath: string) => void
   indexStatus?: IndexStatus | null
+  agentView?: AgentDocumentView | null
+  onClearAgentView?: () => void
+  savedAgentViews?: AgentDocumentView[]
+  activeAgentViewId?: string | null
+  onApplyAgentView?: (view: AgentDocumentView) => void
+  onClearSavedAgentViews?: () => void
 }
 
 type SortOption = 'folder' | 'date' | 'type'
-type FilterOption = 'all' | 'medical' | '1p' | '3p' | 'intake'
+type SortDirection = 'asc' | 'desc'
+type FilterOption =
+  | 'all'
+  | 'medical'
+  | 'intake'
+  | 'insurance'
+  | 'liability'
+  | 'claims'
+  | 'benefits'
+  | 'hearings'
+  | 'employment'
+  | 'review'
+
+type FileDataObject = Exclude<DocumentFile, string>
+
+interface FileRow {
+  path: string
+  folder: string
+  fileName: string
+  fileData: FileDataObject | null
+  lowerFolder: string
+  lowerFileName: string
+  lowerType: string
+  timestamp: number | null
+  reviewInfo?: NeedsReviewItem
+  needsReview: boolean
+  reindexStatus?: 'NEW' | 'MOD'
+}
+
+interface FilterDefinition {
+  value: FilterOption
+  label: string
+  matches: (row: FileRow) => boolean
+}
+
+const hasAny = (value: string, needles: string[]): boolean =>
+  needles.some((needle) => value.includes(needle))
+
+const normalizeRelativePath = (value: string): string =>
+  value
+    .replace(/\\/g, '/')
+    .replace(/^\.\/+/, '')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/')
+    .trim()
+    .toLowerCase()
+
+const normalizeFileName = (file: DocumentFile): string => {
+  if (typeof file === 'string') return file
+  if (typeof file.file === 'string' && file.file.trim()) return file.file
+  if (typeof file.filename === 'string' && file.filename.trim()) return file.filename
+  return 'Unknown'
+}
+
+const parseDateString = (value: string): number | null => {
+  const direct = Date.parse(value)
+  if (!Number.isNaN(direct)) return direct
+
+  const mdy = value.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/)
+  if (!mdy) return null
+
+  const month = Number(mdy[1]) - 1
+  const day = Number(mdy[2])
+  let year = Number(mdy[3])
+  if (year < 100) year += year >= 70 ? 1900 : 2000
+
+  const ts = new Date(year, month, day).getTime()
+  return Number.isNaN(ts) ? null : ts
+}
+
+const parseDateFromFileName = (fileName: string): number | null => {
+  const ymd = fileName.match(/(20\d{2})[-_](\d{1,2})[-_](\d{1,2})/)
+  if (ymd) {
+    const year = Number(ymd[1])
+    const month = Number(ymd[2]) - 1
+    const day = Number(ymd[3])
+    const ts = new Date(year, month, day).getTime()
+    if (!Number.isNaN(ts)) return ts
+  }
+
+  const mdy = fileName.match(/(\d{1,2})[-_](\d{1,2})[-_](20\d{2})/)
+  if (mdy) {
+    const month = Number(mdy[1]) - 1
+    const day = Number(mdy[2])
+    const year = Number(mdy[3])
+    const ts = new Date(year, month, day).getTime()
+    if (!Number.isNaN(ts)) return ts
+  }
+
+  return null
+}
+
+const parseDocumentTimestamp = (fileData: FileDataObject | null, fileName: string): number | null => {
+  if (fileData && typeof fileData.date === 'string') {
+    const parsed = parseDateString(fileData.date.trim())
+    if (parsed !== null) return parsed
+  }
+  return parseDateFromFileName(fileName)
+}
+
+const createFilterDefinitions = (isWC: boolean): FilterDefinition[] => {
+  const common: FilterDefinition[] = [
+    {
+      value: 'all',
+      label: 'All Files',
+      matches: () => true,
+    },
+    {
+      value: 'review',
+      label: 'Needs Review',
+      matches: (row) => row.needsReview,
+    },
+  ]
+
+  if (!isWC) {
+    return [
+      common[0],
+      {
+        value: 'medical',
+        label: 'Medical',
+        matches: (row) =>
+          hasAny(row.lowerFolder, ['record', 'bill', 'medical', 'balance', 'mrb', 'mre']) ||
+          hasAny(row.lowerType, ['medical_record', 'medical_bill', 'lien', 'balance_request', 'balance_confirmation']),
+      },
+      {
+        value: 'insurance',
+        label: 'Insurance (1P/3P)',
+        matches: (row) =>
+          hasAny(row.lowerFolder, ['1p', '3p', 'insurance', 'policy', 'declaration', 'coverage']) ||
+          hasAny(row.lowerType, ['declaration', 'lor', 'correspondence']),
+      },
+      {
+        value: 'liability',
+        label: 'Liability',
+        matches: (row) =>
+          hasAny(row.lowerFolder, ['investigation', 'police', 'demand', 'litigation']) ||
+          hasAny(row.lowerType, ['police_report', 'demand', 'correspondence', 'settlement']),
+      },
+      {
+        value: 'intake',
+        label: 'Intake',
+        matches: (row) =>
+          row.lowerFolder.includes('intake') || row.lowerType.includes('intake_form'),
+      },
+      common[1],
+    ]
+  }
+
+  return [
+    common[0],
+    {
+      value: 'medical',
+      label: 'Medical',
+      matches: (row) =>
+        hasAny(row.lowerFolder, ['medical', 'treatment', 'provider']) ||
+        hasAny(row.lowerType, ['medical_record', 'medical_bill', 'ime_report', 'fce_report', 'work_status_report']),
+    },
+    {
+      value: 'claims',
+      label: 'Claims',
+      matches: (row) =>
+        hasAny(row.lowerFolder, ['claim', 'intake', 'investigation']) ||
+        hasAny(row.lowerType, ['c4_claim', 'c3_employer_report', 'c5_carrier_acceptance', 'aoe_coe_investigation']),
+    },
+    {
+      value: 'benefits',
+      label: 'Benefits',
+      matches: (row) =>
+        hasAny(row.lowerFolder, ['benefit', 'wage', 'compensation', 'ttd', 'tpd', 'ppd', 'mmi']) ||
+        hasAny(row.lowerType, ['ttd_check', 'wage_records', 'wage_statement', 'ppd_rating', 'mmi_determination', 'work_status_report']),
+    },
+    {
+      value: 'hearings',
+      label: 'Hearings',
+      matches: (row) =>
+        hasAny(row.lowerFolder, ['hearing', 'appeal', 'litigation', 'a.o', 'h.o']) ||
+        hasAny(row.lowerType, ['d9_hearing', 'hearing_notice', 'hearing_decision']),
+    },
+    {
+      value: 'employment',
+      label: 'Employment',
+      matches: (row) =>
+        hasAny(row.lowerFolder, ['employment', 'work status', 'return to work', 'job']) ||
+        hasAny(row.lowerType, ['job_description', 'wage_records', 'work_status_report', 'vocational_report']),
+    },
+    common[1],
+  ]
+}
+
+const normalizeFolders = (documentIndex: DocumentIndex | null): Record<string, DocumentFile[]> => {
+  if (!documentIndex?.folders) return {}
+
+  const normalized: Record<string, DocumentFile[]> = {}
+  for (const [key, value] of Object.entries(documentIndex.folders)) {
+    const folderData = value as DocumentFolder
+    if (Array.isArray(folderData)) {
+      normalized[key] = folderData
+    } else if (
+      folderData &&
+      typeof folderData === 'object' &&
+      'files' in folderData &&
+      Array.isArray(folderData.files)
+    ) {
+      normalized[key] = folderData.files
+    } else if (
+      folderData &&
+      typeof folderData === 'object' &&
+      'documents' in folderData &&
+      Array.isArray(folderData.documents)
+    ) {
+      normalized[key] = folderData.documents
+    }
+  }
+  return normalized
+}
+
+const sortFilesForView = (rows: FileRow[], sort: SortOption, dateDirection: SortDirection = 'desc'): FileRow[] => {
+  const copy = [...rows]
+  if (sort === 'date') {
+    copy.sort((a, b) => {
+      const ta = a.timestamp ?? -Infinity
+      const tb = b.timestamp ?? -Infinity
+      if (tb !== ta) return dateDirection === 'asc' ? ta - tb : tb - ta
+      return a.fileName.localeCompare(b.fileName)
+    })
+    return copy
+  }
+  if (sort === 'type') {
+    copy.sort((a, b) => {
+      const byType = (a.lowerType || '').localeCompare(b.lowerType || '')
+      if (byType !== 0) return byType
+      return a.fileName.localeCompare(b.fileName)
+    })
+    return copy
+  }
+  copy.sort((a, b) => a.fileName.localeCompare(b.fileName))
+  return copy
+}
+
+const maxTimestamp = (rows: FileRow[]): number =>
+  rows.reduce((max, row) => Math.max(max, row.timestamp ?? -Infinity), -Infinity)
+
+const minTimestamp = (rows: FileRow[]): number =>
+  rows.reduce((min, row) => Math.min(min, row.timestamp ?? Infinity), Infinity)
 
 // Icons
 const ChevronDownIcon = () => (
@@ -58,11 +307,43 @@ const WarningIcon = () => (
   </svg>
 )
 
-export default function FileViewer({ documentIndex, generatedDocs, caseFolder, apiUrl, onDocSelect, onFileView, indexStatus }: Props) {
+export default function FileViewer({
+  documentIndex,
+  generatedDocs,
+  caseFolder,
+  apiUrl,
+  onDocSelect,
+  onFileView,
+  indexStatus,
+  agentView,
+  onClearAgentView,
+  savedAgentViews = [],
+  activeAgentViewId,
+  onApplyAgentView,
+  onClearSavedAgentViews,
+}: Props) {
+  const isWC = documentIndex?.practice_area === "Workers' Compensation"
   const [sort, setSort] = useState<SortOption>('folder')
   const [filter, setFilter] = useState<FilterOption>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
+
+  const filterDefinitions = useMemo(() => createFilterDefinitions(isWC), [isWC])
+  useEffect(() => {
+    if (!filterDefinitions.some((definition) => definition.value === filter)) {
+      setFilter('all')
+    }
+  }, [filterDefinitions, filter])
+
+  useEffect(() => {
+    if (!agentView) return
+    setFilter('all')
+    setSearchQuery('')
+    if (agentView.sortBy) {
+      setSort(agentView.sortBy)
+    }
+  }, [agentView?.id, agentView?.sortBy, agentView])
+
   const folderKeys = useMemo(() => Object.keys(documentIndex?.folders || {}), [documentIndex])
   const expandedFolders = useMemo(() => {
     const expanded = new Set<string>()
@@ -72,7 +353,6 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
     return expanded
   }, [folderKeys, collapsedFolders])
 
-  // Build a map of filenames that need review, with their review info
   const filesNeedingReview = useMemo(() => {
     const reviewMap = new Map<string, NeedsReviewItem>()
     if (!documentIndex?.needs_review) return reviewMap
@@ -80,34 +360,129 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
     for (const item of documentIndex.needs_review) {
       const sources = Array.isArray(item.sources) ? item.sources : []
       for (const source of sources) {
-        // Extract filename from source string like "MRB Spinal Rehab Center.PDF (itemized bill)"
-        const filename = source.replace(/\s*\([^)]*\)\s*$/, '').trim()
-        reviewMap.set(filename.toLowerCase(), item)
+        const filename = source.replace(/\s*\([^)]*\)\s*$/, '').trim().toLowerCase()
+        reviewMap.set(filename, item)
+        reviewMap.set(filename.replace(/\.pdf$/, ''), item)
       }
     }
     return reviewMap
   }, [documentIndex])
 
-  // Build a lookup map of modified files needing reindex (MOD badge on existing files)
   const filesNeedingReindex = useMemo(() => {
     const map = new Map<string, 'NEW' | 'MOD'>()
     if (!indexStatus?.needsIndex) return map
-    for (const f of indexStatus.modifiedFiles || []) {
-      const basename = f.split('/').pop()?.toLowerCase()
+    for (const filePath of indexStatus.modifiedFiles || []) {
+      const basename = filePath.split('/').pop()?.toLowerCase()
       if (basename) map.set(basename, 'MOD')
     }
     return map
   }, [indexStatus])
 
-  // Pending (unindexed) files — these don't appear in the indexed file tree
   const pendingFiles = useMemo(() => {
     if (!indexStatus?.needsIndex || !indexStatus.newFiles?.length) return []
-    return indexStatus.newFiles.map(path => ({
+    return indexStatus.newFiles.map((path) => ({
       path,
       folder: path.includes('/') ? path.split('/').slice(0, -1).join('/') : '.',
       filename: path.split('/').pop() || path,
     }))
   }, [indexStatus])
+
+  const allFolders = useMemo(() => normalizeFolders(documentIndex), [documentIndex])
+  const allFileRows = useMemo(() => {
+    const rows: FileRow[] = []
+    for (const [folder, files] of Object.entries(allFolders)) {
+      const lowerFolder = folder.toLowerCase()
+      for (const file of files) {
+        const fileData = typeof file === 'string' ? null : file
+        const fileName = normalizeFileName(file)
+        const lowerFileName = fileName.toLowerCase()
+        const lowerType = (fileData?.type || '').toLowerCase()
+        const path = folder === '.' || folder === '' ? fileName : `${folder}/${fileName}`
+        const reviewInfo = filesNeedingReview.get(lowerFileName) || filesNeedingReview.get(lowerFileName.replace(/\.pdf$/, ''))
+
+        rows.push({
+          path,
+          folder,
+          fileName,
+          fileData,
+          lowerFolder,
+          lowerFileName,
+          lowerType,
+          timestamp: parseDocumentTimestamp(fileData, fileName),
+          reviewInfo,
+          needsReview: !!reviewInfo,
+          reindexStatus: filesNeedingReindex.get(lowerFileName),
+        })
+      }
+    }
+    return rows
+  }, [allFolders, filesNeedingReview, filesNeedingReindex])
+
+  const selectedFilter = useMemo(
+    () => filterDefinitions.find((definition) => definition.value === filter) ?? filterDefinitions[0],
+    [filterDefinitions, filter],
+  )
+
+  const agentPathSet = useMemo(() => {
+    if (!agentView?.paths?.length) return null
+    const set = new Set<string>()
+    for (const path of agentView.paths) {
+      set.add(normalizeRelativePath(path))
+    }
+    return set
+  }, [agentView])
+
+  const effectiveDateSortDirection: SortDirection = useMemo(() => {
+    if (sort !== 'date') return 'desc'
+    if (agentView?.sortBy === 'date' && agentView.sortDirection === 'asc') {
+      return 'asc'
+    }
+    if (agentView?.sortBy === 'date' && agentView.sortDirection === 'desc') {
+      return 'desc'
+    }
+    return 'desc'
+  }, [sort, agentView])
+
+  const normalizedSearchQuery = useMemo(() => searchQuery.trim().toLowerCase(), [searchQuery])
+  const activeRows = useMemo(() => {
+    return allFileRows
+      .filter((row) => {
+        if (!agentPathSet) return true
+        return agentPathSet.has(normalizeRelativePath(row.path))
+      })
+      .filter((row) => selectedFilter.matches(row))
+      .filter((row) => {
+        if (!normalizedSearchQuery) return true
+        return row.lowerFileName.includes(normalizedSearchQuery) || row.lowerFolder.includes(normalizedSearchQuery)
+      })
+  }, [allFileRows, normalizedSearchQuery, selectedFilter, agentPathSet])
+
+  const sortedFolderEntries = useMemo(() => {
+    const grouped = new Map<string, FileRow[]>()
+    for (const row of activeRows) {
+      if (!grouped.has(row.folder)) grouped.set(row.folder, [])
+      grouped.get(row.folder)?.push(row)
+    }
+
+    const entries = Array.from(grouped.entries()).map(([folder, rows]) =>
+      [folder, sortFilesForView(rows, sort, effectiveDateSortDirection)] as [string, FileRow[]]
+    )
+
+    if (sort === 'date') {
+      entries.sort(([folderA, rowsA], [folderB, rowsB]) => {
+        const markerA = effectiveDateSortDirection === 'asc' ? minTimestamp(rowsA) : maxTimestamp(rowsA)
+        const markerB = effectiveDateSortDirection === 'asc' ? minTimestamp(rowsB) : maxTimestamp(rowsB)
+        if (markerA !== markerB) return effectiveDateSortDirection === 'asc' ? markerA - markerB : markerB - markerA
+        return folderA.localeCompare(folderB)
+      })
+      return entries
+    }
+
+    entries.sort(([a], [b]) => a.localeCompare(b))
+    return entries
+  }, [activeRows, sort, effectiveDateSortDirection])
+
+  const totalFiles = activeRows.length
 
   const toggleFolder = (folder: string) => {
     setCollapsedFolders((prev) => {
@@ -121,73 +496,13 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
     })
   }
 
-  // Normalize all folders (regardless of filter) - used for file lookup
-  const allFolders = useMemo(() => {
-    if (!documentIndex?.folders) return {}
-
-    const normalizedFolders: Record<string, DocumentFile[]> = {}
-    for (const [key, val] of Object.entries(documentIndex.folders)) {
-      const folderData = val as DocumentFolder
-      if (Array.isArray(folderData)) {
-        normalizedFolders[key] = folderData
-      } else if (folderData && typeof folderData === 'object' && 'files' in folderData && Array.isArray(folderData.files)) {
-        normalizedFolders[key] = folderData.files
-      } else if (folderData && typeof folderData === 'object' && 'documents' in folderData && Array.isArray(folderData.documents)) {
-        normalizedFolders[key] = folderData.documents
-      }
-    }
-    return normalizedFolders
-  }, [documentIndex])
-
-  const filteredFolders = useMemo(() => {
-    if (filter === 'all') return allFolders
-
-    // Use partial matching for filters
-    const filterMatchers: Record<FilterOption, (folderName: string) => boolean> = {
-      all: () => true,
-      medical: (name) => {
-        const lower = name.toLowerCase()
-        return lower.includes('record') || lower.includes('bill') || lower.includes('balance') || lower.includes('mrb') || lower.includes('mre')
-      },
-      '1p': (name) => name.toLowerCase().includes('1p'),
-      '3p': (name) => name.toLowerCase().includes('3p'),
-      intake: (name) => name.toLowerCase().includes('intake'),
-    }
-
-    const matcher = filterMatchers[filter]
-    return Object.fromEntries(
-      Object.entries(allFolders).filter(([key]) => matcher(key))
-    )
-  }, [allFolders, filter])
-
-  const getFileUrl = (folder: string, filename: string) => {
-    const path = `${folder}/${filename}`
-    const url = `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(path)}`
-    // Add PDF viewer hint for inline display
+  const getFileUrl = (filePath: string, filename: string): string => {
+    const url = `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(filePath)}`
     return filename.toLowerCase().endsWith('.pdf') ? `${url}#view=FitH` : url
   }
 
-  const totalFiles = Object.values(filteredFolders).reduce((acc, files) => acc + files.length, 0)
-
-  // Sort folders alphabetically and filter files by search query
-  const sortedFolderEntries = useMemo(() => {
-    const entries = Object.entries(filteredFolders).sort(([a], [b]) => a.localeCompare(b))
-    if (!searchQuery) return entries
-    const q = searchQuery.toLowerCase()
-    return entries
-      .map(([folder, files]) => {
-        const matched = files.filter(file => {
-          const fileName = typeof file === 'string' ? file : (file.file || file.filename || '')
-          return fileName.toLowerCase().includes(q) || folder.toLowerCase().includes(q)
-        })
-        return [folder, matched] as [string, DocumentFile[]]
-      })
-      .filter(([, files]) => files.length > 0)
-  }, [filteredFolders, searchQuery])
-
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
       <div className="px-4 py-4 border-b border-surface-200">
         <h2 className="text-sm font-semibold text-brand-900 mb-3">Case Documents</h2>
         <div className="relative mb-2">
@@ -198,12 +513,62 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search files..."
+            placeholder="Search by folder or filename..."
             className="w-full text-xs border border-surface-200 rounded-lg pl-8 pr-2.5 py-2 bg-white
                        text-brand-700 focus:outline-none focus:ring-2 focus:ring-accent-500
                        placeholder:text-brand-400"
           />
         </div>
+        {savedAgentViews.length > 0 && (
+          <div className="mb-2">
+            <div className="mb-1 flex items-center justify-between">
+              <p className="text-[11px] text-brand-400">Recent Agent Views</p>
+              {onClearSavedAgentViews && (
+                <button
+                  onClick={onClearSavedAgentViews}
+                  className="text-[11px] text-brand-400 hover:text-brand-600 underline decoration-dotted"
+                >
+                  Clear all
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {onClearAgentView && (
+                <button
+                  onClick={onClearAgentView}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] rounded-full border transition-colors ${
+                    agentView
+                      ? 'bg-white border-surface-200 text-brand-600 hover:bg-surface-100'
+                      : 'bg-brand-900 border-brand-900 text-white'
+                  }`}
+                >
+                  All Files
+                </button>
+              )}
+              {savedAgentViews.map((view) => {
+                const isActive = (activeAgentViewId || agentView?.id) === view.id
+                return (
+                  <button
+                    key={view.id}
+                    onClick={() => onApplyAgentView?.(view)}
+                    disabled={!onApplyAgentView}
+                    className={`inline-flex items-center gap-1.5 max-w-full px-2.5 py-1 text-[11px] rounded-full border transition-colors ${
+                      isActive
+                        ? 'bg-accent-600 border-accent-600 text-white'
+                        : 'bg-white border-surface-200 text-brand-600 hover:bg-surface-100 disabled:opacity-50 disabled:cursor-not-allowed'
+                    }`}
+                    title={`${view.name} (${view.totalMatches})`}
+                  >
+                    <span className="truncate max-w-[140px]">{view.name}</span>
+                    <span className={`px-1.5 py-0.5 rounded-full ${isActive ? 'bg-white/20 text-white' : 'bg-surface-100 text-brand-500'}`}>
+                      {view.totalMatches}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
         <div className="flex gap-2">
           <select
             value={sort}
@@ -221,16 +586,15 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
             className="flex-1 text-xs border border-surface-200 rounded-lg px-2.5 py-2 bg-white
                        text-brand-700 focus:outline-none focus:ring-2 focus:ring-accent-500"
           >
-            <option value="all">All Files</option>
-            <option value="medical">Medical</option>
-            <option value="1p">First Party</option>
-            <option value="3p">Third Party</option>
-            <option value="intake">Intake</option>
+            {filterDefinitions.map((definition) => (
+              <option key={definition.value} value={definition.value}>
+                {definition.label}
+              </option>
+            ))}
           </select>
         </div>
       </div>
 
-      {/* File tree */}
       <div className="flex-1 overflow-y-auto px-3 py-3">
         <div className="flex items-center justify-between px-2 py-1.5 mb-2">
           <span className="text-xs font-semibold text-brand-500 uppercase tracking-wide">
@@ -246,8 +610,10 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
               className="w-full flex items-center gap-2 px-2 py-2 text-sm text-brand-700
                          hover:bg-surface-100 rounded-lg transition-colors group"
             >
-              <span className="text-brand-400 transition-transform duration-200"
-                    style={{ transform: expandedFolders.has(folder) ? 'rotate(0deg)' : 'rotate(-90deg)' }}>
+              <span
+                className="text-brand-400 transition-transform duration-200"
+                style={{ transform: expandedFolders.has(folder) ? 'rotate(0deg)' : 'rotate(-90deg)' }}
+              >
                 <ChevronDownIcon />
               </span>
               <span className="text-accent-600">
@@ -261,16 +627,20 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
 
             {expandedFolders.has(folder) && (
               <div className="ml-4 pl-4 border-l border-surface-200 mt-1 space-y-0.5">
-                {files.map((file, i) => {
-                  // Handle both object format and string format (legacy indexes)
-                  const isStringFile = typeof file === 'string'
-                  const fileName = isStringFile ? file : (file.file || file.filename || 'Unknown')
-                  const fileData = isStringFile ? undefined : file
-                  const reviewInfo = filesNeedingReview.get(fileName.toLowerCase())
-                  const needsReview = !!reviewInfo
-                  const reindexStatus = filesNeedingReindex.get(fileName.toLowerCase())
+                {files.map((row, i) => {
+                  const fileName = row.fileName
+                  const fileData = row.fileData
+                  const reviewInfo = row.reviewInfo
+                  const needsReview = row.needsReview
+                  const reindexStatus = row.reindexStatus
+                  const title = fileData && typeof fileData.title === 'string' ? fileData.title : fileName
+                  const date = fileData && typeof fileData.date === 'string' ? fileData.date : ''
+                  const keyInfo = fileData && typeof fileData.key_info === 'string' ? fileData.key_info : 'No details extracted'
+                  const issues = fileData && typeof fileData.issues === 'string' ? fileData.issues : ''
+                  const filePath = row.path
+
                   return (
-                    <div key={i} className={`flex items-center gap-1 group ${needsReview ? 'bg-amber-50 rounded-lg' : ''}`}>
+                    <div key={`${folder}/${fileName}-${i}`} className={`flex items-center gap-1 group rounded-lg focus-within:bg-surface-100 ${needsReview ? 'bg-amber-50' : ''}`}>
                       <button
                         onClick={() => {
                           const reviewWarning = reviewInfo
@@ -281,22 +651,22 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
                             : ''
                           const content = `
 <div class="p-6">
-  <h2 class="text-lg font-semibold text-gray-900 mb-1">${fileData?.title || fileName}</h2>
+  <h2 class="text-lg font-semibold text-gray-900 mb-1">${title}</h2>
   <p class="text-sm text-gray-500 mb-4">${fileName}</p>
-  ${fileData?.date ? `<div class="text-sm mb-3"><span class="font-medium text-gray-700">Date:</span> <span class="text-gray-600">${fileData.date}</span></div>` : ''}
+  ${date ? `<div class="text-sm mb-3"><span class="font-medium text-gray-700">Date:</span> <span class="text-gray-600">${date}</span></div>` : ''}
   <div class="bg-gray-50 rounded-xl p-4">
     <p class="text-sm font-medium text-gray-900 mb-2">Key Information</p>
-    <p class="text-sm text-gray-600 leading-relaxed">${fileData?.key_info || 'No details extracted'}</p>
+    <p class="text-sm text-gray-600 leading-relaxed">${keyInfo}</p>
   </div>
-  ${fileData?.issues ? `<div class="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800"><span class="font-medium">Issue:</span> ${fileData.issues}</div>` : ''}
+  ${issues ? `<div class="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800"><span class="font-medium">Issue:</span> ${issues}</div>` : ''}
   ${reviewWarning}
 </div>`
-                          onDocSelect(content)
+                          onDocSelect(content, undefined, filePath)
                         }}
                         className={`flex-1 flex items-center gap-2 text-left px-2 py-1.5 text-sm
                                    ${needsReview ? 'text-amber-700 hover:bg-amber-100' : 'text-brand-600 hover:bg-surface-100 hover:text-brand-900'}
                                    rounded-lg truncate transition-colors`}
-                        title={`${fileData?.title || fileName}${needsReview ? '\n\n⚠️ NEEDS REVIEW: ' + reviewInfo?.reason : ''}\n\nClick for info, eye icon to view file`}
+                        title={`${title}${needsReview ? '\n\n⚠️ NEEDS REVIEW: ' + reviewInfo?.reason : ''}\n\nClick for info, eye icon to view file`}
                       >
                         {needsReview ? (
                           <span className="text-amber-500">
@@ -309,19 +679,22 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
                         )}
                         <span className="truncate">{fileName}</span>
                         {reindexStatus && (
-                          <span className={`flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded ${
-                            reindexStatus === 'NEW'
-                              ? 'bg-emerald-100 text-emerald-700'
-                              : 'bg-amber-100 text-amber-700'
-                          }`}>
+                          <span
+                            className={`flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded ${
+                              reindexStatus === 'NEW'
+                                ? 'bg-emerald-100 text-emerald-700'
+                                : 'bg-amber-100 text-amber-700'
+                            }`}
+                          >
                             {reindexStatus}
                           </span>
                         )}
                       </button>
                       <button
-                        onClick={() => onFileView(getFileUrl(folder, fileName), fileName)}
+                        onClick={() => onFileView(getFileUrl(filePath, fileName), fileName, filePath)}
                         className="p-1.5 text-brand-300 hover:text-accent-600 hover:bg-accent-50
-                                   rounded-md opacity-0 group-hover:opacity-100 transition-all"
+                                   rounded-md opacity-70 group-hover:opacity-100 group-focus-within:opacity-100
+                                   focus-visible:opacity-100 transition-all"
                         title="View file"
                       >
                         <EyeIcon />
@@ -340,11 +713,10 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
               <FolderIcon />
             </div>
             <p className="text-sm text-brand-500">No files found</p>
-            <p className="text-xs text-brand-400 mt-1">Try adjusting filters</p>
+            <p className="text-xs text-brand-400 mt-1">Try adjusting filters or search text</p>
           </div>
         )}
 
-        {/* Pending (unindexed) files */}
         {pendingFiles.length > 0 && (
           <div className="mt-4 pt-3 border-t border-amber-200">
             <div className="flex items-center justify-between px-2 py-1.5 mb-2">
@@ -355,7 +727,7 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
             </div>
 
             {pendingFiles.map((file, i) => (
-              <div key={i} className="flex items-center gap-1 group">
+              <div key={i} className="flex items-center gap-1 group rounded-lg focus-within:bg-amber-50">
                 <div className="flex-1 flex items-center gap-2 px-2 py-1.5 text-sm text-amber-700 truncate">
                   <span className="text-amber-400">
                     <DocumentIcon />
@@ -369,10 +741,11 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
                   onClick={() => {
                     const url = `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(file.path)}`
                     const viewUrl = file.filename.toLowerCase().endsWith('.pdf') ? `${url}#view=FitH` : url
-                    onFileView(viewUrl, file.filename)
+                    onFileView(viewUrl, file.filename, file.path)
                   }}
                   className="p-1.5 text-brand-300 hover:text-accent-600 hover:bg-accent-50
-                             rounded-md opacity-0 group-hover:opacity-100 transition-all"
+                             rounded-md opacity-70 group-hover:opacity-100 group-focus-within:opacity-100
+                             focus-visible:opacity-100 transition-all"
                   title="View file"
                 >
                   <EyeIcon />
@@ -386,7 +759,6 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
           </div>
         )}
 
-        {/* Generated Documents */}
         {generatedDocs.length > 0 && (
           <div className="mt-6 pt-4 border-t border-surface-200">
             <div className="flex items-center justify-between px-2 py-1.5 mb-2">
@@ -404,10 +776,10 @@ export default function FileViewer({ documentIndex, generatedDocs, caseFolder, a
                     const res = await fetch(`${apiUrl}/api/docs/read?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(doc.path)}`)
                     const data = await res.json()
                     if (data.content) {
-                      onDocSelect(data.content, doc.path)
+                      onDocSelect(data.content, doc.path, doc.path)
                     }
                   } catch {
-                    onDocSelect(`Error loading ${doc.name}`)
+                    onDocSelect(`Error loading ${doc.name}`, undefined, undefined)
                   }
                 }}
                 className="w-full flex items-center gap-2 px-2 py-2 text-sm text-emerald-700

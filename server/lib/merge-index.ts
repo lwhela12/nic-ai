@@ -154,6 +154,17 @@ function confidenceLevel(confidence: number): "high" | "medium" | "low" {
 }
 
 /**
+ * Return the best available value for a hypergraph field.
+ * Prefers explicit consensus, otherwise highest-support value.
+ */
+function mostLikelyFieldValue(field?: HypergraphField): string | undefined {
+  if (!field || !Array.isArray(field.values) || field.values.length === 0) return undefined;
+  if (field.consensus && field.consensus !== "UNCERTAIN") return field.consensus;
+  const sorted = [...field.values].sort((a, b) => b.count - a.count);
+  return sorted[0]?.value;
+}
+
+/**
  * Extract provider names from hypergraph charge fields.
  * Charge fields are named like "charges:Provider Name" or "provider_charges:Provider Name"
  */
@@ -219,11 +230,59 @@ function calculateTotalCharges(hypergraph: Record<string, HypergraphField>): num
  * Convert hypergraph conflicts to needs_review items.
  * Also adds UNCERTAIN fields as needs_review.
  */
+function mergeNeedsReviewItems(items: NeedsReviewItem[]): NeedsReviewItem[] {
+  const merged = new Map<string, {
+    field: string;
+    conflicting_values: Set<string>;
+    sources: Set<string>;
+    reasons: Set<string>;
+  }>();
+
+  for (const item of items) {
+    const key = (item.field || "").trim().toLowerCase();
+    if (!key) continue;
+
+    let existing = merged.get(key);
+    if (!existing) {
+      existing = {
+        field: item.field,
+        conflicting_values: new Set<string>(),
+        sources: new Set<string>(),
+        reasons: new Set<string>(),
+      };
+      merged.set(key, existing);
+    }
+
+    for (const value of item.conflicting_values || []) {
+      existing.conflicting_values.add(String(value));
+    }
+    for (const source of item.sources || []) {
+      existing.sources.add(String(source));
+    }
+    if (item.reason) {
+      existing.reasons.add(item.reason);
+    }
+  }
+
+  return Array.from(merged.values()).map((item) => {
+    const reasons = Array.from(item.reasons);
+    return {
+      field: item.field,
+      conflicting_values: Array.from(item.conflicting_values),
+      sources: Array.from(item.sources),
+      reason: reasons.length > 0 ? reasons.join(" | ") : "Conflicting values found",
+    };
+  });
+}
+
 function buildNeedsReview(hypergraphResult: HypergraphResult): NeedsReviewItem[] {
   const needsReview: NeedsReviewItem[] = [];
 
   // Add explicit conflicts
   for (const conflict of hypergraphResult.conflicts) {
+    // UNCERTAIN fields are handled from hypergraph values below with a cleaner value set.
+    if (conflict.consensus_value === "UNCERTAIN") continue;
+
     needsReview.push({
       field: conflict.field,
       conflicting_values: [conflict.consensus_value, conflict.outlier_value],
@@ -247,7 +306,7 @@ function buildNeedsReview(hypergraphResult: HypergraphResult): NeedsReviewItem[]
     }
   }
 
-  return needsReview;
+  return mergeNeedsReviewItems(needsReview);
 }
 
 /**
@@ -295,20 +354,20 @@ function buildClaimNumbers(hypergraph: Record<string, HypergraphField>): Record<
   const claims: Record<string, string> = {};
 
   // Try new structured fields first
-  const claim1p = hypergraph["claim_number_1p"];
-  if (claim1p?.consensus && claim1p.consensus !== "UNCERTAIN") {
-    claims["1P"] = claim1p.consensus;
+  const claim1p = mostLikelyFieldValue(hypergraph["claim_number_1p"]);
+  if (claim1p) {
+    claims["1P"] = claim1p;
   }
 
-  const claim3p = hypergraph["claim_number_3p"];
-  if (claim3p?.consensus && claim3p.consensus !== "UNCERTAIN") {
-    claims["3P"] = claim3p.consensus;
+  const claim3p = mostLikelyFieldValue(hypergraph["claim_number_3p"]);
+  if (claim3p) {
+    claims["3P"] = claim3p;
   }
 
   // Fallback to legacy field if no new fields
   if (Object.keys(claims).length === 0) {
     const legacyField = hypergraph["insurance_claim_numbers"];
-    if (legacyField && legacyField.consensus !== "UNCERTAIN") {
+    if (legacyField?.values?.length) {
       for (const valueEntry of legacyField.values) {
         const value = valueEntry.value;
         const sources = valueEntry.sources.join(" ").toLowerCase();
@@ -446,9 +505,10 @@ function buildHealthInsurance(hypergraph: Record<string, HypergraphField>): {
 } | undefined {
   // Try new structured field first
   const hiField = hypergraph["health_insurance"];
-  if (hiField?.consensus && hiField.consensus !== "UNCERTAIN") {
+  const hiValue = mostLikelyFieldValue(hiField);
+  if (hiValue) {
     try {
-      const parsed = JSON.parse(hiField.consensus);
+      const parsed = JSON.parse(hiValue);
       if (typeof parsed === "object" && parsed !== null) {
         const result: { carrier?: string; group_no?: string; member_no?: string } = {};
         if (typeof parsed.carrier === "string") result.carrier = parsed.carrier;
@@ -458,20 +518,18 @@ function buildHealthInsurance(hypergraph: Record<string, HypergraphField>): {
       }
     } catch {
       // Not JSON - treat as carrier name only
-      return { carrier: hiField.consensus };
+      return { carrier: hiValue };
     }
   }
 
   // Fallback to legacy individual fields
-  const getConsensus = (field: string): string | undefined => {
-    const f = hypergraph[field];
-    if (!f || f.consensus === "UNCERTAIN") return undefined;
-    return f.consensus;
+  const getLikely = (field: string): string | undefined => {
+    return mostLikelyFieldValue(hypergraph[field]);
   };
 
-  const carrier = getConsensus("health_insurance_carrier");
-  const group_no = getConsensus("health_insurance_group");
-  const member_no = getConsensus("health_insurance_member");
+  const carrier = getLikely("health_insurance_carrier");
+  const group_no = getLikely("health_insurance_group");
+  const member_no = getLikely("health_insurance_member");
 
   if (!carrier && !group_no && !member_no) return undefined;
 
@@ -524,6 +582,20 @@ export function mergeToIndex(
     return sorted[0]?.value || "";
   };
 
+  // Prefer hard consensus; if uncertain, use the highest-support value so dashboard
+  // can still display the most likely data while conflicts remain in needs_review.
+  const getPreferredValue = (...fields: string[]): string => {
+    for (const field of fields) {
+      const v = getConsensus(field);
+      if (v) return v;
+    }
+    for (const field of fields) {
+      const v = getBestValue(field);
+      if (v) return v;
+    }
+    return "";
+  };
+
   // Parse amount from string (handles "$1,234.56" format)
   const parseAmount = (val: string): number | undefined => {
     if (!val) return undefined;
@@ -535,21 +607,21 @@ export function mergeToIndex(
   // Get incident date - WC uses doi (date_of_injury), PI uses dol (date_of_loss)
   // Use getBestValue for dates since showing approximate data is better than "Unknown"
   const incidentDate = isWC
-    ? (getConsensus("date_of_injury") || getConsensus("doi") || getBestValue("date_of_injury") || getBestValue("doi"))
-    : (getConsensus("date_of_loss") || getConsensus("dol") || getBestValue("date_of_loss") || getBestValue("dol"));
+    ? getPreferredValue("date_of_injury", "doi")
+    : getPreferredValue("date_of_loss", "dol");
 
   // Build summary object with common fields
   const summary: CaseSummary = {
-    client: getConsensus("client_name") || getConsensus("claimant_name", "Unknown"),
+    client: getPreferredValue("client_name", "claimant_name") || "Unknown",
     dol: incidentDate || "Unknown",
     incident_date: incidentDate || undefined,
-    dob: getConsensus("date_of_birth") || getConsensus("dob") || undefined,
+    dob: getPreferredValue("date_of_birth", "dob") || undefined,
     providers: extractProviders(hg),
     total_charges: calculateTotalCharges(hg),
     contact: {
-      phone: getConsensus("client_phone") || getConsensus("phone") || undefined,
-      email: getConsensus("client_email") || getConsensus("email") || undefined,
-      address: parseAddress(getConsensus("client_address") || getConsensus("address"))
+      phone: getPreferredValue("client_phone", "phone") || undefined,
+      email: getPreferredValue("client_email", "email") || undefined,
+      address: parseAddress(getPreferredValue("client_address", "address"))
     },
     claim_numbers: buildClaimNumbers(hg),
     case_summary: caseSummaryResult.case_summary
@@ -564,9 +636,9 @@ export function mergeToIndex(
   // Add WC-specific fields
   if (isWC) {
     // Employer info
-    const employerName = getConsensus("employer_name") || getConsensus("employer");
-    const employerAddress = getConsensus("employer_address");
-    const employerPhone = getConsensus("employer_phone");
+    const employerName = getPreferredValue("employer_name", "employer");
+    const employerAddress = getPreferredValue("employer_address");
+    const employerPhone = getPreferredValue("employer_phone");
     if (employerName || employerAddress || employerPhone) {
       summary.employer = {
         name: employerName || undefined,
@@ -576,11 +648,11 @@ export function mergeToIndex(
     }
 
     // WC carrier info
-    const wcCarrier = getConsensus("wc_carrier") || getConsensus("wc_insurance_carrier");
-    const wcClaimNumber = getConsensus("wc_claim_number") || getConsensus("claim_number");
-    const adjusterName = getConsensus("adjuster_name");
-    const adjusterPhone = getConsensus("adjuster_phone");
-    const tpa = getConsensus("tpa_name") || getConsensus("third_party_administrator");
+    const wcCarrier = getPreferredValue("wc_carrier", "wc_insurance_carrier");
+    const wcClaimNumber = getPreferredValue("wc_claim_number", "claim_number");
+    const adjusterName = getPreferredValue("adjuster_name");
+    const adjusterPhone = getPreferredValue("adjuster_phone");
+    const tpa = getPreferredValue("tpa_name", "third_party_administrator");
     if (wcCarrier || wcClaimNumber || adjusterName || tpa) {
       summary.wc_carrier = {
         carrier: wcCarrier || undefined,
@@ -592,11 +664,11 @@ export function mergeToIndex(
     }
 
     // Disability status
-    const disabilityType = getConsensus("disability_type");
-    const amwStr = getConsensus("amw") || getConsensus("average_monthly_wage") || getConsensus("aww");
-    const compRateStr = getConsensus("compensation_rate") || getConsensus("weekly_compensation_rate");
-    const mmiDate = getConsensus("mmi_date");
-    const ppdRatingStr = getConsensus("ppd_rating");
+    const disabilityType = getPreferredValue("disability_type");
+    const amwStr = getPreferredValue("amw", "average_monthly_wage", "aww");
+    const compRateStr = getPreferredValue("compensation_rate", "weekly_compensation_rate");
+    const mmiDate = getPreferredValue("mmi_date");
+    const ppdRatingStr = getPreferredValue("ppd_rating");
     const amw = parseAmount(amwStr);
     const compRate = parseAmount(compRateStr);
     const ppdRating = parseAmount(ppdRatingStr);
@@ -611,19 +683,19 @@ export function mergeToIndex(
     }
 
     // Job info
-    const jobTitle = getConsensus("job_title");
+    const jobTitle = getPreferredValue("job_title");
     if (jobTitle) {
       summary.job_title = jobTitle;
     }
 
     // Injury details
-    const injuryDescription = getConsensus("injury_description");
+    const injuryDescription = getPreferredValue("injury_description");
     if (injuryDescription) {
       summary.injury_description = injuryDescription;
     }
 
     // Body parts (parse from consensus or extract from hypergraph)
-    const bodyPartsConsensus = getConsensus("body_parts") || getConsensus("body_parts_injured");
+    const bodyPartsConsensus = getPreferredValue("body_parts", "body_parts_injured");
     if (bodyPartsConsensus) {
       // Parse comma-separated or array-like string
       const parts = bodyPartsConsensus.split(/[,;]/).map(p => p.trim()).filter(p => p);
@@ -667,8 +739,26 @@ export function mergeToIndex(
     (e: ErrataItem) => e.resolution_type === "user_decision" || e.resolution_type === "batch_review"
   );
 
+  const reconciledValues = (typeof existingIndex.reconciled_values === "object" && existingIndex.reconciled_values !== null)
+    ? existingIndex.reconciled_values as Record<string, any>
+    : {};
+  const reconciledOverrides = new Map<string, string>();
+  for (const [field, raw] of Object.entries(reconciledValues)) {
+    if (!field) continue;
+    if (raw && typeof raw === "object" && "value" in raw && (raw as any).value !== undefined) {
+      reconciledOverrides.set(field, String((raw as any).value));
+      continue;
+    }
+    if (typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean") {
+      reconciledOverrides.set(field, String(raw));
+    }
+  }
+
   // Build set of fields that users have already resolved
-  const resolvedFields = new Set(userResolutions.map((r: ErrataItem) => r.field));
+  const resolvedFields = new Set([
+    ...userResolutions.map((r: ErrataItem) => r.field),
+    ...Array.from(reconciledOverrides.keys()),
+  ]);
 
   // Filter out needs_review items for fields that have user resolutions
   const reconciledNeedsReview = freshNeedsReview.filter(
@@ -694,14 +784,23 @@ export function mergeToIndex(
     incident_date: "incident_date",
   };
 
+  const summaryOverrides = new Map<string, string>();
   for (const resolution of userResolutions) {
-    const summaryKey = fieldToSummaryKey[resolution.field];
-    if (summaryKey && resolution.decision) {
-      (summary as Record<string, any>)[summaryKey] = resolution.decision;
-      // Also set incident_date when dol is overridden
-      if (summaryKey === "dol") {
-        summary.incident_date = resolution.decision;
-      }
+    if (resolution.field && resolution.decision) {
+      summaryOverrides.set(resolution.field, resolution.decision);
+    }
+  }
+  for (const [field, decision] of reconciledOverrides) {
+    summaryOverrides.set(field, decision);
+  }
+
+  for (const [field, decision] of summaryOverrides) {
+    const summaryKey = fieldToSummaryKey[field];
+    if (!summaryKey || !decision) continue;
+    (summary as Record<string, any>)[summaryKey] = decision;
+    // Also set incident_date when dol is overridden
+    if (summaryKey === "dol") {
+      summary.incident_date = decision;
     }
   }
 

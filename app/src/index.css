@@ -36,6 +36,27 @@
   --color-surface-300: #d6d3d1;
   --color-surface-400: #a8a29e;
 
+  /* Semantic status colors */
+  --color-success-50: #ecfdf3;
+  --color-success-100: #d1fae5;
+  --color-success-500: #10b981;
+  --color-success-700: #047857;
+
+  --color-warning-50: #fffbeb;
+  --color-warning-100: #fef3c7;
+  --color-warning-500: #f59e0b;
+  --color-warning-700: #b45309;
+
+  --color-critical-50: #fef2f2;
+  --color-critical-100: #fee2e2;
+  --color-critical-500: #ef4444;
+  --color-critical-700: #b91c1c;
+
+  --color-info-50: #eff6ff;
+  --color-info-100: #dbeafe;
+  --color-info-500: #3b82f6;
+  --color-info-700: #1d4ed8;
+
   /* Fonts */
   --font-serif: 'Instrument Serif', Georgia, serif;
   --font-sans: 'Inter', system-ui, sans-serif;
@@ -46,9 +67,17 @@
   --shadow-elevated: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 10px 15px -3px rgb(0 0 0 / 0.08);
 }
 
+:root {
+  --motion-fast: 120ms;
+  --motion-normal: 180ms;
+  --motion-slow: 240ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+
 body {
   font-family: var(--font-sans);
   background-color: var(--color-surface-50);
+  background-image: radial-gradient(circle at 0% 0%, rgb(255 255 255 / 0.8), transparent 45%);
   color: var(--color-brand-900);
   margin: 0;
   -webkit-font-smoothing: antialiased;
@@ -74,17 +103,20 @@ body {
   background: var(--color-surface-400);
 }
 
-/* Smooth transitions */
-button, a, input, select {
-  transition: all 150ms ease;
+/* Controlled transitions */
+button, a, input, select, textarea {
+  transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--ease-standard);
 }
 
 /* Focus styles */
 button:focus-visible,
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--color-surface-50), 0 0 0 4px var(--color-accent-600);
+  box-shadow: 0 0 0 2px var(--color-surface-50), 0 0 0 3px var(--color-accent-500);
 }
 
 /* Prose customization */
@@ -96,9 +128,18 @@ select:focus-visible {
 
 /* Panel transitions for resizable layout */
 .panel-transition {
-  transition: width 300ms ease-out;
+  transition: width var(--motion-slow) var(--ease-standard);
 }
 
 .panel-dragging {
   transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

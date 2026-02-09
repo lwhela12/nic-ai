@@ -23,6 +23,7 @@ import {
   type EvidencePacketServiceInfo,
 } from "./evidence-packet";
 import { loadFirmInfo } from "./export";
+import { applyResolvedFieldToSummary } from "./index-summary-sync";
 
 // Client creation - recreated when API key changes
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -55,6 +56,18 @@ function getClient(): Anthropic {
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+}
+
+interface AgentDocumentView {
+  id: string;
+  name: string;
+  description?: string;
+  paths: string[];
+  sortBy?: "folder" | "date" | "type";
+  sortDirection?: "asc" | "desc";
+  createdAt: string;
+  totalMatches: number;
+  invalidPaths?: string[];
 }
 
 // Tool definitions
@@ -114,14 +127,14 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "generate_document",
-    description: "Delegate to a specialized agent to draft a formal document. Use this when the user asks you to write, draft, create, or generate a document like a demand letter, case memo, settlement calculation, or formal letter. The agent has access to templates and will create a complete, professional document.",
+    description: "Delegate to a specialized agent to draft a formal document. Use this when the user asks you to write, draft, create, or generate a document like a demand letter, case memo, settlement calculation, formal letter, or a hearing Decision & Order. The agent has access to templates and will create a complete, professional document.",
     input_schema: {
       type: "object" as const,
       properties: {
         document_type: {
           type: "string",
-          enum: ["demand_letter", "case_memo", "settlement", "general_letter"],
-          description: "Type of document to generate: demand_letter (to insurance), case_memo (internal summary), settlement (disbursement calc), general_letter (LOP, records request, etc.)"
+          enum: ["demand_letter", "case_memo", "settlement", "general_letter", "decision_order"],
+          description: "Type of document to generate: demand_letter (to insurance), case_memo (internal summary), settlement (disbursement calc), general_letter (LOP, records request, etc.), decision_order (post-hearing Decision & Order draft)."
         },
         instructions: {
           type: "string",
@@ -147,6 +160,45 @@ const TOOLS: Anthropic.Tool[] = [
         }
       },
       required: ["path", "question"]
+    }
+  },
+  {
+    name: "create_document_view",
+    description: "Create a temporary filtered document view in the file panel based on explicit document paths from document_index.json. Use when the user asks to show a subset of documents (for example, medical records, hearing notices, records from a specific provider, or chronological views).",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description: "Short label for the generated view (example: 'Medical Records')."
+        },
+        description: {
+          type: "string",
+          description: "Optional one-line explanation shown in the file panel."
+        },
+        documents: {
+          type: "array",
+          description: "Documents to include. Each item can be a path string or an object with path.",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+            },
+            required: ["path"],
+          },
+        },
+        sort_by: {
+          type: "string",
+          enum: ["folder", "date", "type"],
+          description: "Optional preferred sort mode for this view."
+        },
+        sort_direction: {
+          type: "string",
+          enum: ["asc", "desc"],
+          description: "Optional sort direction (used when sort_by is date)."
+        },
+      },
+      required: ["documents"]
     }
   },
   {
@@ -412,6 +464,15 @@ function getTools(readOnlyMode: boolean): Anthropic.Tool[] {
   return TOOLS.filter((tool) => !WRITE_TOOLS.has(tool.name));
 }
 
+function normalizeFieldName(value: string): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_:]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[''`]/g, "'");
+}
+
 // Fuzzy field matching - handles casing, whitespace, and punctuation variations
 function findFieldIndex(needsReview: any[], field: string): number {
   // Tier 1: Exact match
@@ -426,17 +487,76 @@ function findFieldIndex(needsReview: any[], field: string): number {
   if (ci !== -1) return ci;
 
   // Tier 3: Normalize punctuation (underscores, colons, apostrophe variants)
-  const normalize = (s: string) => s.trim().toLowerCase()
-    .replace(/[_:]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .replace(/[''`]/g, "'");
-  const norm = normalize(field);
+  const norm = normalizeFieldName(field);
   const normMatch = needsReview.findIndex((item: any) =>
-    normalize(item.field || '') === norm
+    normalizeFieldName(item.field || "") === norm
   );
   if (normMatch !== -1) return normMatch;
 
   return -1;
+}
+
+function findMatchingFieldIndexes(needsReview: any[], field: string): number[] {
+  const matchIndex = findFieldIndex(needsReview, field);
+  if (matchIndex === -1) return [];
+
+  const matchedField = needsReview[matchIndex]?.field ?? field;
+  const normalizedMatchedField = normalizeFieldName(matchedField);
+  const indexes: number[] = [];
+
+  for (let i = 0; i < needsReview.length; i++) {
+    if (normalizeFieldName(needsReview[i]?.field || "") === normalizedMatchedField) {
+      indexes.push(i);
+    }
+  }
+
+  return indexes;
+}
+
+function dedupeNeedsReviewEntries(needsReview: any[]): any[] {
+  const merged = new Map<string, {
+    field: string;
+    conflicting_values: Set<string>;
+    sources: Set<string>;
+    reasons: Set<string>;
+  }>();
+
+  for (const item of needsReview || []) {
+    const field = item?.field;
+    const key = normalizeFieldName(field || "");
+    if (!key) continue;
+
+    let existing = merged.get(key);
+    if (!existing) {
+      existing = {
+        field: field || "",
+        conflicting_values: new Set<string>(),
+        sources: new Set<string>(),
+        reasons: new Set<string>(),
+      };
+      merged.set(key, existing);
+    }
+
+    for (const value of Array.isArray(item?.conflicting_values) ? item.conflicting_values : []) {
+      existing.conflicting_values.add(String(value));
+    }
+    for (const source of Array.isArray(item?.sources) ? item.sources : []) {
+      existing.sources.add(String(source));
+    }
+    if (item?.reason) {
+      existing.reasons.add(String(item.reason));
+    }
+  }
+
+  return Array.from(merged.values()).map((item) => {
+    const reasons = Array.from(item.reasons);
+    return {
+      field: item.field,
+      conflicting_values: Array.from(item.conflicting_values),
+      sources: Array.from(item.sources),
+      reason: reasons.length > 0 ? reasons.join(" | ") : "Conflicting values found",
+    };
+  });
 }
 
 interface KnowledgeEvidencePacketConfig {
@@ -614,6 +734,77 @@ function inferDocType(title: string, path: string): string | undefined {
   if (/notice of appearance|representation|letter of representation/.test(value)) return "representation";
   if (/ppd|ime|medical report|doctor|dr\./.test(value)) return "medical_report";
   if (/request|letter|correspondence|memo/.test(value)) return "correspondence";
+  return undefined;
+}
+
+function normalizeRelativePathForLookup(path: string): string {
+  return String(path || "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "")
+    .replace(/\/+/g, "/")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeFolderForPath(path: string): string {
+  const normalized = normalizeRelativePathForLookup(path);
+  if (normalized === "." || normalized === "./") return "";
+  return normalized.replace(/\/+$/, "");
+}
+
+function collectIndexedDocumentPathMap(indexData: any): Map<string, string> {
+  const pathMap = new Map<string, string>();
+  const folders = indexData?.folders || {};
+
+  for (const [folderNameRaw, folderData] of Object.entries(folders)) {
+    let docs: any[] = [];
+    if (Array.isArray(folderData)) {
+      docs = folderData;
+    } else if (folderData && typeof folderData === "object" && Array.isArray((folderData as any).files)) {
+      docs = (folderData as any).files;
+    } else if (folderData && typeof folderData === "object" && Array.isArray((folderData as any).documents)) {
+      docs = (folderData as any).documents;
+    }
+
+    const folderName = normalizeFolderForPath(String(folderNameRaw || ""));
+
+    for (const doc of docs) {
+      const filename = typeof doc === "string"
+        ? doc
+        : typeof doc?.filename === "string"
+          ? doc.filename
+          : typeof doc?.file === "string"
+            ? doc.file
+            : "";
+      if (!filename) continue;
+
+      const canonicalPath = folderName ? `${folderName}/${filename}` : filename;
+      const normalizedPath = normalizeRelativePathForLookup(canonicalPath);
+      if (!normalizedPath) continue;
+
+      if (!pathMap.has(normalizedPath)) {
+        pathMap.set(normalizedPath, canonicalPath);
+      }
+    }
+  }
+
+  return pathMap;
+}
+
+function normalizeDocumentViewSortBy(value: any): "folder" | "date" | "type" | undefined {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "folder" || normalized === "date" || normalized === "type") {
+    return normalized;
+  }
+  return undefined;
+}
+
+function normalizeDocumentViewSortDirection(value: any): "asc" | "desc" | undefined {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "asc" || normalized === "desc") {
+    return normalized;
+  }
   return undefined;
 }
 
@@ -1181,6 +1372,84 @@ async function executeTool(
         return `Successfully wrote ${toolInput.content.length} characters to ${toolInput.path}`;
       }
 
+      case "create_document_view": {
+        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexContent = await readFile(indexPath, "utf-8");
+        const indexData = JSON.parse(indexContent);
+        const indexedPathMap = collectIndexedDocumentPathMap(indexData);
+
+        const rawDocuments = Array.isArray(toolInput.documents) ? toolInput.documents : [];
+        if (rawDocuments.length === 0) {
+          return JSON.stringify({
+            success: false,
+            error: "create_document_view requires a non-empty documents[] list.",
+          });
+        }
+
+        const selectedPaths: string[] = [];
+        const invalidPaths: string[] = [];
+        const seen = new Set<string>();
+
+        for (const raw of rawDocuments) {
+          const rawPath = typeof raw === "string"
+            ? raw
+            : raw && typeof raw.path === "string"
+              ? raw.path
+              : "";
+          const normalizedRequested = normalizeRelativePathForLookup(rawPath);
+          if (!normalizedRequested) continue;
+
+          const canonicalPath = indexedPathMap.get(normalizedRequested);
+          if (!canonicalPath) {
+            invalidPaths.push(rawPath);
+            continue;
+          }
+
+          const canonicalKey = normalizeRelativePathForLookup(canonicalPath);
+          if (seen.has(canonicalKey)) continue;
+          seen.add(canonicalKey);
+          selectedPaths.push(canonicalPath);
+        }
+
+        if (selectedPaths.length === 0) {
+          return JSON.stringify({
+            success: false,
+            error: "None of the requested documents matched indexed file paths.",
+            invalidPaths,
+          });
+        }
+
+        const sortBy = normalizeDocumentViewSortBy(
+          toolInput.sort_by ?? toolInput.sortBy
+        );
+        const sortDirection = normalizeDocumentViewSortDirection(
+          toolInput.sort_direction ?? toolInput.sortDirection
+        );
+
+        const view: AgentDocumentView = {
+          id: `agent-view-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: typeof toolInput.name === "string" && toolInput.name.trim()
+            ? toolInput.name.trim()
+            : "Agent Document View",
+          description: typeof toolInput.description === "string" && toolInput.description.trim()
+            ? toolInput.description.trim()
+            : undefined,
+          paths: selectedPaths,
+          sortBy,
+          sortDirection,
+          createdAt: new Date().toISOString(),
+          totalMatches: selectedPaths.length,
+          invalidPaths: invalidPaths.length > 0 ? invalidPaths : undefined,
+        };
+
+        return JSON.stringify({
+          success: true,
+          view,
+          matchedCount: selectedPaths.length,
+          invalidPaths,
+        });
+      }
+
       case "list_hearing_documents": {
         const firmRoot = dirname(caseFolder);
         const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
@@ -1514,7 +1783,8 @@ async function executeTool(
         const indexContent = await readFile(indexPath, "utf-8");
         const index = JSON.parse(indexContent);
 
-        const needsReview: any[] = index.needs_review || [];
+        const rawNeedsReview: any[] = index.needs_review || [];
+        const needsReview: any[] = dedupeNeedsReviewEntries(rawNeedsReview);
 
         if (needsReview.length === 0) {
           return JSON.stringify({
@@ -1586,24 +1856,28 @@ async function executeTool(
 
         for (const resolution of resolutions) {
           const { field, resolved_value, evidence } = resolution;
-          const itemIndex = findFieldIndex(needsReview, field);
-
-          if (itemIndex === -1) {
+          const matchingIndexes = findMatchingFieldIndexes(needsReview, field);
+          if (matchingIndexes.length === 0) {
             failed.push(field);
             continue;
           }
 
-          const resolvedItem = needsReview[itemIndex];
-          const rejectedValues = resolvedItem.conflicting_values?.filter(
-            (v: any) => String(v) !== String(resolved_value)
-          ) || [];
+          const resolvedItems = matchingIndexes.map((idx) => needsReview[idx]);
+          const resolvedField = resolvedItems[0]?.field || field;
+          const rejectedValues = Array.from(new Set(
+            resolvedItems
+              .flatMap((item) => Array.isArray(item?.conflicting_values) ? item.conflicting_values : [])
+              .map((v: any) => String(v))
+              .filter((v) => v !== String(resolved_value))
+          ));
 
-          // Remove from needs_review
-          needsReview.splice(itemIndex, 1);
+          // Remove all matching duplicates from needs_review
+          const indexSet = new Set(matchingIndexes);
+          needsReview = needsReview.filter((_: any, idx: number) => !indexSet.has(idx));
 
           // Add to errata
           errata.push({
-            field,
+            field: resolvedField,
             decision: resolved_value,
             rejected_values: rejectedValues,
             evidence: evidence || "Batch resolution",
@@ -1614,18 +1888,18 @@ async function executeTool(
           // Add to case_notes
           caseNotes.push({
             id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            content: `Resolved ${field}: ${resolved_value}. ${evidence || ""}`.trim(),
-            field_updated: field,
+            content: `Resolved ${resolvedField}: ${resolved_value}. ${evidence || ""}`.trim(),
+            field_updated: resolvedField,
             previous_value: rejectedValues,
             source: "batch_review",
             createdAt: new Date().toISOString()
           });
 
-          resolved.push(field);
+          resolved.push(resolvedField);
 
           // Update summary fields if applicable
-          if (field.startsWith("charges:") && index.summary?.providers) {
-            const providerName = field.replace("charges:", "");
+          if (resolvedField.startsWith("charges:") && index.summary?.providers) {
+            const providerName = resolvedField.replace("charges:", "");
             const numericValue = parseFloat(String(resolved_value).replace(/[$,]/g, ""));
             for (const prov of index.summary.providers) {
               if (typeof prov === "object" && prov.name &&
@@ -1641,23 +1915,25 @@ async function executeTool(
               }
             }
           }
-          if ((field === "date_of_loss" || field === "date_of_injury" || field === "doi" || field === "dol") && index.summary) {
+          if ((resolvedField === "date_of_loss" || resolvedField === "date_of_injury" || resolvedField === "doi" || resolvedField === "dol") && index.summary) {
             index.summary.dol = resolved_value;
             index.summary.incident_date = resolved_value;
           }
-          if ((field === "amw" || field === "aww" || field === "average_monthly_wage") && index.summary) {
+          if ((resolvedField === "amw" || resolvedField === "aww" || resolvedField === "average_monthly_wage") && index.summary) {
             if (!index.summary.disability_status) index.summary.disability_status = {};
             index.summary.disability_status.amw = parseFloat(String(resolved_value).replace(/[$,]/g, "")) || undefined;
           }
-          if ((field === "compensation_rate" || field === "weekly_compensation_rate") && index.summary) {
+          if ((resolvedField === "compensation_rate" || resolvedField === "weekly_compensation_rate") && index.summary) {
             if (!index.summary.disability_status) index.summary.disability_status = {};
             index.summary.disability_status.compensation_rate = parseFloat(String(resolved_value).replace(/[$,]/g, "")) || undefined;
           }
-          if (field.startsWith("claim_numbers:") && index.summary) {
-            const claimKey = field.replace("claim_numbers:", "");
+          if (resolvedField.startsWith("claim_numbers:") && index.summary) {
+            const claimKey = resolvedField.replace("claim_numbers:", "");
             if (!index.summary.claim_numbers) index.summary.claim_numbers = {};
             index.summary.claim_numbers[claimKey] = resolved_value;
           }
+
+          applyResolvedFieldToSummary(index, resolvedField, resolved_value);
         }
 
         index.needs_review = needsReview;
@@ -1690,28 +1966,32 @@ async function executeTool(
 
         // Find the item in needs_review
         const needsReview: any[] = index.needs_review || [];
-        const itemIndex = findFieldIndex(needsReview, field);
+        const matchingIndexes = findMatchingFieldIndexes(needsReview, field);
 
-        if (itemIndex === -1) {
+        if (matchingIndexes.length === 0) {
           return JSON.stringify({
             success: false,
             error: `Field "${field}" not found in needs_review`
           });
         }
 
-        const resolvedItem = needsReview[itemIndex];
-        const rejectedValues = resolvedItem.conflicting_values?.filter(
-          (v: any) => String(v) !== String(resolved_value)
-        ) || [];
+        const resolvedItems = matchingIndexes.map((idx) => needsReview[idx]);
+        const resolvedField = resolvedItems[0]?.field || field;
+        const rejectedValues = Array.from(new Set(
+          resolvedItems
+            .flatMap((item) => Array.isArray(item?.conflicting_values) ? item.conflicting_values : [])
+            .map((v: any) => String(v))
+            .filter((v) => v !== String(resolved_value))
+        ));
 
-        // Remove from needs_review
-        needsReview.splice(itemIndex, 1);
-        index.needs_review = needsReview;
+        // Remove all matching duplicates from needs_review
+        const indexSet = new Set(matchingIndexes);
+        index.needs_review = needsReview.filter((_: any, idx: number) => !indexSet.has(idx));
 
         // Add to errata
         const errata: any[] = index.errata || [];
         const errataEntry = {
-          field,
+          field: resolvedField,
           decision: resolved_value,
           rejected_values: rejectedValues,
           evidence: evidence || "User confirmed correct value",
@@ -1725,8 +2005,8 @@ async function executeTool(
         let caseNotes: any[] = Array.isArray(index.case_notes) ? index.case_notes : [];
         caseNotes.push({
           id: `note-${Date.now()}`,
-          content: `Resolved ${field}: ${resolved_value} (was conflicting: ${rejectedValues.join(", ")}). ${evidence || ""}`.trim(),
-          field_updated: field,
+          content: `Resolved ${resolvedField}: ${resolved_value} (was conflicting: ${rejectedValues.join(", ")}). ${evidence || ""}`.trim(),
+          field_updated: resolvedField,
           previous_value: rejectedValues,
           source: "chat_review",
           createdAt: new Date().toISOString()
@@ -1737,8 +2017,8 @@ async function executeTool(
         let summaryUpdated = false;
 
         // For charges fields, update provider and total
-        if (field.startsWith("charges:") && index.summary?.providers) {
-          const providerName = field.replace("charges:", "");
+        if (resolvedField.startsWith("charges:") && index.summary?.providers) {
+          const providerName = resolvedField.replace("charges:", "");
           const numericValue = parseFloat(String(resolved_value).replace(/[$,]/g, ""));
 
           const providers = index.summary.providers;
@@ -1763,27 +2043,27 @@ async function executeTool(
         }
 
         // For date_of_loss or date_of_injury, update summary date fields
-        if ((field === "date_of_loss" || field === "date_of_injury" || field === "doi" || field === "dol") && index.summary) {
+        if ((resolvedField === "date_of_loss" || resolvedField === "date_of_injury" || resolvedField === "doi" || resolvedField === "dol") && index.summary) {
           index.summary.dol = resolved_value;
           index.summary.incident_date = resolved_value;
           summaryUpdated = true;
         }
 
         // For AMW/compensation_rate, update disability_status
-        if ((field === "amw" || field === "aww" || field === "average_monthly_wage") && index.summary) {
+        if ((resolvedField === "amw" || resolvedField === "aww" || resolvedField === "average_monthly_wage") && index.summary) {
           if (!index.summary.disability_status) index.summary.disability_status = {};
           index.summary.disability_status.amw = parseFloat(String(resolved_value).replace(/[$,]/g, "")) || undefined;
           summaryUpdated = true;
         }
-        if ((field === "compensation_rate" || field === "weekly_compensation_rate") && index.summary) {
+        if ((resolvedField === "compensation_rate" || resolvedField === "weekly_compensation_rate") && index.summary) {
           if (!index.summary.disability_status) index.summary.disability_status = {};
           index.summary.disability_status.compensation_rate = parseFloat(String(resolved_value).replace(/[$,]/g, "")) || undefined;
           summaryUpdated = true;
         }
 
         // For claim_numbers, update summary
-        if (field.startsWith("claim_numbers:") && index.summary) {
-          const claimKey = field.replace("claim_numbers:", "");
+        if (resolvedField.startsWith("claim_numbers:") && index.summary) {
+          const claimKey = resolvedField.replace("claim_numbers:", "");
           if (!index.summary.claim_numbers) {
             index.summary.claim_numbers = {};
           }
@@ -1791,17 +2071,19 @@ async function executeTool(
           summaryUpdated = true;
         }
 
+        summaryUpdated = applyResolvedFieldToSummary(index, resolvedField, resolved_value) || summaryUpdated;
+
         // Write updated index
         await writeFile(indexPath, JSON.stringify(index, null, 2));
 
         return JSON.stringify({
           success: true,
-          field,
+          field: resolvedField,
           resolved_value,
           rejected_values: rejectedValues,
-          remaining_conflicts: needsReview.length,
+          remaining_conflicts: index.needs_review.length,
           summary_updated: summaryUpdated,
-          message: `Resolved "${field}" to "${resolved_value}". ${needsReview.length} conflict(s) remaining.`
+          message: `Resolved "${resolvedField}" to "${resolved_value}". ${index.needs_review.length} conflict(s) remaining.`
         });
       }
 
@@ -1926,7 +2208,8 @@ const DOC_TYPE_NAMES: Record<DocumentType, string> = {
   demand_letter: "demand letter",
   case_memo: "case memo",
   settlement: "settlement calculation",
-  general_letter: "letter"
+  general_letter: "letter",
+  decision_order: "Decision & Order"
 };
 
 // System prompt for direct chat (context gets appended)
@@ -1940,7 +2223,7 @@ const BASE_SYSTEM_PROMPT = `You are a helpful legal assistant for a Nevada injur
 
 3. **Update Case Data**: Use update_index when the user provides corrections or new information about a case.
 
-4. **Generate Documents**: When the user asks you to draft, write, create, or generate a formal document (demand letter, case memo, settlement calculation, letter), use the generate_document tool. This delegates to a specialized agent with access to firm templates that will create a complete, professional document.
+4. **Generate Documents**: When the user asks you to draft, write, create, or generate a formal document (demand letter, case memo, settlement calculation, letter, or Decision & Order), use the generate_document tool. This delegates to a specialized agent with access to firm templates that will create a complete, professional document.
 
 ## WHEN TO USE generate_document
 
@@ -1949,6 +2232,7 @@ Use this tool when the user wants a NEW document created:
 - "Write up a case memo"
 - "Create a settlement breakdown"
 - "Prepare a letter of protection"
+- "Draft an Appeals Officer Decision & Order"
 
 Do NOT use it for:
 - Questions about what should go in a document
@@ -1970,9 +2254,25 @@ Use read_file instead for:
 - Quick lookups on text or JSON files
 - Files you already know are simple text
 
-6. **Review Document Conflicts**: When the user wants to review conflicts, use get_conflicts to get all items, analyze them, make recommendations, and present them in batches for approval.
+6. **Create Document Panel Views**: When the user asks to show a specific subset of documents in the panel (for example medical records, provider-specific notes, hearing notices, chronological sets), use create_document_view with explicit paths from the index.
 
-7. **Build Hearing Evidence Packets**: Use a strict two-pass workflow:
+## WHEN TO USE create_document_view
+
+Use this tool when the user asks for commands like:
+- "Show all medical records"
+- "Show doctor's notes from Dr. Smith"
+- "Show hearing notices in date order"
+- "Show me only recent treatment records"
+
+Requirements:
+- Use explicit documents[].path values that exist in .pi_tool/document_index.json.
+- Prefer meaningful name and a short description.
+- Set sort_by / sort_direction when the user requests ordering (e.g., chronological).
+- After creating the view, explain what you selected and why in normal chat text.
+
+7. **Review Document Conflicts**: When the user wants to review conflicts, use get_conflicts to get all items, analyze them, make recommendations, and present them in batches for approval.
+
+8. **Build Hearing Evidence Packets**: Use a strict two-pass workflow:
 - Pass 1 (agent planning): call list_hearing_documents, then choose and order documents according to knowledge rules.
 - Pass 2 (deterministic build): call build_evidence_packet with your explicit ordered documents list.
 
@@ -2067,7 +2367,7 @@ export async function* directChat(
   message: string,
   history: ChatMessage[] = [],
   options?: { lockOwner?: string; lockDisplayName?: string }
-): AsyncGenerator<{ type: string; content?: string; tool?: string; done?: boolean; usage?: any; filePath?: string }> {
+): AsyncGenerator<{ type: string; content?: string; tool?: string; done?: boolean; usage?: any; filePath?: string; view?: AgentDocumentView }> {
 
   // Build context and include it in the system prompt
   const context = await buildContext(caseFolder);
@@ -2240,6 +2540,12 @@ export async function* directChat(
         // Regular tool execution
         yield { type: "tool_executing", tool: toolUse.name };
         const result = await executeTool(toolUse.name, toolUse.input, caseFolder);
+        if (toolUse.name === "create_document_view") {
+          const parsed = safeJsonParse<{ success?: boolean; view?: AgentDocumentView }>(result);
+          if (parsed?.success && parsed.view) {
+            yield { type: "document_view", view: parsed.view };
+          }
+        }
         if (toolUse.name === "create_evidence_packet" || toolUse.name === "build_evidence_packet") {
           const parsed = safeJsonParse<{ outputPath?: string; success?: boolean }>(result);
           if (parsed?.success && parsed.outputPath) {

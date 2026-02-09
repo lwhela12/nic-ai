@@ -27,7 +27,12 @@ function getClient(): Anthropic {
 }
 
 // Document types we can generate
-export type DocumentType = "demand_letter" | "case_memo" | "settlement" | "general_letter";
+export type DocumentType =
+  | "demand_letter"
+  | "case_memo"
+  | "settlement"
+  | "general_letter"
+  | "decision_order";
 
 export interface DocGenResult {
   success: boolean;
@@ -390,7 +395,42 @@ function buildSystemPrompt(
     demand_letter: "a demand letter to the at-fault party's insurance carrier",
     case_memo: "an internal case memorandum summarizing the case",
     settlement: "a settlement calculation and disbursement breakdown",
-    general_letter: "a professional letter related to the case"
+    general_letter: "a professional letter related to the case",
+    decision_order: "a workers' compensation hearing Decision & Order for filing",
+  };
+
+  const docTypeSpecificInstructions: Record<DocumentType, string> = {
+    demand_letter: `
+Demand-letter specific requirements:
+- Follow demand template language closely when available.
+- Include provider-by-provider specials with totals.
+- Make sure demand amount/policy-limits framing is explicitly stated.`,
+    case_memo: `
+Case-memo specific requirements:
+- Include case posture, major facts, treatment summary, financial snapshot, and open issues.
+- Keep it internal-facing and analytical.`,
+    settlement: `
+Settlement specific requirements:
+- Show clear arithmetic for all inflows/outflows.
+- Include assumptions and flags where figures are uncertain.`,
+    general_letter: `
+General-letter specific requirements:
+- Keep formal business-letter formatting.
+- Keep requests, deadlines, and asks explicit.`,
+    decision_order: `
+Decision & Order specific requirements:
+- This is a post-hearing legal filing style document, not a letter.
+- Use this core structure:
+  1) Caption / case heading
+  2) Introductory hearing/procedural paragraph(s)
+  3) Exhibits admitted (if known)
+  4) FINDINGS OF FACT (numbered)
+  5) CONCLUSIONS OF LAW (numbered, statute/case citations when supported)
+  6) ORDER (numbered decretal rulings tied to appealed issues)
+  7) Signature / submission block (if requested)
+- Ground every finding and legal conclusion in case documents/index data; do not invent facts, holdings, dates, or citations.
+- If critical filing detail is missing (appeal no., claim no., hearing date, AO name), insert a clear [VERIFY: ...] placeholder rather than guessing.
+- Default draft filename for this type: decision_and_order.md`,
   };
 
   return `You are a legal document drafting assistant for a Personal Injury law firm. Your task is to generate ${docTypeDescriptions[docType]}.
@@ -419,6 +459,10 @@ ${templates}
 5. Draft the document following the template structure
 6. Fill in all placeholders with actual case data
 7. Use write_draft to save the final document
+
+## DOCUMENT-SPECIFIC REQUIREMENTS
+
+${docTypeSpecificInstructions[docType]}
 
 IMPORTANT:
 - Follow the template structure closely
@@ -584,6 +628,7 @@ export function detectDocGenIntent(message: string): { type: DocumentType; promp
   const patterns: Array<{ keywords: string[]; type: DocumentType }> = [
     { keywords: ["demand letter", "demand"], type: "demand_letter" },
     { keywords: ["case memo", "memo", "memorandum"], type: "case_memo" },
+    { keywords: ["decision and order", "decision & order", "appeals officer decision", "hearing decision", "dao"], type: "decision_order" },
     { keywords: ["settlement", "disbursement", "calculation"], type: "settlement" },
     { keywords: ["letter"], type: "general_letter" }
   ];

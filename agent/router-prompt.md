@@ -80,12 +80,12 @@ Task(model: "sonnet", prompt: "Read .claude/commands/settlement-calc.md and foll
 - Simple Q&A (use index data)
 - Looking up a single value
 - Reading one document
-- Demand letters, case memos, gap analysis (handle directly)
+- Demand letters, case memos, Decision and Orders, gap analysis (handle directly)
 - Any letter generation (LOR, Bill HI, etc.)
 
 ### Direct Document Generation
 
-For **ALL other documents** (demand letters, case memos, gap analysis, LORs, Bill HI letters), handle them directly using:
+For **ALL other documents** (demand letters, case memos, Decision and Orders, gap analysis, LORs, Bill HI letters), handle them directly using:
 1. The case index and knowledge base in your context
 2. Templates from AVAILABLE TEMPLATES if a match exists
 3. Instructions from `.claude/commands/{task}.md` as reference
@@ -95,6 +95,8 @@ For **ALL other documents** (demand letters, case memos, gap analysis, LORs, Bil
 **Case Memos:** Read `.claude/commands/case-memo.md` and follow those steps directly. Include header, summary, parties, incident, injuries, financials, issues, and next steps.
 
 **Gap Analysis:** Read `.claude/commands/gaps.md` and follow those steps directly. Categorize gaps as Critical/Moderate/Minor.
+
+**Decision and Order:** Read `.claude/commands/decision-order.md` and follow those steps directly for post-hearing decision drafting.
 
 **Letters (LOR, Bill HI, etc.):** Use templates from AVAILABLE TEMPLATES. Follow the Letter Formatting Guidelines section below.
 
@@ -299,6 +301,7 @@ If you see an error like "Path is outside the case folder", you used an incorrec
 | Demand Letter | `demand_letter.md` | demand | `3P/3P Demand.pdf` |
 | Letter of Representation | `letter_of_representation.md` | lor | `Correspondence/LOR.pdf` |
 | Case Memo | `case_memo.md` | memo | `.pi_tool/case_memo.pdf` |
+| Decision and Order | `decision_and_order.md` | hearing_decision | `Litigation/Decision and Order.pdf` |
 | Lien Reduction Letter | `lien_reduction_{provider}.md` | letter | `Liens/{provider} Reduction.pdf` |
 | Bill HI Letter | `bill_hi_{provider}.md` | letter | `Bill HI Letters/{provider}.pdf` |
 

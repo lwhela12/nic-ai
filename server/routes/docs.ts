@@ -8,6 +8,7 @@ import {
   markdownToHtml,
   htmlToDocx,
   htmlToPdf,
+  markdownToHearingDecisionPdf,
   loadFirmInfo,
   ExportOptions,
 } from "../lib/export";
@@ -32,6 +33,31 @@ async function loadTemplateStyles(firmRoot: string): Promise<DocxStyles | undefi
     // No template styles found, return undefined
     return undefined;
   }
+}
+
+async function resolveCaseName(caseFolder: string, providedCaseName?: string): Promise<string | undefined> {
+  const direct = typeof providedCaseName === "string" ? providedCaseName.trim() : "";
+  if (direct) return direct;
+
+  try {
+    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexContent = await readFile(indexPath, "utf-8");
+    const index = JSON.parse(indexContent);
+
+    const fromSummary = typeof index?.summary?.client === "string"
+      ? index.summary.client.trim()
+      : "";
+    if (fromSummary) return fromSummary;
+
+    const fromSummaryAlt = typeof index?.summary?.client_name === "string"
+      ? index.summary.client_name.trim()
+      : "";
+    if (fromSummaryAlt) return fromSummaryAlt;
+  } catch {
+    // No index or unreadable index; fall through
+  }
+
+  return undefined;
 }
 
 const app = new Hono();
@@ -222,19 +248,20 @@ app.post("/export", async (c) => {
     // Show letterhead by default for demands and letters, or if explicitly requested
     // Don't show for memos (internal documents)
     const shouldShowLetterhead = showLetterhead ?? (inferredType === "demand" || inferredType === "letter");
+    const resolvedCaseName = await resolveCaseName(caseFolder, caseName);
+
     const exportOptions: ExportOptions = {
       documentType: inferredType,
       firmInfo: firmInfo || undefined,
-      caseName,
+      caseName: resolvedCaseName,
       showLetterhead: shouldShowLetterhead,
       showPageNumbers: showPageNumbers ?? inferredType !== "memo",
       templateStyles,
     };
     console.log(`[Export] exportOptions: showLetterhead=${exportOptions.showLetterhead}, documentType=${inferredType}, hasFirmInfo=${!!exportOptions.firmInfo}`);
 
-    const html = markdownToHtml(content, exportOptions);
-
     if (format === "docx") {
+      const html = markdownToHtml(content, exportOptions);
       const docxBuffer = await htmlToDocx(html, nameWithoutExt, {
         documentType: inferredType,
         firmInfo: firmInfo || undefined,
@@ -242,7 +269,9 @@ app.post("/export", async (c) => {
       });
       await writeFile(fullOutputPath, docxBuffer);
     } else {
-      const pdfBuffer = await htmlToPdf(html, nameWithoutExt, exportOptions);
+      const pdfBuffer = inferredType === "hearing_decision"
+        ? await markdownToHearingDecisionPdf(content, nameWithoutExt, exportOptions)
+        : await htmlToPdf(markdownToHtml(content, exportOptions), nameWithoutExt, exportOptions);
       await writeFile(fullOutputPath, pdfBuffer);
     }
 
@@ -287,6 +316,15 @@ function inferTypeFromPath(path: string): ExportOptions["documentType"] {
   if (lower.includes("demand")) return "demand";
   if (lower.includes("settlement")) return "settlement";
   if (lower.includes("memo")) return "memo";
+  if (
+    lower.includes("decision_and_order") ||
+    lower.includes("decision and order") ||
+    lower.includes("decision & order") ||
+    lower.includes("decision_order") ||
+    lower.includes("hearing_decision") ||
+    lower.includes("d&o") ||
+    lower.includes("dao")
+  ) return "hearing_decision";
   // Letter types: Bill HI, LOR, correspondence, requests, notices
   // Workers' Comp letters: light duty request, TTD request, authorization request, etc.
   if (lower.includes("bill_hi") || lower.includes("bill hi") ||
@@ -332,10 +370,12 @@ app.get("/download", async (c) => {
 
     // Show letterhead for demands and letters by default
     const shouldShowLetterhead = showLetterhead && (documentType === "demand" || documentType === "letter");
+    const resolvedCaseName = await resolveCaseName(caseFolder, caseName || undefined);
+
     const exportOptions: ExportOptions = {
       documentType,
       firmInfo: firmInfo || undefined,
-      caseName: caseName || undefined,
+      caseName: resolvedCaseName,
       showLetterhead: shouldShowLetterhead,
       showPageNumbers: showPageNumbers && documentType !== "memo",
       templateStyles,
@@ -360,8 +400,9 @@ app.get("/download", async (c) => {
         return c.body(docxBuffer);
       }
       case "pdf": {
-        const html = markdownToHtml(content, exportOptions);
-        const pdfBuffer = await htmlToPdf(html, nameWithoutExt, exportOptions);
+        const pdfBuffer = documentType === "hearing_decision"
+          ? await markdownToHearingDecisionPdf(content, nameWithoutExt, exportOptions)
+          : await htmlToPdf(markdownToHtml(content, exportOptions), nameWithoutExt, exportOptions);
         c.header("Content-Type", "application/pdf");
         c.header(
           "Content-Disposition",
@@ -447,6 +488,16 @@ function inferTypeFromFilename(id: string): string {
   if (id.includes("demand")) return "demand";
   if (id.includes("memo")) return "memo";
   if (id.includes("settlement")) return "settlement";
+  if (
+    id.includes("decision_and_order") ||
+    id.includes("decision_order") ||
+    id.includes("decision & order") ||
+    id.includes("d&o") ||
+    id.includes("decision") ||
+    id.includes("dao")
+  ) {
+    return "hearing_decision";
+  }
   // Letter types: Bill HI, LOR, correspondence letters
   if (id.includes("bill_hi") || id.includes("lor") ||
       id.includes("letter_of_representation") || id.includes("letter")) return "letter";
@@ -461,6 +512,8 @@ function inferTargetPath(id: string, type: string): string {
       return "Settlement/Settlement Memo.pdf";
     case "memo":
       return ".pi_tool/case_memo.pdf";
+    case "hearing_decision":
+      return "Litigation/Decision and Order.pdf";
     default:
       return `${id}.pdf`;
   }
@@ -510,18 +563,7 @@ app.post("/approve", async (c) => {
     const firmInfoRoot = firmRoot || dirname(caseFolder);
     const firmInfo = await loadFirmInfo(firmInfoRoot);
 
-    // Try to get client name from document index for header
-    let clientName = caseName;
-    if (!clientName) {
-      try {
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
-        const indexContent = await readFile(indexPath, "utf-8");
-        const documentIndex = JSON.parse(indexContent);
-        clientName = documentIndex?.summary?.client;
-      } catch {
-        // No index, that's fine
-      }
-    }
+    const clientName = await resolveCaseName(caseFolder, caseName);
 
     // 4. Load template styles if available
     const templateStyles = await loadTemplateStyles(firmInfoRoot);
@@ -538,13 +580,12 @@ app.post("/approve", async (c) => {
       templateStyles,
     };
 
-    const html = markdownToHtml(content, exportOptions);
-
     // 5. Ensure output directory exists
     await mkdir(dirname(fullOutputPath), { recursive: true });
 
     // 6. Convert and save
     if (format === "docx") {
+      const html = markdownToHtml(content, exportOptions);
       const nameWithoutExt = basename(outputPath).replace(/\.[^/.]+$/, "");
       const docxBuffer = await htmlToDocx(html, nameWithoutExt, {
         documentType,
@@ -554,7 +595,9 @@ app.post("/approve", async (c) => {
       await writeFile(fullOutputPath, docxBuffer);
     } else {
       const nameWithoutExt = basename(outputPath).replace(/\.[^/.]+$/, "");
-      const pdfBuffer = await htmlToPdf(html, nameWithoutExt, exportOptions);
+      const pdfBuffer = documentType === "hearing_decision"
+        ? await markdownToHearingDecisionPdf(content, nameWithoutExt, exportOptions)
+        : await htmlToPdf(markdownToHtml(content, exportOptions), nameWithoutExt, exportOptions);
       await writeFile(fullOutputPath, pdfBuffer);
     }
 

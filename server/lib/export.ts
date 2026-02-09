@@ -14,13 +14,14 @@ import {
   ImageRun,
 } from "docx";
 import puppeteer from "puppeteer";
+import { PDFDocument, StandardFonts, type PDFFont, rgb, degrees } from "pdf-lib";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import type { DocxStyles } from "./extract";
 
 // Export options interface for customization
 export interface ExportOptions {
-  documentType?: "demand" | "settlement" | "memo" | "letter" | "generic";
+  documentType?: "demand" | "settlement" | "memo" | "letter" | "hearing_decision" | "generic";
   firmInfo?: FirmInfo;
   caseName?: string;
   showPageNumbers?: boolean;
@@ -180,10 +181,26 @@ function generateLetterheadHtml(firmInfo: FirmInfo): string {
 <!-- LETTERHEAD_END -->`;
 }
 
+function generatePleadingFirmRailHtml(firmInfo?: FirmInfo): string {
+  if (!firmInfo) return "";
+
+  const pieces: string[] = [];
+  if (firmInfo.name) pieces.push(firmInfo.name.toUpperCase());
+  if (firmInfo.address) pieces.push(firmInfo.address);
+  if (firmInfo.cityStateZip) pieces.push(firmInfo.cityStateZip);
+  if (firmInfo.phone) pieces.push(firmInfo.phone);
+  if (firmInfo.fax) pieces.push(`FAX ${firmInfo.fax}`);
+
+  if (pieces.length === 0) return "";
+
+  return `<div class="pleading-firm-rail">${pieces.join(" | ")}</div>`;
+}
+
 // Convert markdown to HTML with legal document styling
 export function markdownToHtml(markdown: string, options: ExportOptions = {}): string {
   const html = marked.parse(markdown, { async: false, breaks: true, gfm: true }) as string;
   const styles = options.templateStyles;
+  const isPleadingPaper = options.documentType === "hearing_decision";
 
   const showLetterhead = options.showLetterhead && options.firmInfo;
   console.log(`[Export] markdownToHtml: showLetterhead option=${options.showLetterhead}, hasFirmInfo=${!!options.firmInfo}, result=${showLetterhead}`);
@@ -334,6 +351,159 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
     `
     : "";
 
+  const pleadingLinesHtml = Array.from({ length: 28 }, (_, idx) => {
+    const lineNumber = idx + 1;
+    return `<div class="pleading-line-number">${lineNumber}</div>`;
+  }).join("\n");
+
+  const pleadingCss = isPleadingPaper
+    ? `
+    body.pleading-paper {
+      max-width: none;
+      padding: 0;
+      margin: 0;
+    }
+    .pleading-page {
+      position: relative;
+      min-height: 10.5in;
+      padding: 0.72in 0.65in 0.72in 0.94in;
+      box-sizing: border-box;
+    }
+    .pleading-frame {
+      position: fixed;
+      left: 0.84in;
+      right: 0.34in;
+      top: 0.34in;
+      bottom: 0.58in;
+      border: 1px solid #3a3a3a;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .pleading-gutter {
+      position: fixed;
+      top: 1.05in;
+      bottom: 0.86in;
+      left: 0.14in;
+      width: 0.54in;
+      display: grid;
+      grid-template-rows: repeat(28, minmax(0, 1fr));
+      justify-items: end;
+      align-items: start;
+      z-index: 1;
+      pointer-events: none;
+      color: #111;
+      font-size: 9.5pt;
+      line-height: 1;
+    }
+    .pleading-gutter::after {
+      content: "";
+      position: absolute;
+      right: -0.08in;
+      top: -0.72in;
+      bottom: -0.26in;
+      border-right: 1px solid #000;
+    }
+    .pleading-line-number {
+      padding-right: 0.09in;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .pleading-firm-rail {
+      position: fixed;
+      left: 0.03in;
+      top: 50%;
+      transform: translateY(-50%) rotate(180deg);
+      writing-mode: vertical-rl;
+      font-size: 8pt;
+      line-height: 1.25;
+      color: #2b2b2b;
+      white-space: nowrap;
+      z-index: 1;
+      pointer-events: none;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      text-transform: uppercase;
+    }
+    .pleading-content {
+      position: relative;
+      z-index: 2;
+    }
+    .pleading-content h1 {
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      margin-top: 2pt;
+      margin-bottom: 8pt;
+      font-size: 13pt;
+      border-bottom: none;
+    }
+    .pleading-content h2 {
+      text-transform: uppercase;
+      font-variant: normal;
+      text-align: center;
+      border-bottom: none;
+      margin-top: 10pt;
+      margin-bottom: 6pt;
+      padding-bottom: 0;
+      font-size: 12pt;
+    }
+    .pleading-content h3 {
+      font-variant: normal;
+      text-transform: uppercase;
+      margin-top: 8pt;
+      margin-bottom: 4pt;
+      font-size: 11.5pt;
+    }
+    .pleading-content p {
+      text-indent: 0;
+      text-align: left;
+      margin: 6pt 0;
+      line-height: 1.38;
+    }
+    .pleading-content ul,
+    .pleading-content ol {
+      margin: 6pt 0;
+      padding-left: 24pt;
+    }
+    .pleading-content li {
+      margin: 3pt 0;
+    }
+    .pleading-content table {
+      border-collapse: collapse;
+      margin: 8pt 0;
+      font-size: 11pt;
+    }
+    .pleading-content th,
+    .pleading-content td {
+      border: 1px solid #444;
+      padding: 5px 7px;
+      background: transparent;
+    }
+    .pleading-content hr {
+      display: none;
+    }
+    `
+    : "";
+
+  const bodyClass = isPleadingPaper ? "pleading-paper" : "";
+  const pleadingFirmRailHtml = isPleadingPaper ? generatePleadingFirmRailHtml(options.firmInfo) : "";
+  const contentHtml = isPleadingPaper
+    ? `
+    <div class="pleading-frame" aria-hidden="true"></div>
+    <div class="pleading-gutter" aria-hidden="true">
+      ${pleadingLinesHtml}
+    </div>
+    ${pleadingFirmRailHtml}
+    <div class="pleading-page">
+      <div class="pleading-content">
+        ${html}
+      </div>
+    </div>
+    `
+    : `
+    ${letterheadHtml}
+    ${html}
+    `;
+
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -436,6 +606,7 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
     ${letterheadCss}
     ${letterCss}
     ${demandCss}
+    ${pleadingCss}
     @page {
       size: letter;
       margin: ${margins.top}in ${margins.right}in ${margins.bottom}in ${margins.left}in;
@@ -447,16 +618,15 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
     }
   </style>
 </head>
-<body>
-  ${letterheadHtml}
-  ${html}
+<body class="${bodyClass}">
+  ${contentHtml}
 </body>
 </html>`;
 }
 
 // Options for DOCX conversion
 export interface DocxConvertOptions {
-  documentType?: "demand" | "settlement" | "memo" | "letter" | "generic";
+  documentType?: "demand" | "settlement" | "memo" | "letter" | "hearing_decision" | "generic";
   firmInfo?: FirmInfo;
   showLetterhead?: boolean;
 }
@@ -641,6 +811,7 @@ export async function htmlToDocx(
 ): Promise<Buffer> {
   const isLetter = options?.documentType === "letter";
   const isDemand = options?.documentType === "demand";
+  const isHearingDecision = options?.documentType === "hearing_decision";
   const isCleanFormat = isLetter || isDemand; // Both use clean formatting without decorative styles
   // Parse the HTML body content
   const bodyMatch = html.match(/<body[^>]*>([\s\S]*)<\/body>/i);
@@ -903,7 +1074,7 @@ export async function htmlToDocx(
               top: 1440, // 1 inch in twips
               right: 1440,
               bottom: 1440,
-              left: 1440,
+              left: isHearingDecision ? 1872 : 1440, // 1.3in left margin for pleading-paper style docs
             },
           },
         },
@@ -916,6 +1087,717 @@ export async function htmlToDocx(
   return Buffer.from(buffer);
 }
 
+interface HearingDecisionLayoutData {
+  filingStamp?: string;
+  agencyLine: string;
+  officerLine: string;
+  claimantName: string;
+  claimNumber?: string;
+  hearingNumber?: string;
+  appealNumbers: string[];
+  bodyMarkdown: string;
+}
+
+type HearingDecisionBlock =
+  | { kind: "heading"; text: string; level: number }
+  | { kind: "paragraph"; text: string }
+  | { kind: "list_item"; text: string; marker: string }
+  | { kind: "spacer"; lines: number };
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ");
+}
+
+function cleanInlineMarkdown(value: string): string {
+  return decodeHtmlEntities(
+    value
+      .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/[*_~]+/g, "")
+      .replace(/<[^>]+>/g, "")
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isPlaceholderValue(value: string): boolean {
+  const line = cleanInlineMarkdown(value);
+  if (!line) return true;
+  return (
+    /^\[[^\]]+\],?$/.test(line) ||
+    /\bclaimant\s*name\b/i.test(line) ||
+    /\bverify\b/i.test(line) ||
+    /\bplaceholder\b/i.test(line)
+  );
+}
+
+function isCaptionDescriptor(value: string): boolean {
+  const line = cleanInlineMarkdown(value).toLowerCase();
+  return (
+    line.includes("industrial insurance claim of") ||
+    line.includes("in the matter of") ||
+    line.includes("state of nevada") ||
+    line.includes("department of administration") ||
+    line.includes("before the appeals officer") ||
+    line.includes("before the hearing officer") ||
+    line.includes("decision & order") ||
+    line.includes("decision and order")
+  );
+}
+
+function isFieldLine(value: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9\s/&.'()-]{1,40}:\s*/.test(value.trim());
+}
+
+function parseSingleValueField(lines: string[], regexes: RegExp[]): string | undefined {
+  for (const line of lines) {
+    for (const regex of regexes) {
+      const match = line.match(regex);
+      if (match?.[1]) {
+        const cleaned = cleanInlineMarkdown(match[1]);
+        if (cleaned && !isPlaceholderValue(cleaned)) return cleaned;
+      }
+    }
+  }
+  return undefined;
+}
+
+function parseAppealNumbers(lines: string[]): string[] {
+  const values: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const match = line.match(/^\s*Appeal\s*No(?:s)?\.?\s*:\s*(.*)$/i);
+    if (!match) continue;
+
+    const current = match[1]?.trim();
+    if (current) values.push(current);
+
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const next = lines[j].trim();
+      if (!next) break;
+      if (isFieldLine(next)) break;
+      if (!/[0-9]/.test(next)) break;
+      values.push(next);
+      i = j;
+    }
+  }
+
+  return values
+    .flatMap((entry) => entry.split(","))
+    .map((entry) => cleanInlineMarkdown(entry))
+    .filter(Boolean);
+}
+
+function extractClaimantName(lines: string[], fallback?: string): string {
+  for (let i = 0; i < lines.length; i += 1) {
+    const current = lines[i].trim();
+    if (!/^claimant\.?$/i.test(current)) continue;
+
+    for (let j = i - 1; j >= 0; j -= 1) {
+      const prior = cleanInlineMarkdown(lines[j]);
+      if (!prior) continue;
+      if (isFieldLine(prior)) continue;
+      if (/^in the matter of/i.test(prior)) continue;
+      if (isPlaceholderValue(prior)) continue;
+      if (isCaptionDescriptor(prior)) continue;
+      return prior.replace(/[,.;:]$/, "");
+    }
+  }
+
+  const claimBlock = lines.join("\n");
+  const claimRegex = /claim(?:\s+of|\s*:\s*)\s*\n*\s*([^\n]+)/ig;
+  let match: RegExpExecArray | null;
+  while ((match = claimRegex.exec(claimBlock)) !== null) {
+    const candidate = cleanInlineMarkdown(match[1]).replace(/[,.;:]$/, "");
+    if (candidate && !isPlaceholderValue(candidate) && !isCaptionDescriptor(candidate)) return candidate;
+  }
+
+  const fallbackClean = cleanInlineMarkdown(fallback || "");
+  if (fallbackClean && !isPlaceholderValue(fallbackClean)) return fallbackClean;
+
+  for (const line of lines) {
+    const candidate = cleanInlineMarkdown(line).replace(/[,.;:]$/, "");
+    if (!candidate || isPlaceholderValue(candidate)) continue;
+    if (isCaptionDescriptor(candidate)) continue;
+    if (/^[A-Z][A-Z\s.'-]{4,}$/.test(candidate) && !isFieldLine(candidate)) {
+      return candidate;
+    }
+  }
+
+  return "[CLAIMANT NAME]";
+}
+
+function isCaptionNoiseLine(value: string): boolean {
+  const line = value.trim();
+  if (!line) return true;
+
+  return (
+    /^#*\s*decision\s*(?:&|and)\s*order\s*$/i.test(line) ||
+    /^electronic(?:ally)? filed/i.test(line) ||
+    /^state of nevada$/i.test(line) ||
+    /^state of nevada.*department of administration/i.test(line) ||
+    /^nevada department of administration$/i.test(line) ||
+    /^nevada department of administration.*hearings division/i.test(line) ||
+    /^department of administration$/i.test(line) ||
+    /^before the (?:appeals|hearing) officer$/i.test(line) ||
+    /^issue before the (?:appeals|hearing) officer$/i.test(line) ||
+    /^hearings division$/i.test(line) ||
+    /^in the matter of/i.test(line) ||
+    /^industrial insurance claim of/i.test(line) ||
+    /^claimant\.?$/i.test(line) ||
+    /^employer\.?$/i.test(line) ||
+    /^insurer\/tpa\.?$/i.test(line) ||
+    /^\[[^\]]+\],?$/.test(line) ||
+    /^claim no\.?:/i.test(line) ||
+    /^claim number:/i.test(line) ||
+    /^appeal no(?:s)?\.?:/i.test(line) ||
+    /^hearing no\.?:/i.test(line) ||
+    /^hearing number:/i.test(line) ||
+    /^vs\.?$/i.test(line) ||
+    /^and$/i.test(line) ||
+    /^\)+$/.test(line) ||
+    /^_+$/.test(line)
+  );
+}
+
+function isBodyAnchorLine(value: string): boolean {
+  const line = cleanInlineMarkdown(value);
+  if (!line) return false;
+  return (
+    /^(on|the|after|following|having|based|pursuant)\b/i.test(line) ||
+    /^(findings of fact|conclusions of law|order|procedural history|background|appearances)\b/i.test(line) ||
+    /^(the following documents were admitted into evidence)/i.test(line) ||
+    /^\d+\.\s+/.test(line)
+  );
+}
+
+function removeRepeatedCaptionBody(lines: string[]): string[] {
+  let bodyLines = [...lines];
+
+  while (bodyLines.length > 0 && isCaptionNoiseLine(bodyLines[0])) {
+    bodyLines.shift();
+  }
+
+  const preview = bodyLines.slice(0, 35).map((line) => cleanInlineMarkdown(line));
+  const hasCaptionSignals = preview.some((line) =>
+    /industrial insurance claim of|claimant|employer|insurer\/tpa|state of nevada|department of administration|appeals officer|hearing officer|claim no|appeal nos?/i.test(line)
+  );
+
+  if (hasCaptionSignals) {
+    let cutIndex = -1;
+    for (let i = 0; i < bodyLines.length; i += 1) {
+      if (isBodyAnchorLine(bodyLines[i])) {
+        cutIndex = i;
+        break;
+      }
+    }
+    if (cutIndex > 0) {
+      bodyLines = bodyLines.slice(cutIndex);
+    }
+  }
+
+  while (bodyLines.length > 0 && isCaptionNoiseLine(bodyLines[0])) {
+    bodyLines.shift();
+  }
+
+  return bodyLines;
+}
+
+function extractDecisionBodyMarkdown(lines: string[]): string {
+  const trimmed = lines.map((line) => line.trim());
+
+  const decisionHeading = trimmed.findIndex((line) =>
+    /^(#{1,6}\s*)?decision\s*(?:&|and)\s*order\b/i.test(line)
+  );
+
+  const firstBodyHeading = trimmed.findIndex((line) =>
+    /^(#{1,6}\s*)?(findings of fact|conclusions of law|order|procedural history|background)\b/i.test(line)
+  );
+
+  let start = 0;
+  if (decisionHeading >= 0) {
+    start = decisionHeading + 1;
+  } else if (firstBodyHeading >= 0) {
+    start = firstBodyHeading;
+  } else {
+    const narrativeStart = trimmed.findIndex((line) => /^(On|The)\s.+/.test(line) && line.length > 32);
+    if (narrativeStart >= 0) start = narrativeStart;
+  }
+
+  const bodyLines = removeRepeatedCaptionBody(lines.slice(Math.max(0, start)));
+
+  const body = bodyLines.join("\n").trim();
+  return body || lines.join("\n").trim();
+}
+
+function parseHearingDecisionLayout(markdown: string, options: ExportOptions): HearingDecisionLayoutData {
+  const lines = markdown.replace(/\r/g, "").split("\n");
+  const filingStamp = lines
+    .map((line) => line.trim())
+    .find((line) => /^electronic(?:ally)? filed/i.test(line));
+
+  const agencyLine = lines
+    .map((line) => line.trim())
+    .find((line) => /nevada department of administration/i.test(line))
+    || "NEVADA DEPARTMENT OF ADMINISTRATION";
+
+  let officerLine = lines
+    .map((line) => line.trim())
+    .find((line) => /before the (?:appeals|hearing) officer/i.test(line));
+
+  if (!officerLine) {
+    officerLine = lines.some((line) => /hearings division/i.test(line))
+      ? "HEARINGS DIVISION"
+      : "BEFORE THE APPEALS OFFICER";
+  }
+
+  const normalizedOfficerLine = cleanInlineMarkdown(officerLine);
+  if (/appeals officer/i.test(normalizedOfficerLine)) {
+    officerLine = "BEFORE THE APPEALS OFFICER";
+  } else if (/hearing officer/i.test(normalizedOfficerLine)) {
+    officerLine = "BEFORE THE HEARING OFFICER";
+  } else if (/hearings division/i.test(normalizedOfficerLine)) {
+    officerLine = "HEARINGS DIVISION";
+  } else {
+    officerLine = normalizedOfficerLine || "BEFORE THE APPEALS OFFICER";
+  }
+
+  const claimNumber = parseSingleValueField(lines, [
+    /^\s*Claim\s*No\.?\s*:\s*(.+)$/i,
+    /^\s*Claim\s*Number\s*:\s*(.+)$/i,
+  ]);
+
+  const hearingNumber = parseSingleValueField(lines, [
+    /^\s*Hearing\s*No\.?\s*:\s*(.+)$/i,
+    /^\s*Hearing\s*Number\s*:\s*(.+)$/i,
+  ]);
+
+  const appealNumbers = parseAppealNumbers(lines);
+  const claimantName = extractClaimantName(lines, options.caseName);
+  const bodyMarkdown = extractDecisionBodyMarkdown(lines);
+
+  return {
+    filingStamp,
+    agencyLine: "NEVADA DEPARTMENT OF ADMINISTRATION",
+    officerLine: cleanInlineMarkdown(officerLine).toUpperCase(),
+    claimantName,
+    claimNumber,
+    hearingNumber,
+    appealNumbers,
+    bodyMarkdown,
+  };
+}
+
+function markdownToHearingDecisionBlocks(markdown: string): HearingDecisionBlock[] {
+  const tokens = marked.lexer(markdown, { gfm: true, breaks: true }) as any[];
+  const blocks: HearingDecisionBlock[] = [];
+
+  const addParagraph = (text: string) => {
+    const cleaned = cleanInlineMarkdown(text);
+    if (cleaned) blocks.push({ kind: "paragraph", text: cleaned });
+  };
+
+  for (const token of tokens) {
+    switch (token.type) {
+      case "space":
+        blocks.push({ kind: "spacer", lines: 1 });
+        break;
+      case "heading": {
+        const text = cleanInlineMarkdown(token.text || "");
+        if (text) blocks.push({ kind: "heading", text, level: token.depth || 2 });
+        break;
+      }
+      case "paragraph":
+        addParagraph(token.text || "");
+        break;
+      case "list": {
+        const start = typeof token.start === "number" ? token.start : 1;
+        for (let i = 0; i < token.items.length; i += 1) {
+          const item = token.items[i];
+          const text = cleanInlineMarkdown(item.text || "");
+          if (!text) continue;
+          const marker = token.ordered ? `${start + i}.` : "\u2022";
+          blocks.push({ kind: "list_item", text, marker });
+        }
+        break;
+      }
+      case "blockquote": {
+        const quoteText = cleanInlineMarkdown(token.text || "");
+        if (quoteText) blocks.push({ kind: "paragraph", text: quoteText });
+        break;
+      }
+      case "hr":
+        blocks.push({ kind: "spacer", lines: 1 });
+        break;
+      case "table": {
+        const headers = Array.isArray(token.header)
+          ? token.header.map((cell: string) => cleanInlineMarkdown(cell)).filter(Boolean)
+          : [];
+        if (headers.length > 0) {
+          blocks.push({ kind: "paragraph", text: headers.join(" | ") });
+        }
+        if (Array.isArray(token.rows)) {
+          for (const row of token.rows) {
+            const cells = row.map((cell: string) => cleanInlineMarkdown(cell)).filter(Boolean);
+            if (cells.length > 0) blocks.push({ kind: "paragraph", text: cells.join(" | ") });
+          }
+        }
+        break;
+      }
+      default: {
+        if (typeof token.text === "string") addParagraph(token.text);
+      }
+    }
+  }
+
+  const filtered = blocks.filter((block) => !(block.kind === "paragraph" && isCaptionNoiseLine(block.text)));
+  return filtered.length > 0 ? filtered : [{ kind: "paragraph", text: cleanInlineMarkdown(markdown) }];
+}
+
+function wrapText(font: PDFFont, size: number, text: string, maxWidth: number): string[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [""];
+
+  const lines: string[] = [];
+  let current = "";
+
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) {
+      lines.push(current);
+      current = word;
+      continue;
+    }
+
+    let remaining = word;
+    while (remaining.length > 0) {
+      let chunk = remaining;
+      while (chunk.length > 1 && font.widthOfTextAtSize(chunk, size) > maxWidth) {
+        chunk = chunk.slice(0, -1);
+      }
+      lines.push(chunk);
+      remaining = remaining.slice(chunk.length);
+    }
+    current = "";
+  }
+
+  if (current) lines.push(current);
+  return lines.length > 0 ? lines : [""];
+}
+
+function drawCenteredText(page: any, font: PDFFont, text: string, size: number, y: number): number {
+  const width = page.getWidth();
+  const textWidth = font.widthOfTextAtSize(text, size);
+  const x = (width - textWidth) / 2;
+  page.drawText(text, { x, y, size, font, color: rgb(0, 0, 0) });
+  return x;
+}
+
+function buildFirmRailText(firmInfo?: FirmInfo): string | undefined {
+  if (!firmInfo) return undefined;
+
+  const parts: string[] = [];
+  if (firmInfo.name) parts.push(firmInfo.name.toUpperCase());
+  if (firmInfo.address) parts.push(firmInfo.address);
+  if (firmInfo.cityStateZip) parts.push(firmInfo.cityStateZip);
+  if (firmInfo.phone) parts.push(firmInfo.phone);
+  if (firmInfo.fax) parts.push(`FAX ${firmInfo.fax}`);
+  return parts.length > 0 ? parts.join(" | ") : undefined;
+}
+
+function drawPleadingPaperPage(
+  page: any,
+  options: ExportOptions,
+  regularFont: PDFFont,
+  pageNumber: number,
+  firstPage: boolean,
+  filingStamp?: string
+): void {
+  const lineTop = 736;
+  const lineBottom = 86;
+  const lineCount = 28;
+  const spacing = (lineTop - lineBottom) / (lineCount - 1);
+
+  page.drawRectangle({
+    x: 58,
+    y: 34,
+    width: 528,
+    height: 744,
+    borderColor: rgb(0.55, 0.55, 0.55),
+    borderWidth: 0.9,
+  });
+
+  page.drawLine({
+    start: { x: 52, y: lineBottom - 10 },
+    end: { x: 52, y: lineTop + 8 },
+    thickness: 0.75,
+    color: rgb(0.25, 0.25, 0.25),
+  });
+
+  for (let line = 1; line <= lineCount; line += 1) {
+    const y = lineTop - (line - 1) * spacing;
+    const label = String(line);
+    const width = regularFont.widthOfTextAtSize(label, 9);
+    page.drawText(label, {
+      x: 42 - width,
+      y: y - 3,
+      size: 9,
+      font: regularFont,
+      color: rgb(0.18, 0.18, 0.18),
+    });
+  }
+
+  const firmRail = buildFirmRailText(options.firmInfo);
+  if (firmRail) {
+    page.drawText(firmRail, {
+      x: 17,
+      y: 210,
+      size: 7.4,
+      font: regularFont,
+      color: rgb(0.18, 0.18, 0.18),
+      rotate: degrees(90),
+    });
+  }
+
+  if (firstPage && filingStamp) {
+    drawCenteredText(page, regularFont, filingStamp, 10, 775);
+  }
+
+  if (options.showPageNumbers !== false) {
+    const pageLabel = String(pageNumber);
+    const labelWidth = regularFont.widthOfTextAtSize(pageLabel, 10);
+    page.drawText(pageLabel, {
+      x: (page.getWidth() - labelWidth) / 2,
+      y: 20,
+      size: 10,
+      font: regularFont,
+      color: rgb(0, 0, 0),
+    });
+  }
+}
+
+function drawRightField(
+  page: any,
+  boldFont: PDFFont,
+  regularFont: PDFFont,
+  label: string,
+  value: string,
+  x: number,
+  y: number,
+  maxWidth: number
+): number {
+  const labelSize = 10.5;
+  const valueSize = 10.5;
+  page.drawText(label, { x, y, size: labelSize, font: boldFont, color: rgb(0, 0, 0) });
+  const labelWidth = boldFont.widthOfTextAtSize(label, labelSize);
+  const valueX = x + labelWidth + 8;
+  const valueLines = wrapText(regularFont, valueSize, value, Math.max(40, maxWidth - labelWidth - 8));
+  valueLines.forEach((line, idx) => {
+    page.drawText(line, {
+      x: valueX,
+      y: y - idx * 13,
+      size: valueSize,
+      font: regularFont,
+      color: rgb(0, 0, 0),
+    });
+  });
+  return y - Math.max(1, valueLines.length) * 13;
+}
+
+function drawHearingDecisionCaption(
+  page: any,
+  data: HearingDecisionLayoutData,
+  boldFont: PDFFont,
+  regularFont: PDFFont
+): number {
+  drawCenteredText(page, boldFont, data.agencyLine, 12.3, 736);
+  const officerX = drawCenteredText(page, boldFont, data.officerLine, 11.8, 714);
+  const officerWidth = boldFont.widthOfTextAtSize(data.officerLine, 11.8);
+  page.drawLine({
+    start: { x: officerX, y: 710 },
+    end: { x: officerX + officerWidth, y: 710 },
+    thickness: 0.9,
+    color: rgb(0, 0, 0),
+  });
+
+  const leftX = 88;
+  const captionTop = 682;
+  page.drawText("In the Matter of the Contested", { x: leftX, y: captionTop, size: 11.2, font: regularFont });
+  page.drawText("Industrial Insurance Claim of", { x: leftX, y: captionTop - 15, size: 11.2, font: regularFont });
+
+  for (let i = 0; i < 8; i += 1) {
+    page.drawText(")", { x: 315, y: captionTop - i * 16, size: 11.5, font: regularFont });
+  }
+
+  const claimantLine = `${data.claimantName.toUpperCase()},`;
+  page.drawText(claimantLine, { x: leftX, y: captionTop - 62, size: 11.2, font: boldFont });
+  page.drawText("Claimant.", { x: leftX + 70, y: captionTop - 88, size: 11.2, font: regularFont });
+  page.drawLine({
+    start: { x: leftX, y: captionTop - 103 },
+    end: { x: 300, y: captionTop - 103 },
+    thickness: 0.75,
+    color: rgb(0, 0, 0),
+  });
+
+  const rightX = 338;
+  let rightY = captionTop - 13;
+  if (data.claimNumber) {
+    rightY = drawRightField(page, boldFont, regularFont, "Claim No.:", data.claimNumber, rightX, rightY, 162) - 5;
+  }
+  if (data.appealNumbers.length > 0) {
+    rightY = drawRightField(
+      page,
+      boldFont,
+      regularFont,
+      "Appeal Nos.:",
+      data.appealNumbers.join(", "),
+      rightX,
+      rightY,
+      162
+    ) - 3;
+  } else if (data.hearingNumber) {
+    rightY = drawRightField(page, boldFont, regularFont, "Hearing No.:", data.hearingNumber, rightX, rightY, 162) - 3;
+  }
+
+  const title = "DECISION & ORDER";
+  const titleX = drawCenteredText(page, boldFont, title, 13, 546);
+  const titleWidth = boldFont.widthOfTextAtSize(title, 13);
+  page.drawLine({
+    start: { x: titleX, y: 542 },
+    end: { x: titleX + titleWidth, y: 542 },
+    thickness: 0.95,
+    color: rgb(0, 0, 0),
+  });
+
+  return 518;
+}
+
+function isMajorSectionHeading(value: string): boolean {
+  return /^(findings of fact|conclusions of law|order|appeal issues|procedural history|facts)$/i.test(value.trim());
+}
+
+export async function markdownToHearingDecisionPdf(
+  markdown: string,
+  title: string,
+  options: ExportOptions = {}
+): Promise<Buffer> {
+  const data = parseHearingDecisionLayout(markdown, options);
+  const blocks = markdownToHearingDecisionBlocks(data.bodyMarkdown);
+
+  const pdf = await PDFDocument.create();
+  pdf.setTitle(title);
+
+  const regular = await pdf.embedFont(StandardFonts.TimesRoman);
+  const bold = await pdf.embedFont(StandardFonts.TimesRomanBold);
+
+  let pageNumber = 1;
+  let page = pdf.addPage([612, 792]);
+  drawPleadingPaperPage(page, options, regular, pageNumber, true, data.filingStamp);
+  let y = drawHearingDecisionCaption(page, data, bold, regular);
+
+  const leftX = 88;
+  const bodyWidth = 468;
+  const bottomY = 72;
+
+  const addPage = () => {
+    pageNumber += 1;
+    page = pdf.addPage([612, 792]);
+    drawPleadingPaperPage(page, options, regular, pageNumber, false);
+    y = 742;
+  };
+
+  const ensureSpace = (required: number) => {
+    if (y - required < bottomY) addPage();
+  };
+
+  for (const block of blocks) {
+    if (block.kind === "spacer") {
+      y -= Math.max(6, block.lines * 9);
+      continue;
+    }
+
+    if (block.kind === "heading") {
+      const headingText = block.text.toUpperCase();
+      const major = isMajorSectionHeading(block.text);
+      const size = block.level <= 2 ? 12.3 : 11.7;
+      ensureSpace(24);
+
+      if (major) {
+        const hx = drawCenteredText(page, bold, headingText, size, y);
+        const width = bold.widthOfTextAtSize(headingText, size);
+        page.drawLine({
+          start: { x: hx, y: y - 3 },
+          end: { x: hx + width, y: y - 3 },
+          thickness: 0.7,
+          color: rgb(0, 0, 0),
+        });
+      } else {
+        page.drawText(headingText, { x: leftX, y, size, font: bold, color: rgb(0, 0, 0) });
+      }
+
+      y -= 22;
+      continue;
+    }
+
+    if (block.kind === "paragraph") {
+      const text = block.text.replace(/\s+/g, " ").trim();
+      if (!text) continue;
+
+      const firstLineIndent = 22;
+      const lines = wrapText(regular, 11.4, text, bodyWidth - firstLineIndent);
+
+      for (let i = 0; i < lines.length; i += 1) {
+        ensureSpace(15);
+        const x = leftX + (i === 0 ? firstLineIndent : 0);
+        page.drawText(lines[i], { x, y, size: 11.4, font: regular, color: rgb(0, 0, 0) });
+        y -= 15;
+      }
+      y -= 4;
+      continue;
+    }
+
+    if (block.kind === "list_item") {
+      const textLines = wrapText(regular, 11.2, block.text, bodyWidth - 36);
+      for (let i = 0; i < textLines.length; i += 1) {
+        ensureSpace(15);
+        if (i === 0) {
+          page.drawText(block.marker, {
+            x: leftX + 4,
+            y,
+            size: 11.2,
+            font: regular,
+            color: rgb(0, 0, 0),
+          });
+        }
+        page.drawText(textLines[i], {
+          x: leftX + 30,
+          y,
+          size: 11.2,
+          font: regular,
+          color: rgb(0, 0, 0),
+        });
+        y -= 15;
+      }
+      y -= 2;
+    }
+  }
+
+  const bytes = await pdf.save();
+  return Buffer.from(bytes);
+}
+
 // PDF header/footer configuration by document type
 interface PdfHeaderFooterConfig {
   displayHeaderFooter: boolean;
@@ -923,6 +1805,8 @@ interface PdfHeaderFooterConfig {
   footerTemplate: string;
   marginTop: string;
   marginBottom: string;
+  marginLeft: string;
+  marginRight: string;
 }
 
 function getPdfHeaderFooterConfig(options: ExportOptions = {}): PdfHeaderFooterConfig {
@@ -935,6 +1819,8 @@ function getPdfHeaderFooterConfig(options: ExportOptions = {}): PdfHeaderFooterC
     footerTemplate: "",
     marginTop: "1in",
     marginBottom: "1in",
+    marginLeft: "1in",
+    marginRight: "1in",
   };
 
   // Don't show headers/footers for memos, letters, or if disabled
@@ -962,6 +1848,8 @@ function getPdfHeaderFooterConfig(options: ExportOptions = {}): PdfHeaderFooterC
       footerTemplate: pageNumberFooter,
       marginTop: caseName ? "1.25in" : "1in",
       marginBottom: "1.25in",
+      marginLeft: "1in",
+      marginRight: "1in",
     };
   }
 
@@ -973,6 +1861,24 @@ function getPdfHeaderFooterConfig(options: ExportOptions = {}): PdfHeaderFooterC
       footerTemplate: pageNumberFooter,
       marginTop: "1in",
       marginBottom: "1.25in",
+      marginLeft: "1in",
+      marginRight: "1in",
+    };
+  }
+
+  if (documentType === "hearing_decision") {
+    return {
+      displayHeaderFooter: true,
+      headerTemplate: `<div style="font-size:0; width:100%;"></div>`,
+      footerTemplate: `
+        <div style="font-size: 9pt; width: 100%; text-align: center; color: #111;">
+          <span class="pageNumber"></span>
+        </div>
+      `,
+      marginTop: "0.35in",
+      marginBottom: "0.52in",
+      marginLeft: "0.35in",
+      marginRight: "0.35in",
     };
   }
 
@@ -983,6 +1889,8 @@ function getPdfHeaderFooterConfig(options: ExportOptions = {}): PdfHeaderFooterC
     footerTemplate: pageNumberFooter,
     marginTop: "1in",
     marginBottom: "1.25in",
+    marginLeft: "1in",
+    marginRight: "1in",
   };
 }
 
@@ -1007,9 +1915,9 @@ export async function htmlToPdf(
       format: "Letter",
       margin: {
         top: headerFooterConfig.marginTop,
-        right: "1in",
+        right: headerFooterConfig.marginRight,
         bottom: headerFooterConfig.marginBottom,
-        left: "1in",
+        left: headerFooterConfig.marginLeft,
       },
       printBackground: true,
       displayHeaderFooter: headerFooterConfig.displayHeaderFooter,

@@ -1,7 +1,13 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { Document, Page, pdfjs } from 'react-pdf'
+import 'react-pdf/dist/Page/AnnotationLayer.css'
+import 'react-pdf/dist/Page/TextLayer.css'
 import type { DocumentIndex, ErrataItem, NeedsReviewItem } from '../App'
+
+// Set up PDF.js worker (using local copy since CDN may not have latest version)
+pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs'
 
 interface Draft {
   id: string
@@ -25,6 +31,10 @@ interface Props {
   onIndexUpdated: () => void
   onDraftsUpdated?: () => void
   refreshDraftsKey?: number  // Increment to trigger drafts reload
+  viewMode?: 'summary' | 'document'
+  onToggleViewMode?: () => void
+  hasFile?: boolean
+  hasSummary?: boolean
 }
 
 // Icons
@@ -56,6 +66,26 @@ const XMarkIcon = () => (
 const ArrowTopRightOnSquareIcon = () => (
   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+  </svg>
+)
+
+const ArrowsPointingOutIcon = ({ className = "w-4 h-4" }: { className?: string }) => (
+  <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round"
+          d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+  </svg>
+)
+
+// Toggle icons for summary/document view
+const DocumentViewIcon = () => (
+  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+  </svg>
+)
+
+const SummaryViewIcon = () => (
+  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25H12" />
   </svg>
 )
 
@@ -95,7 +125,7 @@ const DocumentTextIcon = () => (
   </svg>
 )
 
-export default function Visualizer({ content, docPath, fileUrl, fileName, caseFolder, apiUrl, documentIndex, firmRoot: _firmRoot, onCloseFile, onIndexUpdated, onDraftsUpdated, refreshDraftsKey }: Props) {
+export default function Visualizer({ content, docPath, fileUrl, fileName, caseFolder, apiUrl, documentIndex, firmRoot: _firmRoot, onCloseFile, onIndexUpdated, onDraftsUpdated, refreshDraftsKey, viewMode = 'summary', onToggleViewMode, hasFile, hasSummary }: Props) {
   const [activeTab, setActiveTab] = useState<'view' | 'review' | 'drafts'>('view')
   const [verifiedItems, setVerifiedItems] = useState<Set<string>>(new Set())
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
@@ -113,6 +143,13 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
   const [canBundle, setCanBundle] = useState(false)
   const [isBundling, setIsBundling] = useState(false)
   const [bundleError, setBundleError] = useState<string | null>(null)
+
+  // PDF viewer state
+  const [pdfNumPages, setPdfNumPages] = useState<number | null>(null)
+  const [pdfPageNumber, setPdfPageNumber] = useState(1)
+  const [pdfScale, setPdfScale] = useState(1.0)
+  const pdfContainerRef = useRef<HTMLDivElement>(null)
+  const [pdfContainerWidth, setPdfContainerWidth] = useState<number | null>(null)
 
   const errata: ErrataItem[] = Array.isArray(documentIndex?.errata) ? documentIndex.errata : []
   const needsReview: NeedsReviewItem[] = Array.isArray(documentIndex?.needs_review) ? documentIndex.needs_review : []
@@ -198,6 +235,27 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
 
     checkBundleStatus()
   }, [selectedDraft, caseFolder, apiUrl])
+
+  // Reset PDF state when file changes
+  useEffect(() => {
+    setPdfPageNumber(1)
+    setPdfNumPages(null)
+    setPdfScale(1.0)
+  }, [fileUrl])
+
+  // Measure PDF container width for responsive sizing
+  useEffect(() => {
+    if (!pdfContainerRef.current) return
+
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setPdfContainerWidth(entry.contentRect.width)
+      }
+    })
+
+    resizeObserver.observe(pdfContainerRef.current)
+    return () => resizeObserver.disconnect()
+  }, [fileUrl])
 
   // Handle bundle generation
   const handleGeneratePackage = async () => {
@@ -296,6 +354,8 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
         return '💰'
       case 'memo':
         return '📋'
+      case 'hearing_decision':
+        return '⚖️'
       default:
         return '📝'
     }
@@ -543,7 +603,7 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
                       disabled={isBundling || !canBundle}
                       title={!canBundle ? (bundleError || 'Cannot bundle - no exhibits') : 'Bundle demand letter with exhibits'}
                       className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium
-                                 bg-indigo-600 text-white hover:bg-indigo-700
+                                 bg-brand-700 text-white hover:bg-brand-800
                                  rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -628,7 +688,8 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
         </div>
       ) : activeTab === 'view' ? (
         <div className="flex-1 overflow-auto flex flex-col">
-          {fileUrl ? (
+          {/* Determine what to show based on viewMode */}
+          {(viewMode === 'document' && fileUrl) || (viewMode === 'summary' && !content && fileUrl) ? (
             <>
               {/* File viewing header */}
               <div className="px-4 py-3 border-b border-surface-200 flex items-center justify-between bg-surface-50">
@@ -636,15 +697,41 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
                   {fileName}
                 </span>
                 <div className="flex gap-2">
-                  <button
-                    onClick={handleDownload}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
-                               bg-white border border-surface-200 hover:bg-surface-100
-                               rounded-lg text-brand-700 transition-colors"
-                  >
-                    <ArrowTopRightOnSquareIcon />
-                    Open
-                  </button>
+                  {/* Toggle button - show when both views available */}
+                  {hasSummary && onToggleViewMode && (
+                    <button
+                      onClick={onToggleViewMode}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                 bg-white border border-surface-200 hover:bg-surface-100
+                                 rounded-lg text-brand-700 transition-colors"
+                      title="View AI summary"
+                    >
+                      <SummaryViewIcon />
+                      Summary
+                    </button>
+                  )}
+                  {isPdf ? (
+                    <button
+                      onClick={() => window.open(fileUrl, '_blank', 'width=1200,height=900')}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                 bg-white border border-surface-200 hover:bg-surface-100
+                                 rounded-lg text-brand-700 transition-colors"
+                      title="Open in new window"
+                    >
+                      <ArrowsPointingOutIcon className="w-4 h-4" />
+                      Popout
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleDownload}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                 bg-white border border-surface-200 hover:bg-surface-100
+                                 rounded-lg text-brand-700 transition-colors"
+                    >
+                      <ArrowTopRightOnSquareIcon />
+                      Open
+                    </button>
+                  )}
                   <button
                     onClick={onCloseFile}
                     className="p-1.5 text-brand-400 hover:text-brand-600 hover:bg-surface-100
@@ -656,13 +743,100 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
               </div>
 
               {/* File content */}
-              <div className="flex-1 relative bg-surface-100">
+              <div className="flex-1 relative bg-surface-100 flex flex-col">
                 {isPdf ? (
-                  <embed
-                    src={fileUrl}
-                    type="application/pdf"
-                    className="absolute inset-0 w-full h-full"
-                  />
+                  <>
+                    {/* PDF toolbar */}
+                    <div className="flex items-center gap-2 px-3 py-2 bg-surface-50 border-b border-surface-200">
+                      <button
+                        onClick={() => setPdfPageNumber(Math.max(1, pdfPageNumber - 1))}
+                        disabled={pdfPageNumber <= 1}
+                        className="p-1.5 rounded hover:bg-surface-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                        title="Previous page"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+                        </svg>
+                      </button>
+                      <span className="text-xs text-brand-600 min-w-[80px] text-center">
+                        {pdfPageNumber} / {pdfNumPages || '...'}
+                      </span>
+                      <button
+                        onClick={() => setPdfPageNumber(Math.min(pdfNumPages || 1, pdfPageNumber + 1))}
+                        disabled={!pdfNumPages || pdfPageNumber >= pdfNumPages}
+                        className="p-1.5 rounded hover:bg-surface-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                        title="Next page"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                        </svg>
+                      </button>
+                      <div className="w-px h-4 bg-surface-300 mx-1" />
+                      <button
+                        onClick={() => setPdfScale(s => Math.max(0.5, s - 0.1))}
+                        className="p-1.5 rounded hover:bg-surface-200"
+                        title="Zoom out"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 12h-15" />
+                        </svg>
+                      </button>
+                      <span className="text-xs text-brand-600 min-w-[45px] text-center">
+                        {Math.round(pdfScale * 100)}%
+                      </span>
+                      <button
+                        onClick={() => setPdfScale(s => Math.min(2.0, s + 0.1))}
+                        className="p-1.5 rounded hover:bg-surface-200"
+                        title="Zoom in"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={() => setPdfScale(1.0)}
+                        className="px-2 py-1 text-xs rounded hover:bg-surface-200 text-brand-600"
+                        title="Reset zoom"
+                      >
+                        Fit
+                      </button>
+                    </div>
+                    {/* PDF document - nested containers for proper scrollbar positioning */}
+                    <div ref={pdfContainerRef} className="flex-1 overflow-hidden relative bg-surface-200">
+                      <div className="absolute inset-0 overflow-auto p-4">
+                        <div className="min-w-fit min-h-fit mx-auto" style={{ width: 'fit-content' }}>
+                          <Document
+                            file={fileUrl}
+                            onLoadSuccess={({ numPages }) => setPdfNumPages(numPages)}
+                            loading={
+                              <div className="flex items-center justify-center h-64">
+                                <div className="text-brand-500">Loading PDF...</div>
+                              </div>
+                            }
+                            error={
+                              <div className="flex flex-col items-center justify-center h-64 gap-3">
+                                <div className="text-red-500">Failed to load PDF</div>
+                                <button
+                                  onClick={() => window.open(fileUrl, '_blank')}
+                                  className="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800 text-sm"
+                                >
+                                  Open in new tab
+                                </button>
+                              </div>
+                            }
+                          >
+                            <Page
+                              pageNumber={pdfPageNumber}
+                              width={pdfContainerWidth ? Math.min(pdfContainerWidth - 32, 800) * pdfScale : undefined}
+                              className="shadow-lg"
+                              renderTextLayer={true}
+                              renderAnnotationLayer={true}
+                            />
+                          </Document>
+                        </div>
+                      </div>
+                    </div>
+                  </>
                 ) : isImage ? (
                   <div className="absolute inset-0 flex items-center justify-center p-6">
                     <img
@@ -685,87 +859,102 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, caseFo
                 )}
               </div>
             </>
-          ) : content ? (
+          ) : (viewMode === 'summary' && content) || (viewMode === 'document' && !fileUrl && content) ? (
             <>
-              {/* Actions bar */}
-              <div className="px-4 py-3 border-b border-surface-200 flex gap-2 bg-surface-50">
-                {isExportable ? (
-                  <div className="relative">
+              {/* Summary header */}
+              <div className="px-4 py-3 border-b border-surface-200 flex items-center justify-between bg-surface-50">
+                <span className="text-sm font-medium text-brand-700">AI Summary</span>
+                <div className="flex gap-2">
+                  {/* Toggle button - show when file is available */}
+                  {hasFile && onToggleViewMode && (
                     <button
-                      onClick={() => setExportMenuOpen(!exportMenuOpen)}
+                      onClick={onToggleViewMode}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
                                  bg-white border border-surface-200 hover:bg-surface-100
                                  rounded-lg text-brand-700 transition-colors"
+                      title="View document"
                     >
-                      <ArrowDownTrayIcon />
-                      Export
-                      <ChevronDownIcon />
+                      <DocumentViewIcon />
+                      Document
                     </button>
-                    {exportMenuOpen && (
-                      <>
-                        <div
-                          className="fixed inset-0 z-10"
-                          onClick={() => setExportMenuOpen(false)}
-                        />
-                        <div className="absolute left-0 mt-1 w-40 bg-white rounded-lg shadow-lg border border-surface-200 py-1 z-20">
-                          <button
-                            onClick={() => handleExport('docx')}
-                            className="w-full px-3 py-2 text-left text-sm text-brand-700 hover:bg-surface-100 flex items-center gap-2"
-                          >
-                            <span className="w-4 h-4 text-blue-600">
-                              <svg viewBox="0 0 24 24" fill="currentColor">
-                                <path d="M6 2h8l6 6v12a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2zm7 1.5V9h5.5L13 3.5zM7 12h2v5H7v-5zm3 0h2v5h-2v-5zm3 0h2v5h-2v-5z"/>
-                              </svg>
-                            </span>
-                            Word (.docx)
-                          </button>
-                          <button
-                            onClick={() => handleExport('pdf')}
-                            className="w-full px-3 py-2 text-left text-sm text-brand-700 hover:bg-surface-100 flex items-center gap-2"
-                          >
-                            <span className="w-4 h-4 text-red-600">
-                              <svg viewBox="0 0 24 24" fill="currentColor">
-                                <path d="M6 2h8l6 6v12a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2zm7 1.5V9h5.5L13 3.5zM8.5 11a.5.5 0 00-.5.5v6a.5.5 0 001 0v-2h1a2 2 0 000-4h-1.5zm.5 3v-2h1a1 1 0 110 2H9z"/>
-                              </svg>
-                            </span>
-                            PDF
-                          </button>
-                          <hr className="my-1 border-surface-200" />
-                          <button
-                            onClick={() => handleExport('md')}
-                            className="w-full px-3 py-2 text-left text-sm text-brand-500 hover:bg-surface-100 flex items-center gap-2"
-                          >
-                            <span className="w-4 h-4">
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                <path d="M4 6h16M4 12h16M4 18h10"/>
-                              </svg>
-                            </span>
-                            Markdown
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ) : (
+                  )}
+                  {isExportable && (
+                    <div className="relative">
+                      <button
+                        onClick={() => setExportMenuOpen(!exportMenuOpen)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                   bg-white border border-surface-200 hover:bg-surface-100
+                                   rounded-lg text-brand-700 transition-colors"
+                      >
+                        <ArrowDownTrayIcon />
+                        Export
+                        <ChevronDownIcon />
+                      </button>
+                      {exportMenuOpen && (
+                        <>
+                          <div
+                            className="fixed inset-0 z-10"
+                            onClick={() => setExportMenuOpen(false)}
+                          />
+                          <div className="absolute right-0 mt-1 w-40 bg-white rounded-lg shadow-lg border border-surface-200 py-1 z-20">
+                            <button
+                              onClick={() => handleExport('docx')}
+                              className="w-full px-3 py-2 text-left text-sm text-brand-700 hover:bg-surface-100 flex items-center gap-2"
+                            >
+                              <span className="w-4 h-4 text-blue-600">
+                                <svg viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M6 2h8l6 6v12a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2zm7 1.5V9h5.5L13 3.5zM7 12h2v5H7v-5zm3 0h2v5h-2v-5zm3 0h2v5h-2v-5z"/>
+                                </svg>
+                              </span>
+                              Word (.docx)
+                            </button>
+                            <button
+                              onClick={() => handleExport('pdf')}
+                              className="w-full px-3 py-2 text-left text-sm text-brand-700 hover:bg-surface-100 flex items-center gap-2"
+                            >
+                              <span className="w-4 h-4 text-red-600">
+                                <svg viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M6 2h8l6 6v12a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2zm7 1.5V9h5.5L13 3.5zM8.5 11a.5.5 0 00-.5.5v6a.5.5 0 001 0v-2h1a2 2 0 000-4h-1.5zm.5 3v-2h1a1 1 0 110 2H9z"/>
+                                </svg>
+                              </span>
+                              PDF
+                            </button>
+                            <hr className="my-1 border-surface-200" />
+                            <button
+                              onClick={() => handleExport('md')}
+                              className="w-full px-3 py-2 text-left text-sm text-brand-500 hover:bg-surface-100 flex items-center gap-2"
+                            >
+                              <span className="w-4 h-4">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <path d="M4 6h16M4 12h16M4 18h10"/>
+                                </svg>
+                              </span>
+                              Markdown
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
                   <button
-                    onClick={handleDownload}
+                    onClick={() => navigator.clipboard.writeText(content)}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
                                bg-white border border-surface-200 hover:bg-surface-100
                                rounded-lg text-brand-700 transition-colors"
                   >
-                    <ArrowDownTrayIcon />
-                    Download
+                    <ClipboardIcon />
+                    Copy
                   </button>
-                )}
-                <button
-                  onClick={() => navigator.clipboard.writeText(content)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
-                             bg-white border border-surface-200 hover:bg-surface-100
-                             rounded-lg text-brand-700 transition-colors"
-                >
-                  <ClipboardIcon />
-                  Copy
-                </button>
+                  {hasFile && (
+                    <button
+                      onClick={onCloseFile}
+                      className="p-1.5 text-brand-400 hover:text-brand-600 hover:bg-surface-100
+                                 rounded-lg transition-colors"
+                    >
+                      <XMarkIcon />
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Rendered content */}
