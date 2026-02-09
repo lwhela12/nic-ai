@@ -8,11 +8,13 @@ import {
   installClaudeCLI,
   getWorkingCLICommand,
   checkNpmAvailable,
+  getCachedCLICommand,
 } from "./cli-setup.js";
 
 // File-based logging for debugging GUI launch issues
 const LOG_DIR = join(homedir(), "AppData", "Local", "Claude PI");
 const LOG_FILE = join(LOG_DIR, "debug.log");
+const MAIN_START_MS = Date.now();
 
 function debugLog(msg: string): void {
   const timestamp = new Date().toISOString();
@@ -26,6 +28,10 @@ function debugLog(msg: string): void {
   } catch (e) {
     // Ignore logging errors
   }
+}
+
+function elapsedMs(from: number): number {
+  return Date.now() - from;
 }
 
 const isDev = !app.isPackaged;
@@ -45,6 +51,7 @@ let serverPort: number = 0;
 let cliCommand: string | null = null;
 
 function createWindow(): void {
+  const windowStartMs = Date.now();
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -59,7 +66,18 @@ function createWindow(): void {
     show: false,
   });
 
-  mainWindow.once("ready-to-show", () => mainWindow?.show());
+  mainWindow.webContents.once("did-finish-load", () => {
+    debugLog(
+      `[perf] did-finish-load at +${elapsedMs(windowStartMs)}ms (total +${elapsedMs(MAIN_START_MS)}ms)`
+    );
+  });
+
+  mainWindow.once("ready-to-show", () => {
+    debugLog(
+      `[perf] ready-to-show at +${elapsedMs(windowStartMs)}ms (total +${elapsedMs(MAIN_START_MS)}ms)`
+    );
+    mainWindow?.show();
+  });
   mainWindow.loadURL(`http://127.0.0.1:${serverPort}`);
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -84,12 +102,26 @@ function createWindow(): void {
  */
 async function ensureCLIAvailable(): Promise<string | null> {
   debugLog("ensureCLIAvailable() called");
+  const ensureStartMs = Date.now();
 
-  const status = await checkClaudeCLI();
+  // Fast startup path: trust last known-good command.
+  const cachedCommand = getCachedCLICommand();
+  if (cachedCommand) {
+    debugLog(`Using cached CLI command: ${cachedCommand}`);
+    debugLog(`[perf] ensureCLIAvailable completed in ${elapsedMs(ensureStartMs)}ms (cache hit)`);
+    return cachedCommand;
+  }
+
+  const status = await checkClaudeCLI({
+    allowNpxFallback: false,
+    useCache: false,
+    directTimeoutMs: 2500,
+  });
   debugLog(`CLI status: ${JSON.stringify(status)}`);
 
   if (status.available) {
     debugLog(`CLI available via ${status.method}: ${status.version}`);
+    debugLog(`[perf] ensureCLIAvailable completed in ${elapsedMs(ensureStartMs)}ms`);
     return status.path || "claude";
   }
 
@@ -110,6 +142,7 @@ async function ensureCLIAvailable(): Promise<string | null> {
         "After installing, you may need to restart your computer for PATH changes to take effect.",
       buttons: ["OK"],
     });
+    debugLog(`[perf] ensureCLIAvailable completed in ${elapsedMs(ensureStartMs)}ms (npm missing)`);
     return null;
   }
 
@@ -130,6 +163,7 @@ async function ensureCLIAvailable(): Promise<string | null> {
   if (result.response === 1) {
     // User cancelled
     console.log("[Main] User cancelled CLI installation");
+    debugLog(`[perf] ensureCLIAvailable completed in ${elapsedMs(ensureStartMs)}ms (cancelled)`);
     return null;
   }
 
@@ -214,7 +248,12 @@ async function ensureCLIAvailable(): Promise<string | null> {
 
   if (installResult.success) {
     // Get the working command
-    const command = await getWorkingCLICommand();
+    const command = await getWorkingCLICommand({
+      allowNpxFallback: true,
+      useCache: true,
+      directTimeoutMs: 3000,
+      npxTimeoutMs: 60000,
+    });
     if (command) {
       await dialog.showMessageBox({
         type: "info",
@@ -223,6 +262,9 @@ async function ensureCLIAvailable(): Promise<string | null> {
         detail: "The app is now ready to use.",
         buttons: ["OK"],
       });
+      debugLog(
+        `[perf] ensureCLIAvailable completed in ${elapsedMs(ensureStartMs)}ms (installed)`
+      );
       return command;
     }
   }
@@ -242,17 +284,23 @@ async function ensureCLIAvailable(): Promise<string | null> {
     buttons: ["OK"],
   });
 
+  debugLog(`[perf] ensureCLIAvailable completed in ${elapsedMs(ensureStartMs)}ms (failed)`);
   return null;
 }
 
 async function startApp(): Promise<void> {
+  const startupStartMs = Date.now();
   debugLog(`startApp() called - isDev: ${isDev}`);
+  debugLog(`[perf] startup begin (total +${elapsedMs(MAIN_START_MS)}ms since main import)`);
 
   // First, ensure CLI is available
+  const cliStartMs = Date.now();
   cliCommand = await ensureCLIAvailable();
+  debugLog(`[perf] CLI step took ${elapsedMs(cliStartMs)}ms`);
 
   if (!cliCommand) {
     debugLog("CLI not available, quitting");
+    debugLog(`[perf] startup aborted after ${elapsedMs(startupStartMs)}ms`);
     app.quit();
     return;
   }
@@ -264,9 +312,14 @@ async function startApp(): Promise<void> {
 
   try {
     debugLog("Starting server...");
+    const serverStartMs = Date.now();
     serverPort = await serverManager.start();
+    debugLog(`[perf] server start took ${elapsedMs(serverStartMs)}ms`);
     debugLog(`Server started on port ${serverPort}`);
+    const createWindowStartMs = Date.now();
     createWindow();
+    debugLog(`[perf] createWindow() returned in ${elapsedMs(createWindowStartMs)}ms`);
+    debugLog(`[perf] startup critical path complete in ${elapsedMs(startupStartMs)}ms`);
     debugLog("Window created");
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);

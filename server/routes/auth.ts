@@ -20,6 +20,10 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const SUBSCRIPTION_SERVER =
   process.env.CLAUDE_PI_SERVER || "https://claude-pi-five.vercel.app";
 
+// Validate daily; allow up to 48 hours of offline grace for root users.
+const VALIDATION_INTERVAL = 24 * 60 * 60 * 1000;
+const OFFLINE_GRACE_PERIOD = 48 * 60 * 60 * 1000;
+
 // Dev mode flag - must match middleware/auth.ts logic
 // Electron sets ELECTRON_FRONTEND_PATH, so we're only in dev mode when running directly with bun
 const IS_ELECTRON = !!process.env.ELECTRON_FRONTEND_PATH;
@@ -70,6 +74,15 @@ async function validateFirmAccess(
  * Load config from file
  */
 function loadConfig(): Config | null {
+  // CLI launch can inject a pre-validated config here.
+  if (process.env.CLAUDE_PI_CONFIG) {
+    try {
+      return JSON.parse(process.env.CLAUDE_PI_CONFIG);
+    } catch {
+      // Fall back to disk config
+    }
+  }
+
   if (!existsSync(CONFIG_FILE)) {
     return null;
   }
@@ -88,6 +101,52 @@ function saveConfig(config: Config): void {
     mkdirSync(CONFIG_DIR, { recursive: true });
   }
   writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  process.env.CLAUDE_PI_CONFIG = JSON.stringify(config);
+}
+
+/**
+ * Check if validation is needed (more than 24 hours since last validation)
+ */
+function needsValidation(config: Config): boolean {
+  if (!config.lastValidated) return true;
+  const lastValidated = new Date(config.lastValidated).getTime();
+  const now = Date.now();
+  return now - lastValidated > VALIDATION_INTERVAL;
+}
+
+/**
+ * Check if within offline grace period
+ */
+function isWithinGracePeriod(config: Config): boolean {
+  if (!config.lastValidated) return false;
+  const lastValidated = new Date(config.lastValidated).getTime();
+  const now = Date.now();
+  return now - lastValidated < OFFLINE_GRACE_PERIOD;
+}
+
+/**
+ * Validate subscription with remote server
+ */
+async function validateSubscription(
+  authToken: string
+): Promise<{ anthropicApiKey: string | null; subscriptionStatus: string; expiresAt: string } | null> {
+  try {
+    const response = await fetch(`${SUBSCRIPTION_SERVER}/v1/auth/validate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${authToken}`,
+      },
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    return await response.json();
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -147,23 +206,68 @@ auth.get("/status", async (c) => {
   if (!config || !config.authToken) {
     return c.json({
       authenticated: false,
+      reauthRequired: true,
+      error: "authentication_required",
     });
   }
 
-  // Check if subscription is valid
-  const isValid =
-    config.subscriptionStatus === "active" ||
-    config.subscriptionStatus === "trialing";
+  let effectiveConfig: Config = { ...config };
+  let reauthRequired = false;
+  let authError: string | undefined;
+  const isSubUser = effectiveConfig.accountType === "sub_user";
+
+  if (isSubUser || needsValidation(effectiveConfig)) {
+    const validation = await validateSubscription(effectiveConfig.authToken);
+    if (validation) {
+      effectiveConfig = {
+        ...effectiveConfig,
+        anthropicApiKey:
+          validation.anthropicApiKey ?? effectiveConfig.anthropicApiKey,
+        lastValidated: new Date().toISOString(),
+        subscriptionStatus: validation.subscriptionStatus,
+        expiresAt: validation.expiresAt,
+      };
+
+      // Persist fresh validation so UI and middleware stay in sync.
+      saveConfig(effectiveConfig);
+      if (validation.anthropicApiKey) {
+        process.env.ANTHROPIC_API_KEY = validation.anthropicApiKey;
+      }
+    } else if (isSubUser || !isWithinGracePeriod(effectiveConfig)) {
+      reauthRequired = true;
+      authError = "reauth_required";
+    }
+  }
+
+  const isSubscriptionActive =
+    effectiveConfig.subscriptionStatus === "active" ||
+    effectiveConfig.subscriptionStatus === "trialing";
+
+  if (!isSubscriptionActive && !reauthRequired) {
+    authError = "subscription_expired";
+  }
+
+  if (!process.env.ANTHROPIC_API_KEY && effectiveConfig.anthropicApiKey) {
+    process.env.ANTHROPIC_API_KEY = effectiveConfig.anthropicApiKey;
+  }
+  const hasApiKey =
+    !!process.env.ANTHROPIC_API_KEY || !!effectiveConfig.anthropicApiKey;
+
+  // Keep status endpoint aligned with auth middleware behavior.
+  if (!hasApiKey && !reauthRequired && isSubscriptionActive) {
+    reauthRequired = true;
+    authError = "reauth_required";
+  }
 
   let teamPayload: Record<string, unknown> = {};
   let teamAllowed = true;
-  if (firmRoot && config.email) {
-    const teamAccess = await validateFirmAccess(firmRoot, config.email, {
+  if (!reauthRequired && isSubscriptionActive && firmRoot && effectiveConfig.email) {
+    const teamAccess = await validateFirmAccess(firmRoot, effectiveConfig.email, {
       bootstrapIfMissing: true,
       autoProvision: true,
-      provisionRole: config.accountType === "sub_user" ? "case_manager" : "attorney",
+      provisionRole: effectiveConfig.accountType === "sub_user" ? "case_manager" : "attorney",
     });
-    const teamResult = await requireTeamContext(firmRoot, config.email);
+    const teamResult = await requireTeamContext(firmRoot, effectiveConfig.email);
     if (!teamAccess.ok || !teamResult.ok) {
       teamAllowed = false;
       teamPayload = {
@@ -180,15 +284,16 @@ auth.get("/status", async (c) => {
   }
 
   return c.json({
-    authenticated: isValid && teamAllowed,
-    reauthRequired: !isValid,
-    email: config.email,
-    subscriptionStatus: config.subscriptionStatus,
-    expiresAt: config.expiresAt,
-    lastValidated: config.lastValidated,
-    accountType: config.accountType || "root",
-    ownerEmail: config.ownerEmail || null,
-    maxLicenses: config.maxLicenses || 0,
+    authenticated: !reauthRequired && isSubscriptionActive && teamAllowed,
+    reauthRequired,
+    error: authError,
+    email: effectiveConfig.email,
+    subscriptionStatus: effectiveConfig.subscriptionStatus,
+    expiresAt: effectiveConfig.expiresAt,
+    lastValidated: effectiveConfig.lastValidated,
+    accountType: effectiveConfig.accountType || "root",
+    ownerEmail: effectiveConfig.ownerEmail || null,
+    maxLicenses: effectiveConfig.maxLicenses || 0,
     ...teamPayload,
   });
 });

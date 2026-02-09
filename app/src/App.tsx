@@ -450,23 +450,26 @@ function App() {
   const [knowledgeInitLoading, setKnowledgeInitLoading] = useState(false)
   const [knowledgeVersion, setKnowledgeVersion] = useState(0) // Increments after init to trigger re-fetch
 
-  const checkAuthStatus = useCallback(async () => {
-    const endpoint = firmRoot
-      ? `${API_URL}/api/auth/status?firmRoot=${encodeURIComponent(firmRoot)}`
+  const checkAuthStatus = useCallback(async (rootOverride?: string): Promise<AuthState> => {
+    const rootForCheck = typeof rootOverride === 'string' ? rootOverride : firmRoot
+    const endpoint = rootForCheck
+      ? `${API_URL}/api/auth/status?firmRoot=${encodeURIComponent(rootForCheck)}`
       : `${API_URL}/api/auth/status`
+
+    let nextState: AuthState = { authenticated: false }
 
     try {
       const res = await fetch(endpoint)
       if (res.ok) {
-        const data = await res.json()
-        setAuthState(data)
-      } else {
-        setAuthState({ authenticated: false })
+        nextState = await res.json() as AuthState
       }
     } catch {
-      setAuthState({ authenticated: false })
+      nextState = { authenticated: false }
     }
+
+    setAuthState(nextState)
     setAuthChecked(true)
+    return nextState
   }, [firmRoot])
 
   const loadTodos = useCallback(async () => {
@@ -497,8 +500,12 @@ function App() {
 
     try {
       const existingRes = await fetch(`${API_URL}/api/knowledge/firm-config?root=${encodeURIComponent(root)}`)
-      if (existingRes.status === 401) {
-        setAuthState({ authenticated: false })
+      if (existingRes.status === 401 || existingRes.status === 403) {
+        if (existingRes.status === 403) {
+          await checkAuthStatus(root)
+        } else {
+          setAuthState({ authenticated: false })
+        }
         return false
       }
       if (existingRes.ok) {
@@ -519,8 +526,12 @@ function App() {
         }),
       })
 
-      if (saveRes.status === 401) {
-        setAuthState({ authenticated: false })
+      if (saveRes.status === 401 || saveRes.status === 403) {
+        if (saveRes.status === 403) {
+          await checkAuthStatus(root)
+        } else {
+          setAuthState({ authenticated: false })
+        }
         return false
       }
 
@@ -528,15 +539,19 @@ function App() {
     } catch {
       return false
     }
-  }, [])
+  }, [checkAuthStatus])
 
   const resolveFolderPracticeArea = useCallback(async (root: string): Promise<PracticeArea | null> => {
     let configArea: PracticeArea | null = null
 
     try {
       const configRes = await fetch(`${API_URL}/api/knowledge/firm-config?root=${encodeURIComponent(root)}`)
-      if (configRes.status === 401) {
-        setAuthState({ authenticated: false })
+      if (configRes.status === 401 || configRes.status === 403) {
+        if (configRes.status === 403) {
+          await checkAuthStatus(root)
+        } else {
+          setAuthState({ authenticated: false })
+        }
         return null
       }
       if (configRes.ok) {
@@ -550,8 +565,12 @@ function App() {
 
     try {
       const manifestRes = await fetch(`${API_URL}/api/knowledge/manifest?root=${encodeURIComponent(root)}`)
-      if (manifestRes.status === 401) {
-        setAuthState({ authenticated: false })
+      if (manifestRes.status === 401 || manifestRes.status === 403) {
+        if (manifestRes.status === 403) {
+          await checkAuthStatus(root)
+        } else {
+          setAuthState({ authenticated: false })
+        }
         return null
       }
       if (manifestRes.ok) {
@@ -569,7 +588,7 @@ function App() {
     }
 
     return null
-  }, [saveFolderPracticeArea])
+  }, [checkAuthStatus, saveFolderPracticeArea])
 
   const loadKnowledgeTemplates = useCallback(async () => {
     try {
@@ -597,6 +616,12 @@ function App() {
     setFolderSetupError(null)
     setPendingPracticeAreaLoading(true)
 
+    const status = await checkAuthStatus(path)
+    if (!status.authenticated) {
+      setPendingPracticeAreaLoading(false)
+      return
+    }
+
     const resolved = await resolveFolderPracticeArea(path)
     setPendingPracticeAreaLoading(false)
 
@@ -617,7 +642,7 @@ function App() {
     localStorage.removeItem(FIRM_ROOT_KEY)
     setPendingFolderPath(path)
     setPendingPracticeArea(resolved)
-  }, [clearCaseView, resolveFolderPracticeArea])
+  }, [checkAuthStatus, clearCaseView, resolveFolderPracticeArea])
 
   const confirmFolderSetup = useCallback(async () => {
     if (!pendingFolderPath) return

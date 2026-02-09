@@ -7,7 +7,7 @@
 
 import { exec } from "child_process";
 import { promisify } from "util";
-import { appendFileSync, mkdirSync, existsSync } from "fs";
+import { appendFileSync, mkdirSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -16,6 +16,8 @@ const execAsync = promisify(exec);
 // File-based logging for debugging GUI launch issues
 const LOG_DIR = join(homedir(), "AppData", "Local", "Claude PI");
 const LOG_FILE = join(LOG_DIR, "debug.log");
+const CLI_CACHE_DIR = process.env.CLAUDE_PI_CONFIG_DIR || join(homedir(), ".claude-pi");
+const CLI_CACHE_FILE = join(CLI_CACHE_DIR, "cli-command-cache.json");
 
 function debugLog(msg: string): void {
   const timestamp = new Date().toISOString();
@@ -44,65 +46,208 @@ export interface InstallResult {
   error?: string;
 }
 
+export interface CheckCLIOptions {
+  allowNpxFallback?: boolean;
+  useCache?: boolean;
+  directTimeoutMs?: number;
+  npxTimeoutMs?: number;
+}
+
+interface CachedCLIStatus {
+  path: string;
+  method: "direct" | "npx";
+  version?: string;
+  checkedAt: string;
+}
+
+const DEFAULT_CHECK_OPTIONS: Required<CheckCLIOptions> = {
+  allowNpxFallback: true,
+  useCache: true,
+  directTimeoutMs: 3000,
+  npxTimeoutMs: 60000,
+};
+
+function getVersionCommand(command: string): string {
+  if (command.startsWith("npx ")) {
+    return `${command} --version`;
+  }
+  if (command.includes(" ")) {
+    return `"${command}" --version`;
+  }
+  return `${command} --version`;
+}
+
+function readCachedCLIStatus(): CachedCLIStatus | null {
+  if (!existsSync(CLI_CACHE_FILE)) return null;
+
+  try {
+    const raw = readFileSync(CLI_CACHE_FILE, "utf-8");
+    const parsed = JSON.parse(raw) as Partial<CachedCLIStatus>;
+
+    if (
+      typeof parsed.path !== "string" ||
+      (parsed.method !== "direct" && parsed.method !== "npx")
+    ) {
+      return null;
+    }
+
+    return {
+      path: parsed.path,
+      method: parsed.method,
+      version: typeof parsed.version === "string" ? parsed.version : undefined,
+      checkedAt:
+        typeof parsed.checkedAt === "string"
+          ? parsed.checkedAt
+          : new Date(0).toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedCLIStatus(status: CLIStatus): void {
+  if (!status.available || !status.path || !status.method) {
+    return;
+  }
+
+  const cached: CachedCLIStatus = {
+    path: status.path,
+    method: status.method,
+    version: status.version,
+    checkedAt: new Date().toISOString(),
+  };
+
+  try {
+    if (!existsSync(CLI_CACHE_DIR)) {
+      mkdirSync(CLI_CACHE_DIR, { recursive: true });
+    }
+    writeFileSync(CLI_CACHE_FILE, JSON.stringify(cached, null, 2));
+    debugLog(`Cached CLI command: ${cached.path} (${cached.method})`);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    debugLog(`Failed to cache CLI command: ${errMsg}`);
+  }
+}
+
+async function probeCommand(
+  command: string,
+  method: "direct" | "npx",
+  timeoutMs: number,
+  source: "cache" | "probe"
+): Promise<CLIStatus | null> {
+  try {
+    const versionCommand = getVersionCommand(command);
+    debugLog(
+      `Trying ${source} ${method} command: ${versionCommand} (timeout: ${timeoutMs}ms)`
+    );
+    const { stdout, stderr } = await execAsync(versionCommand, {
+      timeout: timeoutMs,
+      windowsHide: true,
+    });
+    const version = stdout.trim();
+    debugLog(`${source} ${method} command SUCCESS: ${version}`);
+    if (stderr) debugLog(`stderr: ${stderr}`);
+
+    return {
+      available: true,
+      version,
+      path: command,
+      method,
+    };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    debugLog(`${source} ${method} command FAILED: ${errMsg}`);
+    return null;
+  }
+}
+
+/**
+ * Return the last known-good CLI command without probing.
+ * Used to keep app startup fast.
+ */
+export function getCachedCLICommand(): string | null {
+  const cached = readCachedCLIStatus();
+  return cached?.path || null;
+}
+
 /**
  * Check if Claude Code CLI is available.
  * Tries direct 'claude' command first, then falls back to npx.
  */
-export async function checkClaudeCLI(): Promise<CLIStatus> {
+export async function checkClaudeCLI(
+  options: CheckCLIOptions = {}
+): Promise<CLIStatus> {
+  const resolved = { ...DEFAULT_CHECK_OPTIONS, ...options };
   debugLog("=== checkClaudeCLI START ===");
+  debugLog(`Options: ${JSON.stringify(resolved)}`);
   debugLog(`Platform: ${process.platform}`);
   debugLog(`PATH: ${process.env.PATH}`);
   debugLog(`APPDATA: ${process.env.APPDATA}`);
   debugLog(`LOCALAPPDATA: ${process.env.LOCALAPPDATA}`);
 
-  // Try direct command first (faster if globally installed)
-  try {
-    debugLog("Trying direct 'claude --version'...");
-    const { stdout, stderr } = await execAsync("claude --version", {
-      timeout: 10000,
-      windowsHide: true,
-    });
-    debugLog(`Direct command SUCCESS: ${stdout.trim()}`);
-    if (stderr) debugLog(`stderr: ${stderr}`);
-    return {
-      available: true,
-      version: stdout.trim(),
-      path: "claude",
-      method: "direct",
-    };
-  } catch (directErr) {
-    const errMsg = directErr instanceof Error ? directErr.message : String(directErr);
-    debugLog(`Direct command FAILED: ${errMsg}`);
+  // Try cached command first (fast path)
+  if (resolved.useCache) {
+    const cached = readCachedCLIStatus();
+    if (cached) {
+      if (cached.method === "npx" && !resolved.allowNpxFallback) {
+        debugLog(
+          "Skipping cached npx command because npx fallback is disabled for this check"
+        );
+      } else {
+        const cacheTimeoutMs =
+          cached.method === "npx" ? resolved.npxTimeoutMs : resolved.directTimeoutMs;
+        const cachedStatus = await probeCommand(
+          cached.path,
+          cached.method,
+          cacheTimeoutMs,
+          "cache"
+        );
+        if (cachedStatus) {
+          writeCachedCLIStatus(cachedStatus);
+          return cachedStatus;
+        }
+      }
+    }
   }
 
-  // Try npx as fallback (works if npm/node are installed)
-  try {
-    debugLog("Trying 'npx @anthropic-ai/claude-code --version'...");
-    const { stdout, stderr } = await execAsync(
-      "npx @anthropic-ai/claude-code --version",
-      {
-        timeout: 60000, // npx can be slow first time
-        windowsHide: true,
-      }
-    );
-    debugLog(`npx command SUCCESS: ${stdout.trim()}`);
-    if (stderr) debugLog(`stderr: ${stderr}`);
-    return {
-      available: true,
-      version: stdout.trim(),
-      path: "npx @anthropic-ai/claude-code",
-      method: "npx",
-    };
-  } catch (npxErr) {
-    const errMsg = npxErr instanceof Error ? npxErr.message : String(npxErr);
-    debugLog(`npx command FAILED: ${errMsg}`);
+  const directStatus = await probeCommand(
+    "claude",
+    "direct",
+    resolved.directTimeoutMs,
+    "probe"
+  );
+  if (directStatus) {
+    writeCachedCLIStatus(directStatus);
+    return directStatus;
+  }
+
+  if (!resolved.allowNpxFallback) {
+    debugLog("Skipping npx fallback per check options");
     debugLog("=== checkClaudeCLI END (not available) ===");
     return {
       available: false,
-      error:
-        "Claude Code CLI not found. npm/node may not be installed or not in PATH.",
+      error: "Claude Code CLI not found via direct command.",
     };
   }
+
+  // Try npx as fallback (works if npm/node are installed)
+  const npxStatus = await probeCommand(
+    "npx @anthropic-ai/claude-code",
+    "npx",
+    resolved.npxTimeoutMs,
+    "probe"
+  );
+  if (npxStatus) {
+    writeCachedCLIStatus(npxStatus);
+    return npxStatus;
+  }
+
+  debugLog("=== checkClaudeCLI END (not available) ===");
+  return {
+    available: false,
+    error:
+      "Claude Code CLI not found. npm/node may not be installed or not in PATH.",
+  };
 }
 
 /**
@@ -175,8 +320,10 @@ export async function installClaudeCLI(
  * Get the working CLI command (either 'claude' or 'npx @anthropic-ai/claude-code').
  * Returns null if neither method works.
  */
-export async function getWorkingCLICommand(): Promise<string | null> {
-  const status = await checkClaudeCLI();
+export async function getWorkingCLICommand(
+  options: CheckCLIOptions = {}
+): Promise<string | null> {
+  const status = await checkClaudeCLI(options);
   return status.available ? status.path || null : null;
 }
 
