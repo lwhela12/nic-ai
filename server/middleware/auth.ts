@@ -112,6 +112,15 @@ let lastConfigCheck = 0;
 const CONFIG_CACHE_DURATION = 60 * 1000; // 1 minute
 
 /**
+ * Invalidate the cached config so the next request re-reads from disk.
+ * Call this after login/logout/signup to avoid stale auth state.
+ */
+export function invalidateAuthCache() {
+  cachedConfig = null;
+  lastConfigCheck = 0;
+}
+
+/**
  * Auth middleware - validates subscription and injects API key
  */
 export async function authMiddleware(c: Context, next: Next) {

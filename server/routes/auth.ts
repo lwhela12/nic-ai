@@ -8,6 +8,7 @@ import {
   requireTeamContext,
   type TeamRole,
 } from "../lib/team";
+import { invalidateAuthCache } from "../middleware/auth";
 
 const auth = new Hono();
 
@@ -225,6 +226,7 @@ auth.post("/login", async (c) => {
       ownerEmail: null,
     };
     saveConfig(config);
+    invalidateAuthCache();
 
     return c.json({
       success: true,
@@ -277,6 +279,7 @@ auth.post("/login", async (c) => {
       maxLicenses: data.maxLicenses || 0,
     };
     saveConfig(config);
+    invalidateAuthCache();
 
     // Set API key in env
     if (data.anthropicApiKey) {
@@ -327,6 +330,7 @@ auth.post("/signup", async (c) => {
       ownerEmail: null,
     };
     saveConfig(config);
+    invalidateAuthCache();
 
     return c.json({
       success: true,
@@ -380,6 +384,7 @@ auth.post("/signup", async (c) => {
       maxLicenses: data.maxLicenses || 0,
     };
     saveConfig(config);
+    invalidateAuthCache();
 
     // Set API key in env
     if (data.anthropicApiKey) {
@@ -410,6 +415,7 @@ auth.post("/logout", async (c) => {
       email: config.email, // Keep email for convenience
     };
     saveConfig(clearedConfig);
+    invalidateAuthCache();
   }
 
   // Clear env
