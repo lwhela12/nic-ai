@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { readdir, readFile, writeFile, mkdir, stat } from "fs/promises";
+import { readdir, readFile, writeFile, mkdir, stat, unlink } from "fs/promises";
 import { join, dirname, basename, resolve, sep } from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
@@ -17,7 +17,11 @@ import { requireCaseAccess } from "../lib/team-access";
 import {
   scanPdfForSensitiveData,
   applyManualRedactionBoxes,
+  buildEvidencePacket,
+  buildFrontMatterPreview,
   type EvidencePacketManualRedactionBox,
+  type EvidencePacketCaption,
+  type EvidencePacketServiceInfo,
 } from "../lib/evidence-packet";
 
 const execAsync = promisify(exec);
@@ -95,6 +99,8 @@ interface Draft {
   type: string;
   createdAt: string;
   targetPath: string;
+  generatedAt?: string;
+  outputPath?: string;
 }
 
 // List generated documents in .pi_tool and standard locations
@@ -495,6 +501,40 @@ app.get("/drafts", async (c) => {
           type,
           createdAt: meta.createdAt || fileStat.mtime.toISOString(),
           targetPath,
+        });
+      } else if (entry.endsWith(".json") && entry.startsWith("packet-")) {
+        // Packet creation mode drafts
+        const filePath = join(draftsPath, entry);
+        const fileStat = await stat(filePath);
+        const id = entry.replace(/\.json$/, "");
+
+        // Try to read draftName, generatedAt, outputPath from the JSON
+        let draftName = "Evidence Packet Draft";
+        let generatedAt: string | undefined;
+        let outputPath: string | undefined;
+        try {
+          const jsonContent = await readFile(filePath, "utf-8");
+          const parsed = JSON.parse(jsonContent);
+          if (typeof parsed.draftName === "string" && parsed.draftName.trim()) {
+            draftName = parsed.draftName;
+          }
+          if (typeof parsed.generatedAt === "string" && parsed.generatedAt.trim()) {
+            generatedAt = parsed.generatedAt;
+          }
+          if (typeof parsed.outputPath === "string" && parsed.outputPath.trim()) {
+            outputPath = parsed.outputPath;
+          }
+        } catch { /* ignore parse errors */ }
+
+        drafts.push({
+          id,
+          name: draftName,
+          path: `.pi_tool/drafts/${entry}`,
+          type: "packet",
+          createdAt: fileStat.mtime.toISOString(),
+          targetPath: "Hearing/Evidence Packet.pdf",
+          generatedAt,
+          outputPath,
         });
       }
     }
@@ -1049,6 +1089,328 @@ app.get("/bundle-status", async (c) => {
   } catch (err) {
     console.error("Bundle status error:", err);
     return c.json({ error: `Status check failed: ${err}` }, 500);
+  }
+});
+
+// --- Packet creation mode endpoints ---
+
+// Save packet draft
+app.post("/packet-draft", async (c) => {
+  const { caseFolder, state } = await c.req.json();
+
+  if (!caseFolder || !state) {
+    return c.json({ error: "caseFolder and state required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  try {
+    const draftsDir = join(caseFolder, ".pi_tool", "drafts");
+    await mkdir(draftsDir, { recursive: true });
+
+    const draftId = state.draftId || `packet-${Date.now()}`;
+    const draftPath = join(draftsDir, `${draftId}.json`);
+    await writeFile(draftPath, JSON.stringify(state, null, 2), "utf-8");
+
+    return c.json({ success: true, draftId });
+  } catch (err) {
+    console.error("packet-draft save error:", err);
+    return c.json({ error: `Save failed: ${err}` }, 500);
+  }
+});
+
+// Load packet draft
+app.get("/packet-draft/:id", async (c) => {
+  const caseFolder = c.req.query("case");
+  const draftId = c.req.param("id");
+
+  if (!caseFolder || !draftId) {
+    return c.json({ error: "case query param and draft id required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  try {
+    const draftPath = join(caseFolder, ".pi_tool", "drafts", `${draftId}.json`);
+    const content = await readFile(draftPath, "utf-8");
+    return c.json(JSON.parse(content));
+  } catch {
+    return c.json({ error: "Draft not found" }, 404);
+  }
+});
+
+// Duplicate a packet draft
+app.post("/packet-draft/duplicate", async (c) => {
+  const { caseFolder, draftId } = await c.req.json();
+
+  if (!caseFolder || !draftId) {
+    return c.json({ error: "caseFolder and draftId required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  try {
+    const sourcePath = join(caseFolder, ".pi_tool", "drafts", `${draftId}.json`);
+    const content = await readFile(sourcePath, "utf-8");
+    const state = JSON.parse(content);
+
+    // Create new draft with fresh ID
+    const newDraftId = `packet-${Date.now()}`;
+    state.draftId = newDraftId;
+    // Clear generation artifacts so the copy is a fresh working copy
+    state.generatedAt = null;
+    state.outputPath = null;
+    // Append " (copy)" to the draft name
+    if (typeof state.draftName === "string" && state.draftName.trim()) {
+      state.draftName = `${state.draftName} (copy)`;
+    } else {
+      state.draftName = "Evidence Packet Draft (copy)";
+    }
+
+    const draftsDir = join(caseFolder, ".pi_tool", "drafts");
+    await writeFile(join(draftsDir, `${newDraftId}.json`), JSON.stringify(state, null, 2), "utf-8");
+
+    return c.json({ success: true, draftId: newDraftId });
+  } catch {
+    return c.json({ error: "Source draft not found" }, 404);
+  }
+});
+
+// Delete a packet draft
+app.delete("/packet-draft/:id", async (c) => {
+  const caseFolder = c.req.query("case");
+  const draftId = c.req.param("id");
+
+  if (!caseFolder || !draftId) {
+    return c.json({ error: "case query param and draft id required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  try {
+    const draftPath = join(caseFolder, ".pi_tool", "drafts", `${draftId}.json`);
+    await unlink(draftPath);
+    return c.json({ success: true });
+  } catch {
+    return c.json({ error: "Draft not found" }, 404);
+  }
+});
+
+// Preview front matter PDF
+app.post("/preview-front-matter", async (c) => {
+  const { caseFolder, frontMatter, documents, documentCount, firmRoot } = await c.req.json();
+
+  if (!caseFolder || !frontMatter) {
+    return c.json({ error: "caseFolder and frontMatter required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  try {
+    // Build TOC entries from actual document data when available, else placeholders
+    const docList: Array<{ title?: string; date?: string }> = Array.isArray(documents) ? documents : [];
+    const entryCount = docList.length > 0 ? docList.length : (documentCount || 5);
+    const placeholderEntries = [];
+    for (let i = 0; i < entryCount; i++) {
+      const d = docList[i];
+      placeholderEntries.push({
+        title: d?.title || `Document ${i + 1}`,
+        date: d?.date || undefined,
+        startPage: i * 3 + 1,
+        endPage: (i + 1) * 3,
+      });
+    }
+
+    // If firmBlockLines are empty, try to build from firm config
+    let firmBlockLines: string[] = Array.isArray(frontMatter.firmBlockLines) ? frontMatter.firmBlockLines : [];
+    const hasNonEmptyLines = firmBlockLines.some((l: string) => typeof l === "string" && l.trim());
+    if (!hasNonEmptyLines) {
+      const configRoot = firmRoot || dirname(caseFolder);
+      try {
+        const configPath = join(configRoot, ".pi_tool", "firm-config.json");
+        const configContent = await readFile(configPath, "utf-8");
+        const config = JSON.parse(configContent);
+        const built: string[] = [];
+        if (config.attorneyName) built.push(config.attorneyName);
+        if (config.nevadaBarNo) built.push(`NV Bar No. ${config.nevadaBarNo}`);
+        if (config.firmName) built.push(config.firmName);
+        if (config.address) built.push(config.address);
+        if (config.cityStateZip) built.push(config.cityStateZip);
+        if (config.phone) built.push(`Phone: ${config.phone}`);
+        if (config.email) built.push(config.email);
+        if (built.length > 0) firmBlockLines = built;
+      } catch {
+        // No firm config available, leave lines empty
+      }
+    }
+
+    const caption: EvidencePacketCaption = {
+      claimantName: frontMatter.claimantName || "",
+      claimNumber: frontMatter.claimNumber,
+      hearingNumber: frontMatter.hearingNumber,
+      hearingDateTime: frontMatter.hearingDateTime,
+      appearance: frontMatter.appearance,
+      introductoryCounselLine: frontMatter.introductoryCounselLine,
+    };
+
+    const service: EvidencePacketServiceInfo = {
+      serviceDate: frontMatter.serviceDate,
+      serviceMethod: frontMatter.serviceMethod ? `[x] ${frontMatter.serviceMethod}` : undefined,
+      recipients: frontMatter.recipients,
+    };
+
+    const pdfBytes = await buildFrontMatterPreview({
+      caption,
+      firmBlockLines,
+      service,
+      tocEntries: placeholderEntries,
+      includeAffirmationPage: true,
+    });
+
+    c.header("Content-Type", "application/pdf");
+    c.header("Content-Disposition", 'inline; filename="front-matter-preview.pdf"');
+    return c.body(pdfBytes);
+  } catch (err) {
+    console.error("preview-front-matter error:", err);
+    return c.json({ error: `Preview failed: ${err}` }, 500);
+  }
+});
+
+// Generate final evidence packet
+app.post("/generate-packet", async (c) => {
+  const { caseFolder, documents, frontMatter, redactionMode, firmRoot } = await c.req.json();
+
+  if (!caseFolder || !documents || !frontMatter) {
+    return c.json({ error: "caseFolder, documents, and frontMatter required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  try {
+    const caption: EvidencePacketCaption = {
+      claimantName: frontMatter.claimantName || "",
+      claimNumber: frontMatter.claimNumber,
+      hearingNumber: frontMatter.hearingNumber,
+      hearingDateTime: frontMatter.hearingDateTime,
+      appearance: frontMatter.appearance,
+      introductoryCounselLine: frontMatter.introductoryCounselLine,
+    };
+
+    const service: EvidencePacketServiceInfo = {
+      serviceDate: frontMatter.serviceDate,
+      serviceMethod: frontMatter.serviceMethod ? `[x] ${frontMatter.serviceMethod}` : undefined,
+      recipients: frontMatter.recipients,
+    };
+
+    const result = await buildEvidencePacket({
+      caseFolder,
+      documents: documents.map((d: any) => ({
+        path: d.path,
+        title: d.title || "",
+        date: d.date || undefined,
+        docType: d.docType || d.type || undefined,
+        include: d.include !== false,
+      })),
+      caption,
+      redaction: redactionMode
+        ? { enabled: true, mode: redactionMode }
+        : undefined,
+      service,
+      includeAffirmationPage: true,
+      firmBlockLines: frontMatter.firmBlockLines,
+    });
+
+    // Determine output path
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const outputRelPath = `Evidence Packet - ${dateStr}.pdf`;
+    const fullOutputPath = join(caseFolder, outputRelPath);
+    await mkdir(dirname(fullOutputPath), { recursive: true });
+    await writeFile(fullOutputPath, result.pdfBytes);
+
+    // Auto-save state as a draft for future reference
+    try {
+      const draftsDir = join(caseFolder, ".pi_tool", "drafts");
+      await mkdir(draftsDir, { recursive: true });
+      const draftId = `packet-${Date.now()}`;
+      await writeFile(
+        join(draftsDir, `${draftId}.json`),
+        JSON.stringify({ documents, frontMatter, generatedAt: new Date().toISOString(), outputPath: outputRelPath }, null, 2),
+        "utf-8"
+      );
+    } catch { /* ignore draft save errors */ }
+
+    return c.json({
+      success: true,
+      outputPath: outputRelPath,
+      totalPages: result.totalPages,
+      warnings: result.warnings,
+    });
+  } catch (err) {
+    console.error("generate-packet error:", err);
+    return c.json({ error: `Generation failed: ${err}` }, 500);
+  }
+});
+
+// Batch PII scan for multiple documents
+app.post("/batch-scan-pii", async (c) => {
+  const { caseFolder, paths } = await c.req.json();
+
+  if (!caseFolder || !Array.isArray(paths) || paths.length === 0) {
+    return c.json({ error: "caseFolder and paths[] required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  try {
+    const results = await Promise.all(
+      paths.map(async (relativePath: string) => {
+        const normalized = normalizeRelativePath(relativePath);
+        if (!normalized.toLowerCase().endsWith(".pdf")) {
+          return { path: normalized, findings: [], approved: true };
+        }
+        try {
+          const fullPath = resolveCasePath(caseFolder, normalized);
+          const scan = await scanPdfForSensitiveData(fullPath, normalized);
+          return {
+            path: normalized,
+            findings: scan.findings.map(f => ({
+              page: f.page,
+              kind: f.kind,
+              preview: f.preview,
+            })),
+            approved: false,
+          };
+        } catch {
+          return { path: normalized, findings: [], approved: true };
+        }
+      })
+    );
+
+    return c.json({ results });
+  } catch (err) {
+    console.error("batch-scan-pii error:", err);
+    return c.json({ error: `Batch scan failed: ${err}` }, 500);
   }
 });
 

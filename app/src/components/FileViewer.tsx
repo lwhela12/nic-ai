@@ -27,6 +27,12 @@ interface Props {
   activeAgentViewId?: string | null
   onApplyAgentView?: (view: AgentDocumentView) => void
   onClearSavedAgentViews?: () => void
+  packetMode?: boolean
+  packetSelectedPaths?: Set<string>
+  onPacketToggleFile?: (path: string, fileData: {
+    title: string; date?: string; type?: string; fileName: string;
+    hasWarning: boolean; warningReason?: string
+  } | null) => void
 }
 
 type SortOption = 'folder' | 'date' | 'type'
@@ -369,6 +375,9 @@ export default function FileViewer({
   activeAgentViewId,
   onApplyAgentView,
   onClearSavedAgentViews,
+  packetMode,
+  packetSelectedPaths,
+  onPacketToggleFile,
 }: Props) {
   const isWC = documentIndex?.practice_area === "Workers' Compensation"
   const [sort, setSort] = useState<SortOption>('folder')
@@ -652,6 +661,14 @@ export default function FileViewer({
       </div>
 
       <div className="flex-1 overflow-y-auto px-3 py-3">
+        {packetMode && (
+          <div className="mb-3 px-2 py-2 bg-accent-50 border border-accent-200 rounded-lg">
+            <p className="text-xs font-medium text-accent-700">Select files for evidence packet</p>
+            {packetSelectedPaths && packetSelectedPaths.size > 0 && (
+              <p className="text-[11px] text-accent-600 mt-0.5">{packetSelectedPaths.size} selected</p>
+            )}
+          </div>
+        )}
         <div className="flex items-center justify-between px-2 py-1.5 mb-2">
           <span className="text-xs font-semibold text-brand-500 uppercase tracking-wide">
             Files
@@ -707,9 +724,48 @@ export default function FileViewer({
                       className={`flex items-center gap-1 group rounded-lg border px-1 focus-within:bg-surface-100 ${
                         hasWarning
                           ? 'bg-amber-50 border-amber-200'
-                          : 'bg-transparent border-transparent'
+                          : packetMode && packetSelectedPaths?.has(filePath)
+                            ? 'bg-accent-50 border-accent-200'
+                            : 'bg-transparent border-transparent'
                       }`}
                     >
+                      {packetMode && onPacketToggleFile && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            const isSelected = packetSelectedPaths?.has(filePath)
+                            onPacketToggleFile(
+                              filePath,
+                              isSelected ? null : {
+                                title: title,
+                                date: date || undefined,
+                                type: fileData?.type as string || undefined,
+                                fileName,
+                                hasWarning: needsReview,
+                                warningReason: hasHandwrittenData
+                                  ? 'Handwritten data'
+                                  : extractionIssue
+                                    ? 'Extraction issue'
+                                    : !date ? 'No date' : undefined,
+                              }
+                            )
+                          }}
+                          className="flex-shrink-0 p-0.5"
+                          title={packetSelectedPaths?.has(filePath) ? 'Remove from packet' : 'Add to packet'}
+                        >
+                          <div className={`w-4 h-4 rounded border-2 flex items-center justify-center transition-colors ${
+                            packetSelectedPaths?.has(filePath)
+                              ? 'bg-accent-600 border-accent-600'
+                              : 'border-surface-300 hover:border-accent-400'
+                          }`}>
+                            {packetSelectedPaths?.has(filePath) && (
+                              <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                              </svg>
+                            )}
+                          </div>
+                        </button>
+                      )}
                       <button
                         onClick={() => {
                           const handwrittenWarning = hasHandwrittenData

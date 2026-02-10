@@ -2,6 +2,17 @@ import { useState, useRef, useEffect, useMemo, memo, useCallback } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
+interface EvidencePacketPlanData {
+  documents: Array<{
+    path: string
+    title?: string
+  }>
+  frontMatter: Partial<{
+    claimantName: string
+    claimNumber: string
+  }>
+}
+
 interface Props {
   caseFolder: string
   apiUrl: string
@@ -16,6 +27,7 @@ interface Props {
   onIndexStatusChange?: (status: IndexStatus | null) => void
   onStartReindex?: (forceFullReindex?: boolean) => void
   isReindexing?: boolean
+  onEvidencePacketPlanned?: (data: EvidencePacketPlanData) => void
 }
 
 interface AgentDocumentViewPayload {
@@ -212,7 +224,7 @@ const KEEP_RECENT = 2
 // Context usage thresholds
 const CONTEXT_DANGER_PERCENT = 55   // Red warning, trigger auto-summarize (lowered for earlier prevention)
 
-export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onEvidencePacketGenerated, onShowFile, onDocumentView, onIndexStatusChange, onStartReindex, isReindexing }: Props) {
+export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onEvidencePacketGenerated, onShowFile, onDocumentView, onIndexStatusChange, onStartReindex, isReindexing, onEvidencePacketPlanned }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -670,6 +682,27 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                 onDocumentView?.(data.view)
               }
 
+              if (data.type === 'evidence_packet_plan' && data.plan && onEvidencePacketPlanned) {
+                const proposed = data.plan.proposedDocuments || []
+                const caption = data.plan.caption || {}
+                const service = data.plan.service || {}
+                onEvidencePacketPlanned({
+                  documents: proposed.map((d: { path: string; title?: string }) => ({
+                    path: d.path,
+                    title: d.title,
+                  })),
+                  frontMatter: {
+                    ...caption,
+                    hearingNumber: caption.hearingNumber,
+                    hearingDateTime: caption.hearingDateTime,
+                    appearance: caption.appearance,
+                    serviceDate: service.serviceDate,
+                    serviceMethod: service.serviceMethod,
+                    recipients: service.recipients,
+                  },
+                })
+              }
+
               if (data.type === 'usage') {
                 setContextUsage({
                   inputTokens: data.inputTokens,
@@ -729,7 +762,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                   return updated
                 })
                 // Check if index-modifying tools were used
-                const indexTools = ['Edit', 'Bash', 'update_index', 'write_file', 'resolve_conflict', 'batch_resolve_conflicts']
+                const indexTools = ['Edit', 'Bash', 'update_index', 'update_file_entry', 'write_file', 'resolve_conflict', 'batch_resolve_conflicts']
                 if (toolsUsed.some(t => indexTools.some(it => t.includes(it))) && onIndexMayHaveChanged) {
                   onIndexMayHaveChanged()
                 }

@@ -709,6 +709,10 @@ app.post("/chat-v2", async (c) => {
           await stream.writeSSE({
             data: JSON.stringify({ type: "document_view", view: event.view }),
           });
+        } else if (event.type === "evidence_packet_plan" && event.plan) {
+          await stream.writeSSE({
+            data: JSON.stringify({ type: "evidence_packet_plan", plan: event.plan }),
+          });
         } else if (event.type === "done") {
           // Report usage to subscription server
           if (event.usage) {

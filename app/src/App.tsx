@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import './index.css'
 import FileViewer from './components/FileViewer'
 import Chat from './components/Chat'
@@ -9,6 +9,8 @@ import FirmDashboard from './components/FirmDashboard'
 import Login from './components/Login'
 import TodoDrawer from './components/TodoDrawer'
 import ContactCard from './components/ContactCard'
+import PacketCreation from './components/PacketCreation'
+import type { PacketDocument, PacketFrontMatter, PacketState } from './types/packet'
 const API_URL = ''  // Use relative URLs - Vite proxies /api to localhost:3001
 
 interface FirmTodo {
@@ -341,6 +343,39 @@ function App() {
   const [agentDocumentView, setAgentDocumentView] = useState<AgentDocumentView | null>(null)
   const [savedAgentViews, setSavedAgentViews] = useState<AgentDocumentView[]>([])
 
+  // Packet creation mode state — persisted to sessionStorage so Vite HMR reloads don't lose it
+  const [packetMode, setPacketMode] = useState(() => {
+    try { return sessionStorage.getItem('pi-packet-mode') === '1' } catch { return false }
+  })
+  const [packetState, setPacketState] = useState<PacketState | null>(() => {
+    try {
+      const raw = sessionStorage.getItem('pi-packet-state')
+      return raw ? JSON.parse(raw) as PacketState : null
+    } catch { return null }
+  })
+
+  // Sync packet mode to sessionStorage so it survives page reloads (Vite HMR)
+  useEffect(() => {
+    try {
+      if (packetMode) {
+        sessionStorage.setItem('pi-packet-mode', '1')
+      } else {
+        sessionStorage.removeItem('pi-packet-mode')
+        sessionStorage.removeItem('pi-packet-state')
+      }
+    } catch { /* ignore */ }
+  }, [packetMode])
+
+  useEffect(() => {
+    try {
+      if (packetState) {
+        sessionStorage.setItem('pi-packet-state', JSON.stringify(packetState))
+      } else {
+        sessionStorage.removeItem('pi-packet-state')
+      }
+    } catch { /* ignore */ }
+  }, [packetState])
+
   // Ref to track current caseFolder for async completions
   const caseFolderRef = useRef(caseFolder)
   caseFolderRef.current = caseFolder
@@ -411,6 +446,208 @@ function App() {
     setSavedAgentViews([])
   }, [])
 
+  // --- Packet creation mode handlers ---
+  const createDefaultFrontMatter = useCallback(async (): Promise<PacketFrontMatter> => {
+    const summary = documentIndex?.summary
+    const fm: PacketFrontMatter = {
+      claimantName: summary?.client || '',
+      claimNumber: (summary?.claim_numbers && typeof summary.claim_numbers === 'object'
+        ? Object.values(summary.claim_numbers).find(v => typeof v === 'string') as string || ''
+        : '') || '',
+      hearingNumber: '',
+      hearingDateTime: '',
+      appearance: 'Telephonic',
+      introductoryCounselLine: '',
+      serviceDate: new Date().toLocaleDateString('en-US'),
+      serviceMethod: 'Via E-File',
+      recipients: [],
+      firmBlockLines: [],
+    }
+    // Try to load firm config for firm block lines
+    if (firmRoot) {
+      try {
+        const res = await fetch(`${API_URL}/api/knowledge/firm-config?root=${encodeURIComponent(firmRoot)}`)
+        if (res.ok) {
+          const config = await res.json()
+          if (Array.isArray(config?.firmBlockLines) && config.firmBlockLines.some((l: string) => l?.trim())) {
+            fm.firmBlockLines = config.firmBlockLines
+          } else {
+            // Build from individual firm config fields
+            const lines: string[] = []
+            if (config.attorneyName) lines.push(config.attorneyName)
+            if (config.nevadaBarNo) lines.push(`NV Bar No. ${config.nevadaBarNo}`)
+            if (config.firmName) lines.push(config.firmName)
+            if (config.address) lines.push(config.address)
+            if (config.cityStateZip) lines.push(config.cityStateZip)
+            if (config.phone) lines.push(`Phone: ${config.phone}`)
+            if (config.email) lines.push(config.email)
+            if (lines.length > 0) fm.firmBlockLines = lines
+          }
+          if (typeof config?.introductoryCounselLine === 'string') {
+            fm.introductoryCounselLine = config.introductoryCounselLine
+          }
+          if (Array.isArray(config?.serviceRecipients)) {
+            fm.recipients = config.serviceRecipients
+          }
+        }
+      } catch { /* ignore */ }
+    }
+    return fm
+  }, [documentIndex, firmRoot])
+
+  const handleEnterPacketMode = useCallback(async () => {
+    const fm = await createDefaultFrontMatter()
+    setPacketState({
+      documents: [],
+      frontMatter: fm,
+      piiResults: [],
+      piiScanned: false,
+      generatedAt: null,
+      outputPath: null,
+      draftId: null,
+    })
+    setPacketMode(true)
+  }, [createDefaultFrontMatter])
+
+  // Pre-build lookup map: keyed by full path and bare filename (both lowercase, with and without .pdf)
+  const docLookup = useMemo(() => {
+    const map = new Map<string, { file: DocumentFile; folder: string }>()
+    if (!documentIndex?.folders) return map
+    for (const [folder, data] of Object.entries(documentIndex.folders)) {
+      for (const file of getFolderFiles(data)) {
+        if (typeof file === 'string') continue
+        const name = getDocumentFileName(file)?.toLowerCase()
+        if (!name) continue
+        const fullPath = (folder === '.' || folder === '') ? name : `${folder.toLowerCase()}/${name}`
+        const entry = { file, folder }
+        // Full path keys (highest priority — set first, never overwritten)
+        if (!map.has(fullPath)) map.set(fullPath, entry)
+        const noExt = fullPath.replace('.pdf', '')
+        if (noExt !== fullPath && !map.has(noExt)) map.set(noExt, entry)
+        // Bare filename keys (lower priority — only set if not already taken)
+        if (!map.has(name)) map.set(name, entry)
+        const nameNoExt = name.replace('.pdf', '')
+        if (nameNoExt !== name && !map.has(nameNoExt)) map.set(nameNoExt, entry)
+      }
+    }
+    return map
+  }, [documentIndex])
+
+  const handleEnterPacketModeFromAgent = useCallback(async (
+    proposedDocs: Array<{ path: string; title?: string }>,
+    frontMatter: Partial<PacketFrontMatter>
+  ) => {
+    const defaultFm = await createDefaultFrontMatter()
+    const cleaned = Object.fromEntries(
+      Object.entries(frontMatter).filter(([, v]) => v !== undefined)
+    )
+    const documents: PacketDocument[] = proposedDocs.map((doc, i) => {
+      const entry = docLookup.get(doc.path.toLowerCase())
+      const match = entry?.file
+      const fileName = doc.path.split('/').pop() || doc.path
+      if (match && typeof match !== 'string') {
+        // Resolve the actual path from the index (folder + filename) rather than trusting the agent's path
+        const actualFileName = getDocumentFileName(match) || fileName
+        const resolvedPath = entry.folder && entry.folder !== '.' && entry.folder !== ''
+          ? `${entry.folder}/${actualFileName}`
+          : actualFileName
+        const title = typeof match.title === 'string' ? match.title : (doc.title || fileName)
+        const date = typeof match.date === 'string' ? match.date : null
+        const type = typeof match.type === 'string' ? match.type : ''
+        const hasHandwrittenData = match.has_handwritten_data === true
+        const hasHandwrittenFields = Array.isArray(match.handwritten_fields) && match.handwritten_fields.length > 0
+        const extractionIssue = typeof match.issues === 'string' && match.issues.trim() ? match.issues.trim() : null
+        const isUserReviewed = Boolean(match.user_reviewed)
+        const needsReview = (hasHandwrittenData || hasHandwrittenFields || !!extractionIssue) && !isUserReviewed
+        const hasWarning = needsReview || !date
+        const warningReason = hasHandwrittenData || hasHandwrittenFields
+          ? 'Handwritten data'
+          : extractionIssue
+            ? 'Extraction issue'
+            : !date ? 'No date' : undefined
+        return { path: resolvedPath, title, date, type, fileName: actualFileName, pinned: false, order: i, hasWarning, warningReason }
+      }
+      // No index match — fall back to agent-provided title
+      return {
+        path: doc.path,
+        title: doc.title || fileName,
+        date: null,
+        type: '',
+        fileName,
+        pinned: false,
+        order: i,
+        hasWarning: true,
+        warningReason: 'No date',
+      }
+    })
+    setPacketState({
+      documents,
+      frontMatter: { ...defaultFm, ...cleaned },
+      piiResults: [],
+      piiScanned: false,
+      generatedAt: null,
+      outputPath: null,
+      draftId: null,
+    })
+    setPacketMode(true)
+  }, [createDefaultFrontMatter, docLookup])
+
+  const handleEnterPacketModeFromDraft = useCallback(async (draftId: string) => {
+    if (!caseFolder) return
+    try {
+      const res = await fetch(`${API_URL}/api/docs/packet-draft/${encodeURIComponent(draftId)}?case=${encodeURIComponent(caseFolder)}`)
+      if (res.ok) {
+        const draft = await res.json() as PacketState
+        setPacketState({ ...draft, draftId })
+        setPacketMode(true)
+      }
+    } catch { /* ignore */ }
+  }, [caseFolder])
+
+  const handleExitPacketMode = useCallback(() => {
+    setPacketMode(false)
+    setPacketState(null)
+  }, [])
+
+  const handlePacketToggleFile = useCallback((path: string, fileData: {
+    title: string; date?: string; type?: string; fileName: string;
+    hasWarning: boolean; warningReason?: string
+  } | null) => {
+    setPacketState(prev => {
+      if (!prev) return prev
+      const existing = prev.documents.findIndex(d => d.path === path)
+      if (existing >= 0) {
+        // Remove
+        const docs = prev.documents.filter((_, i) => i !== existing)
+          .map((d, i) => ({ ...d, order: i }))
+        return { ...prev, documents: docs }
+      }
+      if (!fileData) return prev
+      // Add - insert chronologically among unpinned docs
+      const newDoc: PacketDocument = {
+        path,
+        title: fileData.title,
+        date: fileData.date || null,
+        type: fileData.type || '',
+        fileName: fileData.fileName,
+        pinned: false,
+        order: prev.documents.length,
+        hasWarning: fileData.hasWarning,
+        warningReason: fileData.warningReason,
+      }
+      const docs = [...prev.documents, newDoc].map((d, i) => ({ ...d, order: i }))
+      return { ...prev, documents: docs }
+    })
+  }, [])
+
+  const handlePacketUpdateState = useCallback((updater: (prev: PacketState) => PacketState) => {
+    setPacketState(prev => prev ? updater(prev) : prev)
+  }, [])
+
+  const packetSelectedPaths = useMemo(() => {
+    if (!packetState) return new Set<string>()
+    return new Set(packetState.documents.map(d => d.path))
+  }, [packetState])
 
   // Contact card state
   const [isContactCardOpen, setIsContactCardOpen] = useState(false)
@@ -618,6 +855,8 @@ function App() {
     setDocumentIndex(null)
     setViewContent('')
     setFileViewUrl(null)
+    setPacketMode(false)
+    setPacketState(null)
   }, [])
 
   const beginFolderSetup = useCallback(async (path: string, options?: { forcePrompt?: boolean }) => {
@@ -1102,29 +1341,63 @@ function App() {
     saveFolderPracticeArea,
   ])
 
+  // Pre-build lookup map: keyed by full path and bare filename (both lowercase, with and without .pdf)
+  const buildDocSummaryContent = useCallback((filePath: string): string | null => {
+    const entry = docLookup.get(filePath.toLowerCase())
+    const match = entry?.file
+    if (!match || typeof match === 'string') return null
+
+    const fileName = getDocumentFileName(match) || filePath.split('/').pop() || filePath
+    const title = typeof match.title === 'string' ? match.title : fileName
+    const date = typeof match.date === 'string' ? match.date : ''
+    const keyInfo = typeof match.key_info === 'string' ? match.key_info : 'No details extracted'
+    const issues = typeof match.issues === 'string' ? match.issues : ''
+    const hasHandwrittenData = match.has_handwritten_data === true
+    const handwrittenFields = Array.isArray(match.handwritten_fields)
+      ? (match.handwritten_fields as string[]).filter(f => typeof f === 'string' && f.trim() !== '')
+      : []
+    const isUserReviewed = Boolean(match.user_reviewed)
+    const reviewedAt = typeof match.reviewed_at === 'string' ? match.reviewed_at.trim() : ''
+    const reviewNotes = typeof match.review_notes === 'string' ? match.review_notes.trim() : ''
+
+    const handwrittenWarning = hasHandwrittenData
+      ? `<div class="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
+          <span class="font-medium">⚠️ Handwritten Data Detected:</span> Verify extracted values from this document.
+          ${handwrittenFields.length > 0 ? `<div class="mt-2 text-xs">Handwritten fields: ${handwrittenFields.join(', ')}</div>` : ''}
+        </div>`
+      : ''
+    const reviewedBlock = isUserReviewed
+      ? `<div class="mt-4 bg-emerald-50 border border-emerald-200 rounded-xl p-4 text-sm text-emerald-800">
+          <span class="font-medium">✅ User Reviewed</span>
+          ${reviewedAt ? `<div class="mt-2 text-xs">Reviewed at: ${reviewedAt}</div>` : ''}
+          ${reviewNotes ? `<div class="mt-2 text-xs">${reviewNotes}</div>` : ''}
+        </div>`
+      : ''
+
+    return `
+<div class="p-6">
+  <h2 class="text-lg font-semibold text-gray-900 mb-1">${title}</h2>
+  <p class="text-sm text-gray-500 mb-4">${fileName}</p>
+  ${date ? `<div class="text-sm mb-3"><span class="font-medium text-gray-700">Date:</span> <span class="text-gray-600">${date}</span></div>` : ''}
+  <div class="bg-gray-50 rounded-xl p-4">
+    <p class="text-sm font-medium text-gray-900 mb-2">Key Information</p>
+    <p class="text-sm text-gray-600 leading-relaxed">${keyInfo}</p>
+  </div>
+  ${issues ? `<div class="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800"><span class="font-medium">Issue:</span> ${issues}</div>` : ''}
+  ${handwrittenWarning}
+  ${reviewedBlock}
+</div>`
+  }, [docLookup])
+
   const handleShowFile = useCallback((filePath: string) => {
     if (!caseFolder) return
-    // Try to find the file in the document index to get the correct path
+    const entry = docLookup.get(filePath.toLowerCase())
     let resolvedPath = filePath
-    const filename = filePath.split('/').pop()?.toLowerCase() || filePath.toLowerCase()
-
-    if (documentIndex?.folders) {
-      // Search through all folders to find matching file
-      for (const [folder, data] of Object.entries(documentIndex.folders)) {
-        const files = getFolderFiles(data)
-        const match = files.find((file) => {
-          const matchName = getDocumentFileName(file)?.toLowerCase()
-          if (!matchName) return false
-          const trimmed = filename.replace('.pdf', '')
-          return matchName === filename || matchName.includes(trimmed)
-        })
-        if (match) {
-          const matchName = getDocumentFileName(match)
-          if (matchName) {
-            resolvedPath = folder === '.' || folder === '' ? matchName : `${folder}/${matchName}`
-          }
-          break
-        }
+    if (entry) {
+      const matchName = getDocumentFileName(entry.file)
+      if (matchName) {
+        const folder = entry.folder
+        resolvedPath = folder === '.' || folder === '' ? matchName : `${folder}/${matchName}`
       }
     }
 
@@ -1132,8 +1405,10 @@ function App() {
     setFileViewUrl(url)
     setFileViewName(resolvedPath.split('/').pop() || resolvedPath)
     setSelectedFilePath(resolvedPath)
-    setViewContent('')
-  }, [caseFolder, documentIndex])
+    const summary = buildDocSummaryContent(resolvedPath)
+    setViewContent(summary || '')
+    setVisualizerMode('summary')
+  }, [caseFolder, docLookup, buildDocSummaryContent])
 
   const handleEvidencePacketGenerated = useCallback((filePath: string) => {
     const normalizedPath = filePath.trim()
@@ -1435,6 +1710,33 @@ function App() {
                 )}
               </div>
             </div>
+            {/* Packet Creation button - WC only */}
+            {practiceArea === 'Workers\' Compensation' && documentIndex && (
+              packetMode ? (
+                <button
+                  onClick={handleExitPacketMode}
+                  className="flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-lg
+                             bg-accent-600 text-white hover:bg-accent-700 transition-colors ml-3"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                  <span>Exit Packet Mode</span>
+                </button>
+              ) : (
+                <button
+                  onClick={handleEnterPacketMode}
+                  className="flex items-center gap-2 text-sm text-brand-200 hover:text-white
+                             transition-colors px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 ml-3"
+                  title="Build Evidence Packet"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                  </svg>
+                  <span>Packet</span>
+                </button>
+              )
+            )}
           </div>
           <div className="flex items-center gap-4">
             {/* Review Items button - highlighted when there are items */}
@@ -1547,6 +1849,9 @@ function App() {
             generatedDocs={generatedDocs}
             caseFolder={caseFolder}
             apiUrl={API_URL}
+            packetMode={packetMode}
+            packetSelectedPaths={packetSelectedPaths}
+            onPacketToggleFile={handlePacketToggleFile}
             onDocSelect={(doc, docPath, filePath) => {
               handleViewUpdate(doc, docPath)
               setSelectedFilePath(filePath || null)
@@ -1564,7 +1869,8 @@ function App() {
               setFileViewUrl(url)
               setFileViewName(filename)
               setSelectedFilePath(filePath)
-              // Keep the summary content if we have it, don't clear it
+              const summary = buildDocSummaryContent(filePath)
+              if (summary) setViewContent(summary)
               setVisualizerMode('document')
             }}
             indexStatus={indexStatusForViewer}
@@ -1577,41 +1883,67 @@ function App() {
           />
         }
         centerPanel={
-          <div className="relative h-full">
-            <Chat
+          packetMode && packetState ? (
+            <PacketCreation
+              packetState={packetState}
+              onUpdateState={handlePacketUpdateState}
               caseFolder={caseFolder}
               apiUrl={API_URL}
-              onViewUpdate={handleViewUpdate}
-              initialPrompt={reviewPrompt}
-              onInitialPromptUsed={() => setReviewPrompt('')}
-              onIndexMayHaveChanged={reloadDocumentIndex}
-              onDraftsMayHaveChanged={() => setRefreshDraftsKey(k => k + 1)}
-              onEvidencePacketGenerated={handleEvidencePacketGenerated}
+              firmRoot={firmRoot || undefined}
               onShowFile={handleShowFile}
-              onDocumentView={handleDocumentView}
-              onIndexStatusChange={setIndexStatusForViewer}
-              onStartReindex={(forceFullReindex) => {
-                if (forceFullReindex) {
-                  startCaseIndexing(caseFolder)
-                } else {
-                  // Check for changed files first, then start indexing only those
-                  fetch(`${API_URL}/api/files/index-status?case=${encodeURIComponent(caseFolder)}`)
-                    .then(res => res.json())
-                    .then(status => {
-                      if (!status.needsIndex) return
-                      const changedFiles = [...(status.newFiles || []), ...(status.modifiedFiles || [])]
-                      if (changedFiles.length > 0 && status.reason !== 'no_index') {
-                        startCaseIndexing(caseFolder, changedFiles)
-                      } else {
-                        startCaseIndexing(caseFolder)
-                      }
-                    })
-                    .catch(() => startCaseIndexing(caseFolder))
-                }
+              onExit={handleExitPacketMode}
+              onGenerated={(outputPath) => {
+                setEvidencePacketTakeover({ path: outputPath, version: Date.now() })
+                setRefreshDraftsKey(k => k + 1)
               }}
-              isReindexing={indexingProgress?.isRunning && indexingProgress?.caseFolder === caseFolder}
+              onPreviewReady={(blobUrl) => {
+                setFileViewUrl(blobUrl)
+                setFileViewName('Front Matter Preview.pdf')
+                setSelectedFilePath(null)
+                setViewContent('')
+                setVisualizerMode('document')
+              }}
             />
-          </div>
+          ) : (
+            <div className="relative h-full">
+              <Chat
+                caseFolder={caseFolder}
+                apiUrl={API_URL}
+                onViewUpdate={handleViewUpdate}
+                initialPrompt={reviewPrompt}
+                onInitialPromptUsed={() => setReviewPrompt('')}
+                onIndexMayHaveChanged={reloadDocumentIndex}
+                onDraftsMayHaveChanged={() => setRefreshDraftsKey(k => k + 1)}
+                onEvidencePacketGenerated={handleEvidencePacketGenerated}
+                onShowFile={handleShowFile}
+                onDocumentView={handleDocumentView}
+                onIndexStatusChange={setIndexStatusForViewer}
+                onStartReindex={(forceFullReindex) => {
+                  if (forceFullReindex) {
+                    startCaseIndexing(caseFolder)
+                  } else {
+                    // Check for changed files first, then start indexing only those
+                    fetch(`${API_URL}/api/files/index-status?case=${encodeURIComponent(caseFolder)}`)
+                      .then(res => res.json())
+                      .then(status => {
+                        if (!status.needsIndex) return
+                        const changedFiles = [...(status.newFiles || []), ...(status.modifiedFiles || [])]
+                        if (changedFiles.length > 0 && status.reason !== 'no_index') {
+                          startCaseIndexing(caseFolder, changedFiles)
+                        } else {
+                          startCaseIndexing(caseFolder)
+                        }
+                      })
+                      .catch(() => startCaseIndexing(caseFolder))
+                  }
+                }}
+                isReindexing={indexingProgress?.isRunning && indexingProgress?.caseFolder === caseFolder}
+                onEvidencePacketPlanned={(data) => {
+                  handleEnterPacketModeFromAgent(data.documents, data.frontMatter)
+                }}
+              />
+            </div>
+          )
         }
         rightPanel={
           <Visualizer
@@ -1640,6 +1972,7 @@ function App() {
             evidencePacketPath={evidencePacketTakeover?.path || null}
             evidencePacketVersion={evidencePacketTakeover?.version || 0}
             onOpenFilePath={handleShowFile}
+            onOpenPacketDraft={handleEnterPacketModeFromDraft}
           />
         }
       />

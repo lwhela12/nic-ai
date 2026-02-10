@@ -159,7 +159,16 @@ export async function buildEvidencePacket(
       throw new Error(`Only PDF documents are supported in packets: ${doc.path}`);
     }
 
-    const originalBytes = await readFile(absolutePath);
+    let originalBytes: Buffer;
+    try {
+      originalBytes = await readFile(absolutePath);
+    } catch (err: any) {
+      if (err?.code === "ENOENT") {
+        warnings.push(`Skipped missing file: ${doc.path}`);
+        continue;
+      }
+      throw err;
+    }
     let pdfBytes: Uint8Array = originalBytes;
 
     if (options.redaction?.enabled) {
@@ -181,6 +190,10 @@ export async function buildEvidencePacket(
       pdfBytes,
       pageCount,
     });
+  }
+
+  if (processedDocs.length === 0) {
+    throw new Error("No documents could be included — all files were missing or unreadable");
   }
 
   if (options.redaction?.enabled && options.redaction.failOnDetection && redactionFindings.length > 0) {
@@ -237,6 +250,40 @@ export async function buildEvidencePacket(
     redactionFindings,
     totalPages: pdf.getPageCount(),
   };
+}
+
+export async function buildFrontMatterPreview(options: {
+  caption: EvidencePacketCaption;
+  firmBlockLines?: string[];
+  service?: EvidencePacketServiceInfo;
+  tocEntries: Array<{ title: string; startPage: number; endPage: number }>;
+  includeAffirmationPage?: boolean;
+}): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const regularFont = await pdf.embedFont(StandardFonts.TimesRoman);
+  const boldFont = await pdf.embedFont(StandardFonts.TimesRomanBold);
+
+  const packetOptions: BuildEvidencePacketOptions = {
+    caseFolder: "",
+    documents: [],
+    caption: options.caption,
+    firmBlockLines: options.firmBlockLines,
+    service: options.service,
+  };
+
+  const tocEntries: EvidencePacketTocEntry[] = options.tocEntries.map((e) => ({
+    title: e.title,
+    path: "",
+    startPage: e.startPage,
+    endPage: e.endPage,
+  }));
+
+  let frontMatterPages = addIndexPages(pdf, regularFont, boldFont, packetOptions, tocEntries);
+  if (options.includeAffirmationPage !== false) {
+    addAffirmationPage(pdf, regularFont, boldFont, packetOptions, frontMatterPages + 1);
+  }
+
+  return pdf.save();
 }
 
 function resolveCasePath(caseFolder: string, relativePath: string): string {
@@ -672,13 +719,13 @@ function addIndexPages(
   drawRightField(page, boldFont, regularFont, rightX, cy(653), "Date/Time:", options.caption.hearingDateTime ?? "", 12);
   drawRightField(page, boldFont, regularFont, rightX, cy(633), "Appearance:", options.caption.appearance ?? "", 12);
 
-  drawCentered(page, boldFont, "DOCUMENT INDEX", 14, 548);
+  const captionBottomY = 618 - captionYOffset;
+  const docIndexY = captionBottomY - 20;
+  drawCentered(page, boldFont, "DOCUMENT INDEX", 14, docIndexY);
 
   const intro = options.caption.introductoryCounselLine ||
     `COMES NOW, ${options.caption.claimantName}, by and through counsel, and submits the attached documentation for consideration in the above-cited matter.`;
-  const introStartY = typeof firmBlockBottomY === "number"
-    ? Math.min(488, firmBlockBottomY - 12)
-    : 488;
+  const introStartY = docIndexY - 48;
   let currentY = drawWrappedText(page, intro, 84, introStartY, 470, regularFont, 12, 16);
   currentY -= 12;
 

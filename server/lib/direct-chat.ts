@@ -164,6 +164,39 @@ const TOOLS: Anthropic.Tool[] = [
     }
   },
   {
+    name: "update_file_entry",
+    description: "Update a specific file's entry in the document index after re-reading it. Use when the user asks you to re-read a document and then confirms the extracted information should be saved. Only update when the user explicitly confirms.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        folder: {
+          type: "string",
+          description: "Exact folder name from the index (e.g., 'Claim File (Checked for Determs)', 'Intake', 'Medical/Concentra')"
+        },
+        filename: {
+          type: "string",
+          description: "Exact filename within the folder (e.g., 'DWC D-8 Wages.PDF')"
+        },
+        updates: {
+          type: "object",
+          description: "Fields to update on the file entry. Include only the fields that need changing.",
+          properties: {
+            key_info: { type: "string", description: "Updated summary of the document's key information" },
+            type: { type: "string", description: "Document type (e.g., 'medical_bill', 'medical_record', 'correspondence', 'other')" },
+            date: { type: "string", description: "Document date in YYYY-MM-DD format" },
+            extracted_data: { description: "Structured data extracted from the document" },
+            issues: { type: "string", description: "Any issues found, or null if extraction was successful" }
+          }
+        },
+        note: {
+          type: "string",
+          description: "Brief note about what was updated and why"
+        }
+      },
+      required: ["folder", "filename", "updates"]
+    }
+  },
+  {
     name: "create_document_view",
     description: "Create a temporary filtered document view in the file panel based on explicit document paths from document_index.json. Use when the user asks to show a subset of documents (for example, medical records, hearing notices, records from a specific provider, or chronological views).",
     input_schema: {
@@ -218,7 +251,7 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "build_evidence_packet",
-    description: "Deterministically build a packet from an explicit ordered documents list. Use after planning/selecting order in the agent.",
+    description: "Open the Packet Creation UI with a curated, ordered document list. Use after planning/selecting order with the user.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -262,10 +295,6 @@ const TOOLS: Anthropic.Tool[] = [
         include_affirmation_page: {
           type: "boolean",
           description: "Optional override for affirmation/certificate page."
-        },
-        page_stamp_prefix: {
-          type: "string",
-          description: "Optional exhibit page label prefix."
         },
         page_stamp_start: {
           type: "number",
@@ -346,6 +375,7 @@ const TOOLS: Anthropic.Tool[] = [
 const WRITE_TOOLS = new Set([
   "write_file",
   "update_index",
+  "update_file_entry",
   "generate_document",
   "build_evidence_packet",
   "batch_resolve_conflicts",
@@ -739,11 +769,6 @@ function normalizeKnowledgePacketConfig(input: any): KnowledgeEvidencePacketConf
     normalized.includeAffirmationPage = raw.includeAffirmationPage;
   } else if (typeof raw.include_affirmation_page === "boolean") {
     normalized.includeAffirmationPage = raw.include_affirmation_page;
-  }
-  if (typeof raw.pageStampPrefix === "string") {
-    normalized.pageStampPrefix = raw.pageStampPrefix;
-  } else if (typeof raw.page_stamp_prefix === "string") {
-    normalized.pageStampPrefix = raw.page_stamp_prefix;
   }
   if (typeof raw.pageStampStart === "number") {
     normalized.pageStampStart = raw.pageStampStart;
@@ -1152,19 +1177,46 @@ async function executeTool(
         const indexData = JSON.parse(indexContent);
         const folders = indexData?.folders || {};
         let docCount = 0;
-        for (const folderData of Object.values(folders) as any[]) {
-          const files = Array.isArray(folderData) ? folderData : (folderData as any)?.files || [];
+        const proposedDocuments: Array<{ path: string; title: string; date: string | null; docType: string; fileName: string }> = [];
+        for (const [folderName, folderData] of Object.entries(folders) as [string, any][]) {
+          const files = Array.isArray(folderData) ? folderData : folderData?.files || folderData?.documents || [];
           docCount += files.length;
+          for (const file of files) {
+            if (typeof file === "string") {
+              proposedDocuments.push({
+                path: folderName === "." || !folderName ? file : `${folderName}/${file}`,
+                title: file,
+                date: null,
+                docType: "",
+                fileName: file,
+              });
+            } else {
+              const fileName = file.filename || file.file || "Unknown";
+              proposedDocuments.push({
+                path: folderName === "." || !folderName ? fileName : `${folderName}/${fileName}`,
+                title: file.title || fileName,
+                date: file.date || null,
+                docType: file.type || "",
+                fileName,
+              });
+            }
+          }
         }
 
         const hearingNumber = typeof toolInput.hearing_number === "string"
           ? toolInput.hearing_number.trim()
           : "";
 
+        const claimantName = indexData?.summary?.client || "";
+        const claimNumbers = indexData?.summary?.claim_numbers || {};
+        const firstClaimNumber = Object.values(claimNumbers).find((v: unknown) => typeof v === "string") as string || "";
+
         return JSON.stringify({
           success: true,
           totalIndexedDocuments: docCount,
           hearingNumber: hearingNumber || null,
+          proposedDocuments,
+          caption: { claimantName, claimNumber: firstClaimNumber },
           instruction: [
             "This is a PLANNING step only — no PDF has been generated yet.",
             "You must now do the following before building the packet:",
@@ -1179,7 +1231,6 @@ async function executeTool(
       }
 
       case "build_evidence_packet": {
-        const firmRoot = dirname(caseFolder);
         const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const indexData = JSON.parse(indexContent);
@@ -1206,44 +1257,33 @@ async function executeTool(
           }))
         );
         const hearingNumber = inferredHearing ? extractHearingCore(inferredHearing) : undefined;
-        const { config: knowledgeConfig } = await loadKnowledgeEvidencePacketConfig(firmRoot);
         const inputService = normalizeServiceInput(toolInput.service);
 
-        const { outputPath, fullOutputPath, packet } = await buildPacketFromInputs(
-          caseFolder,
-          firmRoot,
-          indexData,
-          hearingNumber,
-          documents,
-          {
-            outputPath: typeof toolInput.output_path === "string" ? toolInput.output_path : undefined,
-            hearingDateTime: typeof toolInput.hearing_datetime === "string" ? toolInput.hearing_datetime : undefined,
-            appearance: typeof toolInput.appearance === "string" ? toolInput.appearance : undefined,
-            redactionMode: typeof toolInput.redaction_mode === "string" ? toolInput.redaction_mode : undefined,
-            includeAffirmationPage: typeof toolInput.include_affirmation_page === "boolean"
-              ? toolInput.include_affirmation_page
-              : knowledgeConfig?.includeAffirmationPage,
-            pageStampPrefix: typeof toolInput.page_stamp_prefix === "string"
-              ? toolInput.page_stamp_prefix
-              : knowledgeConfig?.pageStampPrefix,
-            pageStampStart: typeof toolInput.page_stamp_start === "number"
-              ? toolInput.page_stamp_start
-              : knowledgeConfig?.pageStampStart,
-            service: inputService || knowledgeConfig?.service,
-            defaultRedactionMode: knowledgeConfig?.defaultRedactionMode,
-          }
-        );
+        const claimantName = indexData?.summary?.client || "";
+        const claimNumbers = indexData?.summary?.claim_numbers || {};
+        const firstClaimNumber = Object.values(claimNumbers).find((v: unknown) => typeof v === "string") as string || "";
+
+        const proposedDocuments = documents.map((doc) => ({
+          path: doc.path,
+          title: doc.title,
+          date: doc.date,
+          docType: doc.docType,
+          fileName: doc.path.split("/").pop() || doc.path,
+        }));
 
         return JSON.stringify({
           success: true,
-          outputPath,
-          fullPath: fullOutputPath,
-          hearingNumber,
-          totalPages: packet.totalPages,
-          documentsIncluded: documents.length,
-          warnings: packet.warnings,
-          redactionFindings: packet.redactionFindings,
-          instruction: `Packet created. Include [[SHOW_FILE: ${outputPath}]] in your response so the user can review it in this workspace.`,
+          packetModeOpened: true,
+          proposedDocuments,
+          caption: {
+            claimantName,
+            claimNumber: firstClaimNumber,
+            hearingNumber: hearingNumber || undefined,
+            hearingDateTime: typeof toolInput.hearing_datetime === "string" ? toolInput.hearing_datetime : undefined,
+            appearance: typeof toolInput.appearance === "string" ? toolInput.appearance : undefined,
+          },
+          service: inputService,
+          instruction: "The Packet Creation UI has opened with the curated documents pre-loaded. Let the user know they can review the order, edit front matter, run a PII scan, and generate the final PDF from the interface.",
         });
       }
 
@@ -1280,6 +1320,62 @@ async function executeTool(
 
         await writeFile(indexPath, JSON.stringify(index, null, 2));
         return `Updated ${toolInput.field_path} from "${oldValue}" to "${toolInput.value}"`;
+      }
+
+      case "update_file_entry": {
+        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexContent = await readFile(indexPath, "utf-8");
+        const index = JSON.parse(indexContent);
+
+        const folderData = index.folders?.[toolInput.folder];
+        if (!folderData) {
+          return `Error: Folder "${toolInput.folder}" not found in index. Available folders: ${Object.keys(index.folders || {}).join(", ")}`;
+        }
+
+        const files = Array.isArray(folderData) ? folderData : folderData?.files;
+        if (!Array.isArray(files)) {
+          return `Error: No files array found in folder "${toolInput.folder}"`;
+        }
+
+        const fileEntry = files.find((f: any) => f.filename === toolInput.filename);
+        if (!fileEntry) {
+          const available = files.map((f: any) => f.filename).filter(Boolean).join(", ");
+          return `Error: File "${toolInput.filename}" not found in folder "${toolInput.folder}". Available files: ${available}`;
+        }
+
+        // Apply updates, preserving fields not mentioned
+        const updates = toolInput.updates || {};
+        const updatedFields: string[] = [];
+
+        for (const [key, value] of Object.entries(updates)) {
+          if (value !== undefined) {
+            fileEntry[key] = value;
+            updatedFields.push(key);
+          }
+        }
+
+        // Clear issues if extraction succeeded and issues wasn't explicitly set
+        if (updatedFields.includes("key_info") && !updatedFields.includes("issues")) {
+          if (fileEntry.issues) {
+            fileEntry.issues = null;
+            updatedFields.push("issues (cleared)");
+          }
+        }
+
+        // Audit trail
+        if (!Array.isArray(index.case_notes)) {
+          index.case_notes = [];
+        }
+        index.case_notes.push({
+          id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          content: `Re-extracted ${toolInput.folder}/${toolInput.filename}: updated ${updatedFields.join(", ")}. ${toolInput.note || ""}`.trim(),
+          field_updated: `${toolInput.folder}/${toolInput.filename}`,
+          source: "file_re_extraction",
+          createdAt: new Date().toISOString()
+        });
+
+        await writeFile(indexPath, JSON.stringify(index, null, 2));
+        return `Successfully updated ${updatedFields.join(", ")} for ${toolInput.folder}/${toolInput.filename}`;
       }
 
       case "get_conflicts": {
@@ -1725,9 +1821,11 @@ const BASE_SYSTEM_PROMPT = `You are a helpful legal assistant for a Nevada injur
 
 2. **Read Files**: Use read_file for quick text lookups — reading the index, checking a text/JSON file, or grabbing a snippet. For PDFs this uses basic text extraction only.
 
-3. **Update Case Data**: Use update_index when the user provides corrections or new information about a case.
+3. **Update Case Data**: Use update_index when the user provides corrections or new information about top-level case fields (e.g., client name, DOB, case phase, policy limits).
 
-4. **Generate Documents**: When the user asks you to draft, write, create, or generate a formal document (demand letter, case memo, settlement calculation, letter, or Decision & Order), use the generate_document tool. This delegates to a specialized agent with access to firm templates that will create a complete, professional document.
+4. **Re-Extract File Data**: Use update_file_entry when the user asks you to re-read a document and update its entry in the index. This updates a specific file within a folder — its key_info, type, date, extracted_data, and issues.
+
+5. **Generate Documents**: When the user asks you to draft, write, create, or generate a formal document (demand letter, case memo, settlement calculation, letter, or Decision & Order), use the generate_document tool. This delegates to a specialized agent with access to firm templates that will create a complete, professional document.
 
 ## WHEN TO USE generate_document
 
@@ -1758,7 +1856,23 @@ Use read_file instead for:
 - Quick lookups on text or JSON files
 - Files you already know are simple text
 
-6. **Create Document Panel Views**: When the user asks to show a specific subset of documents in the panel (for example medical records, provider-specific notes, hearing notices, chronological sets), use create_document_view with explicit paths from the index.
+## WHEN TO USE update_file_entry
+
+Use this tool when the user asks you to re-read a document and update the index with the new extraction. The typical flow:
+
+1. User says "read DWC D-8 Wages.pdf" or "re-extract the intake form"
+2. You call read_document to read the file with vision
+3. You present what you found to the user
+4. User says "update the file", "looks good, save it", or "update the index"
+5. You call update_file_entry with the folder name, filename, and updated fields
+
+**Important:**
+- Only call update_file_entry AFTER the user explicitly confirms
+- Include key_info (a comprehensive summary), type, date, and extracted_data
+- The folder and filename must match EXACTLY what's in the index (case-sensitive)
+- Set issues to null if the re-extraction was successful
+
+7. **Create Document Panel Views**: When the user asks to show a specific subset of documents in the panel (for example medical records, provider-specific notes, hearing notices, chronological sets), use create_document_view with explicit paths from the index.
 
 ## WHEN TO USE create_document_view
 
@@ -1784,15 +1898,13 @@ Use these tools when the user asks for an "evidence packet", "hearing packet", "
 
 Two-step flow:
 1. **create_evidence_packet** (planning step): Call this first. It returns instructions telling you to review the document index, check knowledge rules, and present a proposed document list to the user. No PDF is generated.
-2. **build_evidence_packet** (execution step): Call this AFTER the user has reviewed and confirmed the document list. Pass the explicit ordered documents array to generate the final PDF.
+2. **build_evidence_packet** (execution step): Call this AFTER the user has reviewed and confirmed the document list. This opens the Packet Creation UI where the user can make final adjustments and generate the PDF.
 
 Requirements:
 - ALWAYS start with create_evidence_packet — never skip straight to build_evidence_packet.
 - Use the evidence/hearing packet rules from knowledge to determine document order.
 - Present the proposed document list to the user and wait for confirmation before building.
-- After build_evidence_packet succeeds, include a file reference using:
-  [[SHOW_FILE: relative/path/to/output.pdf]]
-  so the user can review the packet in this workspace.
+- After build_evidence_packet succeeds, let the user know the Packet Creation interface has opened with their documents pre-loaded.
 
 ## DOCUMENT REVIEW MODE
 
@@ -2043,10 +2155,22 @@ export async function* directChat(
             yield { type: "document_view", view: parsed.view };
           }
         }
-        if (toolUse.name === "create_evidence_packet" || toolUse.name === "build_evidence_packet") {
-          const parsed = safeJsonParse<{ outputPath?: string; success?: boolean }>(result);
-          if (parsed?.success && parsed.outputPath) {
-            generatedFilePath = parsed.outputPath;
+        if (toolUse.name === "build_evidence_packet") {
+          const parsed = safeJsonParse<{
+            success?: boolean;
+            proposedDocuments?: Array<{ path: string; title: string; date: string | null; docType: string; fileName: string }>;
+            caption?: { claimantName: string; claimNumber: string; hearingNumber?: string; hearingDateTime?: string; appearance?: string };
+            service?: EvidencePacketServiceInfo;
+          }>(result);
+          if (parsed?.success && parsed.proposedDocuments) {
+            yield {
+              type: "evidence_packet_plan",
+              plan: {
+                proposedDocuments: parsed.proposedDocuments,
+                caption: parsed.caption,
+                service: parsed.service,
+              },
+            };
           }
         }
         toolResults.push({

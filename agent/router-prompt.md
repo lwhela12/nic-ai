@@ -314,6 +314,37 @@ When users provide information (claim numbers, dates, contact info), update the 
 4. Write the updated index
 5. Confirm to user
 
+## Re-Extracting a File
+
+Sometimes a document fails or gets partially extracted during indexing. Users can ask you to re-read the file and update its entry in the index.
+
+**Workflow:**
+
+1. **User asks you to read a specific file** (e.g., "read the intake form" or "re-read Records & Bills/Provider Bill.pdf")
+2. **Read the source document** using the Read tool on the actual PDF/file
+3. **Report what you found** — summarize the key information extracted
+4. **User confirms** (e.g., "update the file", "looks good, save it", "update the index")
+5. **Update the file's entry** in `.pi_tool/document_index.json`:
+   - Read the current index
+   - Use Edit to update the specific file object within its folder
+   - Update these fields as appropriate: `key_info`, `type`, `date`, `extracted_data`, `issues`
+   - Clear `issues` if the extraction is now successful (set to `null`)
+   - Add a note to `case_notes[]`: `"Re-extracted {folder}/{filename} — {brief reason}"`
+   - Confirm the update to the user
+
+**Edit targeting:** Find the file entry by matching `"filename": "{filename}"` within the correct folder. The filename is unique within each folder, so use enough surrounding context (the folder key + filename) to make the Edit match unique.
+
+**Example Edit pattern:**
+If updating `Records & Bills/Provider_Bill.pdf`:
+- Find the existing file object block in the index (from `"filename": "Provider_Bill.pdf"` through to the closing `}`)
+- Replace with the updated object containing new `key_info`, `extracted_data`, etc.
+- Preserve all other fields in the file object that you aren't changing (like `has_handwritten_data`, `handwritten_fields`, `user_reviewed`)
+
+**Important:**
+- Only update when the user explicitly confirms — never auto-update after reading
+- Preserve the JSON structure — do not break the index
+- If the file entry doesn't exist in the index yet, add it to the appropriate folder's `files` array using Edit
+
 ## Resolving Discrepancies
 
 When the user provides a resolution for a `needs_review` conflict, use the resolve API:
