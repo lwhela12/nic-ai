@@ -131,7 +131,9 @@ app.post("/init", async (c) => {
       const defaultConfig = {
         firmName: "",
         attorneyName: "",
+        nevadaBarNo: "",
         address: "",
+        cityStateZip: "",
         phone: "",
         fax: "",
         email: "",
@@ -571,7 +573,10 @@ app.get("/firm-config", async (c) => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return c.json({
         firmName: "",
+        attorneyName: "",
+        nevadaBarNo: "",
         address: "",
+        cityStateZip: "",
         phone: "",
         practiceArea: "",
         jurisdiction: "",

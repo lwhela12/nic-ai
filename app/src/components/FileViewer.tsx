@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { AgentDocumentView, DocumentFile, DocumentFolder, DocumentIndex, GeneratedDoc, NeedsReviewItem } from '../App'
+import type {
+  AgentDocumentView,
+  DocumentFile,
+  DocumentFolder,
+  DocumentIndex,
+  GeneratedDoc,
+} from '../App'
 
 interface IndexStatus {
   needsIndex: boolean
@@ -48,7 +54,12 @@ interface FileRow {
   lowerFileName: string
   lowerType: string
   timestamp: number | null
-  reviewInfo?: NeedsReviewItem
+  isUserReviewed: boolean
+  reviewedAt?: string
+  reviewNotes?: string
+  hasHandwrittenData: boolean
+  handwrittenFields: string[]
+  extractionIssue?: string
   needsReview: boolean
   reindexStatus?: 'NEW' | 'MOD'
 }
@@ -122,6 +133,43 @@ const parseDocumentTimestamp = (fileData: FileDataObject | null, fileName: strin
     if (parsed !== null) return parsed
   }
   return parseDateFromFileName(fileName)
+}
+
+const isSignatureOnlyHandwrittenField = (value: string): boolean => {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+
+  if (!normalized) return false
+
+  return (
+    /\bsignature\b/.test(normalized) ||
+    /\bsigned by\b/.test(normalized) ||
+    /\bsigned\b/.test(normalized) ||
+    /\bsigner\b/.test(normalized) ||
+    /\binitials?\b/.test(normalized) ||
+    normalized === 'sign'
+  )
+}
+
+const getHandwrittenFields = (fileData: FileDataObject | null): string[] => {
+  if (!fileData || !Array.isArray(fileData.handwritten_fields)) return []
+
+  const seen = new Set<string>()
+  const fields: string[] = []
+  for (const value of fileData.handwritten_fields) {
+    if (typeof value !== 'string') continue
+    const trimmed = value.trim()
+    if (!trimmed) continue
+    if (isSignatureOnlyHandwrittenField(trimmed)) continue
+    const key = trimmed.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    fields.push(trimmed)
+  }
+  return fields
 }
 
 const createFilterDefinitions = (isWC: boolean): FilterDefinition[] => {
@@ -327,7 +375,6 @@ export default function FileViewer({
   const [filter, setFilter] = useState<FilterOption>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
-
   const filterDefinitions = useMemo(() => createFilterDefinitions(isWC), [isWC])
   useEffect(() => {
     if (!filterDefinitions.some((definition) => definition.value === filter)) {
@@ -352,21 +399,6 @@ export default function FileViewer({
     }
     return expanded
   }, [folderKeys, collapsedFolders])
-
-  const filesNeedingReview = useMemo(() => {
-    const reviewMap = new Map<string, NeedsReviewItem>()
-    if (!documentIndex?.needs_review) return reviewMap
-
-    for (const item of documentIndex.needs_review) {
-      const sources = Array.isArray(item.sources) ? item.sources : []
-      for (const source of sources) {
-        const filename = source.replace(/\s*\([^)]*\)\s*$/, '').trim().toLowerCase()
-        reviewMap.set(filename, item)
-        reviewMap.set(filename.replace(/\.pdf$/, ''), item)
-      }
-    }
-    return reviewMap
-  }, [documentIndex])
 
   const filesNeedingReindex = useMemo(() => {
     const map = new Map<string, 'NEW' | 'MOD'>()
@@ -398,7 +430,21 @@ export default function FileViewer({
         const lowerFileName = fileName.toLowerCase()
         const lowerType = (fileData?.type || '').toLowerCase()
         const path = folder === '.' || folder === '' ? fileName : `${folder}/${fileName}`
-        const reviewInfo = filesNeedingReview.get(lowerFileName) || filesNeedingReview.get(lowerFileName.replace(/\.pdf$/, ''))
+        const isUserReviewed = Boolean(fileData?.user_reviewed)
+        const reviewedAt =
+          fileData && typeof fileData.reviewed_at === 'string' && fileData.reviewed_at.trim()
+            ? fileData.reviewed_at.trim()
+            : undefined
+        const reviewNotes =
+          fileData && typeof fileData.review_notes === 'string' && fileData.review_notes.trim()
+            ? fileData.review_notes.trim()
+            : undefined
+        const handwrittenFields = getHandwrittenFields(fileData)
+        const hasHandwrittenData = handwrittenFields.length > 0
+        const extractionIssue =
+          fileData && typeof fileData.issues === 'string' && fileData.issues.trim()
+            ? fileData.issues.trim()
+            : undefined
 
         rows.push({
           path,
@@ -409,14 +455,19 @@ export default function FileViewer({
           lowerFileName,
           lowerType,
           timestamp: parseDocumentTimestamp(fileData, fileName),
-          reviewInfo,
-          needsReview: !!reviewInfo,
+          isUserReviewed,
+          reviewedAt,
+          reviewNotes,
+          hasHandwrittenData,
+          handwrittenFields,
+          extractionIssue,
+          needsReview: (hasHandwrittenData || !!extractionIssue) && !isUserReviewed,
           reindexStatus: filesNeedingReindex.get(lowerFileName),
         })
       }
     }
     return rows
-  }, [allFolders, filesNeedingReview, filesNeedingReindex])
+  }, [allFolders, filesNeedingReindex])
 
   const selectedFilter = useMemo(
     () => filterDefinitions.find((definition) => definition.value === filter) ?? filterDefinitions[0],
@@ -455,7 +506,12 @@ export default function FileViewer({
         if (!normalizedSearchQuery) return true
         return row.lowerFileName.includes(normalizedSearchQuery) || row.lowerFolder.includes(normalizedSearchQuery)
       })
-  }, [allFileRows, normalizedSearchQuery, selectedFilter, agentPathSet])
+  }, [
+    allFileRows,
+    normalizedSearchQuery,
+    selectedFilter,
+    agentPathSet,
+  ])
 
   const sortedFolderEntries = useMemo(() => {
     const grouped = new Map<string, FileRow[]>()
@@ -630,8 +686,14 @@ export default function FileViewer({
                 {files.map((row, i) => {
                   const fileName = row.fileName
                   const fileData = row.fileData
-                  const reviewInfo = row.reviewInfo
+                  const isUserReviewed = row.isUserReviewed
+                  const reviewedAt = row.reviewedAt
+                  const reviewNotes = row.reviewNotes
+                  const hasHandwrittenData = row.hasHandwrittenData
+                  const handwrittenFields = row.handwrittenFields
+                  const extractionIssue = row.extractionIssue
                   const needsReview = row.needsReview
+                  const hasWarning = needsReview
                   const reindexStatus = row.reindexStatus
                   const title = fileData && typeof fileData.title === 'string' ? fileData.title : fileName
                   const date = fileData && typeof fileData.date === 'string' ? fileData.date : ''
@@ -640,13 +702,27 @@ export default function FileViewer({
                   const filePath = row.path
 
                   return (
-                    <div key={`${folder}/${fileName}-${i}`} className={`flex items-center gap-1 group rounded-lg focus-within:bg-surface-100 ${needsReview ? 'bg-amber-50' : ''}`}>
+                    <div
+                      key={`${folder}/${fileName}-${i}`}
+                      className={`flex items-center gap-1 group rounded-lg border px-1 focus-within:bg-surface-100 ${
+                        hasWarning
+                          ? 'bg-amber-50 border-amber-200'
+                          : 'bg-transparent border-transparent'
+                      }`}
+                    >
                       <button
                         onClick={() => {
-                          const reviewWarning = reviewInfo
+                          const handwrittenWarning = hasHandwrittenData
                             ? `<div class="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
-                                <span class="font-medium">⚠️ Needs Review:</span> ${reviewInfo.reason}
-                                <div class="mt-2 text-xs">Conflicting values: ${reviewInfo.conflicting_values.join(' vs ')}</div>
+                                <span class="font-medium">⚠️ Handwritten Data Detected:</span> Verify extracted values from this document.
+                                ${handwrittenFields.length > 0 ? `<div class="mt-2 text-xs">Handwritten fields: ${handwrittenFields.join(', ')}</div>` : ''}
+                              </div>`
+                            : ''
+                          const reviewedBlock = isUserReviewed
+                            ? `<div class="mt-4 bg-emerald-50 border border-emerald-200 rounded-xl p-4 text-sm text-emerald-800">
+                                <span class="font-medium">✅ User Reviewed</span>
+                                ${reviewedAt ? `<div class="mt-2 text-xs">Reviewed at: ${reviewedAt}</div>` : ''}
+                                ${reviewNotes ? `<div class="mt-2 text-xs">${reviewNotes}</div>` : ''}
                               </div>`
                             : ''
                           const content = `
@@ -659,16 +735,17 @@ export default function FileViewer({
     <p class="text-sm text-gray-600 leading-relaxed">${keyInfo}</p>
   </div>
   ${issues ? `<div class="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800"><span class="font-medium">Issue:</span> ${issues}</div>` : ''}
-  ${reviewWarning}
+  ${handwrittenWarning}
+  ${reviewedBlock}
 </div>`
                           onDocSelect(content, undefined, filePath)
                         }}
                         className={`flex-1 flex items-center gap-2 text-left px-2 py-1.5 text-sm
-                                   ${needsReview ? 'text-amber-700 hover:bg-amber-100' : 'text-brand-600 hover:bg-surface-100 hover:text-brand-900'}
+                                   ${hasWarning ? 'text-amber-700 hover:bg-amber-100' : 'text-brand-600 hover:bg-surface-100 hover:text-brand-900'}
                                    rounded-lg truncate transition-colors`}
-                        title={`${title}${needsReview ? '\n\n⚠️ NEEDS REVIEW: ' + reviewInfo?.reason : ''}\n\nClick for info, eye icon to view file`}
+                        title={`${title}${isUserReviewed ? '\n\n✅ USER REVIEWED' : ''}${hasHandwrittenData ? '\n\n⚠️ HANDWRITTEN DATA: ' + (handwrittenFields.length > 0 ? handwrittenFields.join(', ') : 'Verify extracted values') : ''}${extractionIssue ? '\n\n⚠️ EXTRACTION ISSUE: ' + extractionIssue : ''}\n\nClick for info, eye icon to view file`}
                       >
-                        {needsReview ? (
+                        {hasWarning ? (
                           <span className="text-amber-500">
                             <WarningIcon />
                           </span>
@@ -678,6 +755,14 @@ export default function FileViewer({
                           </span>
                         )}
                         <span className="truncate">{fileName}</span>
+                        {isUserReviewed && (
+                          <span
+                            className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-emerald-100 text-emerald-700"
+                            title={reviewedAt ? `Reviewed at ${reviewedAt}` : 'User reviewed'}
+                          >
+                            REVIEWED
+                          </span>
+                        )}
                         {reindexStatus && (
                           <span
                             className={`flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded ${

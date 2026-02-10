@@ -204,121 +204,14 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "create_evidence_packet",
-    description: "Generate a workers' compensation hearing/appeal evidence packet for a Hearing Officer number. The tool uses the case index + firm knowledge rules to select, order, merge, and page-number exhibits, then writes a final packet PDF into the case workspace.",
+    description: "Plan an evidence packet for a workers' compensation hearing. Returns instructions to review documents with the user before building. Does NOT generate a PDF — use build_evidence_packet after the user confirms the document list.",
     input_schema: {
       type: "object" as const,
       properties: {
         hearing_number: {
           type: "string",
-          description: "Hearing number (examples: '2680509-RA' or 'HO-2680509-RA'). Required unless the case has exactly one HO folder."
+          description: "Hearing number (examples: '2680509-RA' or 'HO-2680509-RA'). Optional if the case has exactly one hearing."
         },
-        output_path: {
-          type: "string",
-          description: "Optional relative output path for the packet PDF. If omitted, a default Litigation path is used."
-        },
-        hearing_datetime: {
-          type: "string",
-          description: "Optional hearing date/time string for caption (example: '10/29/2025 @ 2:30PM')."
-        },
-        appearance: {
-          type: "string",
-          description: "Optional appearance line for caption (example: 'Telephone Appearance: O. Munguia')."
-        },
-        redaction_mode: {
-          type: "string",
-          enum: ["off", "detect_only", "best_effort"],
-          description: "PII mode: off (no redaction), detect_only (find DOB/SSN only), best_effort (overlay masking where possible)."
-        },
-        rules_text: {
-          type: "string",
-          description: "Optional raw packet-rule text from knowledge bank, passed verbatim. Use when rules are narrative/markdown and not JSON."
-        },
-        order_rules: {
-          type: "array",
-          description: "Optional explicit ordering rules derived from knowledge. Overrides parsed knowledge config when provided.",
-          items: {
-            type: "object",
-            properties: {
-              id: { type: "string" },
-              required: { type: "boolean" },
-              match: {
-                type: "object",
-                properties: {
-                  doc_types: { type: "array", items: { type: "string" } },
-                  path_regex: { type: "string" },
-                  title_regex: { type: "string" },
-                  docTypes: { type: "array", items: { type: "string" } },
-                  pathRegex: { type: "string" },
-                  titleRegex: { type: "string" },
-                },
-              },
-              sort_by: { type: "string", enum: ["none", "date", "title", "path"] },
-              sort_direction: { type: "string", enum: ["asc", "desc"] },
-              sortBy: { type: "string", enum: ["none", "date", "title", "path"] },
-              sortDirection: { type: "string", enum: ["asc", "desc"] },
-            },
-            required: ["id"],
-          },
-        },
-        include_path_regexes: {
-          type: "array",
-          items: { type: "string" },
-          description: "Optional include filters for candidate documents."
-        },
-        exclude_path_regexes: {
-          type: "array",
-          items: { type: "string" },
-          description: "Optional exclude filters for candidate documents."
-        },
-        include_affirmation_page: {
-          type: "boolean",
-          description: "Optional override for whether to include affirmation/certificate page."
-        },
-        page_stamp_prefix: {
-          type: "string",
-          description: "Optional exhibit page label prefix (example: 'Page ')."
-        },
-        page_stamp_start: {
-          type: "number",
-          description: "Optional exhibit page start number."
-        },
-        service: {
-          type: "object",
-          description: "Optional certificate/service block details.",
-          properties: {
-            service_date: { type: "string" },
-            service_method: { type: "string" },
-            recipients: { type: "array", items: { type: "string" } },
-            served_by: { type: "string" },
-            serviceDate: { type: "string" },
-            serviceMethod: { type: "string" },
-            servedBy: { type: "string" },
-          },
-        }
-      },
-      required: []
-    }
-  },
-  {
-    name: "list_hearing_documents",
-    description: "List candidate PDF documents for a hearing packet. This is a planning helper: use it first, then decide final order according to knowledge-bank rules before calling build_evidence_packet.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        hearing_number: {
-          type: "string",
-          description: "Hearing number (examples: '2680509-RA' or 'HO-2680509-RA'). Optional if only one hearing is inferable."
-        },
-        include_path_regexes: {
-          type: "array",
-          items: { type: "string" },
-          description: "Optional include filters for candidate docs."
-        },
-        exclude_path_regexes: {
-          type: "array",
-          items: { type: "string" },
-          description: "Optional exclude filters for candidate docs."
-        }
       },
       required: []
     }
@@ -454,7 +347,6 @@ const WRITE_TOOLS = new Set([
   "write_file",
   "update_index",
   "generate_document",
-  "create_evidence_packet",
   "build_evidence_packet",
   "batch_resolve_conflicts",
   "resolve_conflict",
@@ -809,53 +701,6 @@ function normalizeDocumentViewSortDirection(value: any): "asc" | "desc" | undefi
   return undefined;
 }
 
-function defaultEvidencePacketOrderRules(): EvidencePacketOrderRule[] {
-  return [
-    {
-      id: "notice_of_hearing",
-      match: { titleRegex: "notice\\s+of\\s+hearing|hearing\\s+notice|\\bho[-\\s]?\\d+" },
-      sortBy: "date",
-      sortDirection: "asc",
-    },
-    {
-      id: "c3_form",
-      match: { titleRegex: "\\bc-?3\\b|\\bc3\\b" },
-      sortBy: "date",
-      sortDirection: "asc",
-    },
-    {
-      id: "c4_form",
-      match: { titleRegex: "\\bc-?4\\b|\\bc4\\b" },
-      sortBy: "date",
-      sortDirection: "asc",
-    },
-    {
-      id: "claim_acceptance_or_denial",
-      match: { titleRegex: "notice\\s+of\\s+claim\\s+acceptance|acceptance|denial" },
-      sortBy: "date",
-      sortDirection: "asc",
-    },
-    {
-      id: "representation_and_appearance",
-      match: { titleRegex: "representation|notice\\s+of\\s+appear" },
-      sortBy: "date",
-      sortDirection: "asc",
-    },
-    {
-      id: "medical_reports",
-      match: { titleRegex: "ppd|ime|medical|report|doctor|dr\\." },
-      sortBy: "date",
-      sortDirection: "asc",
-    },
-    {
-      id: "correspondence",
-      match: { titleRegex: "letter|request|memo|correspondence" },
-      sortBy: "date",
-      sortDirection: "asc",
-    },
-  ];
-}
-
 function extractFirstJsonCodeFence(content: string): Record<string, any> | null {
   const fenceRegex = /```json\s*([\s\S]*?)```/gi;
   let match: RegExpExecArray | null;
@@ -913,101 +758,6 @@ function normalizeKnowledgePacketConfig(input: any): KnowledgeEvidencePacketConf
   }
 
   return normalized;
-}
-
-function escapeRegexLiteral(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function slugifyRuleId(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 60);
-}
-
-function buildRegexFromRuleLine(line: string): string | null {
-  const lowered = line.toLowerCase();
-  if (/\bc[\s-]?3\b/.test(lowered)) return "\\bc-?3\\b|\\bc3\\b";
-  if (/\bc[\s-]?4\b/.test(lowered)) return "\\bc-?4\\b|\\bc4\\b";
-  if (/notice of hearing/.test(lowered)) return "notice\\s+of\\s+hearing|hearing\\s+notice";
-  if (/notice of appearance/.test(lowered)) return "notice\\s+of\\s+appear";
-  if (/claim acceptance/.test(lowered)) return "claim\\s+acceptance|notice\\s+of\\s+claim\\s+acceptance";
-  if (/ppd|ime|medical report/.test(lowered)) return "ppd|ime|medical\\s+report";
-
-  const cleaned = line
-    .replace(/["“”'`]/g, "")
-    .replace(/\([^)]*\)/g, " ")
-    .replace(/[^a-zA-Z0-9\s-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (cleaned.length < 6) return null;
-
-  const words = cleaned.split(" ").slice(0, 8).map((word) => escapeRegexLiteral(word));
-  if (words.length < 2) return null;
-  return words.join("\\s+");
-}
-
-function parseLooseOrderRulesFromText(text: string | null | undefined): EvidencePacketOrderRule[] {
-  if (!text || !text.trim()) return [];
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const rules: EvidencePacketOrderRule[] = [];
-  const seenIds = new Set<string>();
-
-  for (const line of lines) {
-    const markerMatch = line.match(/^(?:\d+[\).:\-]\s*|[-*]\s+|[A-Z][\).:\-]\s+)(.+)$/);
-    if (!markerMatch) continue;
-    const candidate = (markerMatch ? markerMatch[1] : line).trim();
-    if (candidate.length < 4) continue;
-    if (/^(note|notes|if|then|when|must|should|include|exclude|order|rule)\b/i.test(candidate)) {
-      continue;
-    }
-
-    const regex = buildRegexFromRuleLine(candidate);
-    if (!regex) continue;
-
-    const ruleId = slugifyRuleId(candidate) || `rule_${rules.length + 1}`;
-    if (seenIds.has(ruleId)) continue;
-
-    rules.push({
-      id: ruleId,
-      match: { titleRegex: regex },
-      sortBy: "date",
-      sortDirection: "asc",
-    });
-    seenIds.add(ruleId);
-  }
-
-  return rules;
-}
-
-function compileRegexes(values: string[] | undefined): RegExp[] {
-  if (!values || values.length === 0) return [];
-  return values
-    .map((value) => {
-      try {
-        return new RegExp(value, "i");
-      } catch {
-        return null;
-      }
-    })
-    .filter((regex): regex is RegExp => Boolean(regex));
-}
-
-function shouldExcludeGeneratedPacket(path: string): boolean {
-  const lower = path.toLowerCase();
-  if (!lower.endsWith(".pdf")) return true;
-  if (lower.includes("/.pi_tool/")) return true;
-  if (lower.includes("template")) return true;
-  if (lower.includes("claimant index")) return true;
-  if (lower.includes("document index")) return true;
-  if (lower.includes("evidence packet")) return true;
-  return false;
 }
 
 function summarizeCommonFolder(paths: string[]): string | null {
@@ -1095,45 +845,6 @@ async function loadKnowledgeEvidencePacketConfig(firmRoot: string): Promise<Load
   return { config: null, source: null, rawText: null };
 }
 
-function collectIndexedPdfDocs(indexData: any): IndexedPdfDoc[] {
-  const docs: IndexedPdfDoc[] = [];
-  const folders = indexData?.folders || {};
-
-  for (const [folderName, folderData] of Object.entries(folders)) {
-    const files: any[] = Array.isArray(folderData) ? folderData : (folderData as any)?.files || [];
-    for (const file of files) {
-      const filename = typeof file?.filename === "string" ? file.filename : null;
-      if (!filename || !filename.toLowerCase().endsWith(".pdf")) continue;
-
-      const relPath = `${folderName}/${filename}`;
-      if (shouldExcludeGeneratedPacket(relPath)) continue;
-
-      const title = typeof file?.title === "string" && file.title.trim()
-        ? file.title.trim()
-        : titleFromFilename(filename);
-
-      const docDate = typeof file?.date === "string" ? file.date : parseDateFromFilename(filename);
-      const docType = typeof file?.type === "string" && file.type.trim()
-        ? file.type.trim()
-        : inferDocType(title, relPath);
-
-      docs.push({
-        path: relPath,
-        title,
-        date: docDate,
-        docType,
-      });
-    }
-  }
-
-  const deduped = new Map<string, IndexedPdfDoc>();
-  for (const doc of docs) {
-    const key = doc.path.toLowerCase();
-    if (!deduped.has(key)) deduped.set(key, doc);
-  }
-  return Array.from(deduped.values());
-}
-
 function inferHearingNumberFromDocs(docs: IndexedPdfDoc[]): string | null {
   const hearingCandidates = new Map<string, number>();
   const hoRegex = /ho[-_ ]?(\d{4,}-[a-z]{1,3})/ig;
@@ -1153,36 +864,6 @@ function inferHearingNumberFromDocs(docs: IndexedPdfDoc[]): string | null {
   return null;
 }
 
-function selectDocsForHearing(
-  docs: IndexedPdfDoc[],
-  hearingNumber: string,
-  config: KnowledgeEvidencePacketConfig | null
-): IndexedPdfDoc[] {
-  const tokens = hearingSearchTokens(hearingNumber);
-  const includeRegexes = compileRegexes(config?.includePathRegexes);
-  const excludeRegexes = compileRegexes(config?.excludePathRegexes);
-
-  let selected = docs.filter((doc) => valueMatchesHearing(doc.path, tokens) || valueMatchesHearing(doc.title, tokens));
-
-  if (selected.length === 0) {
-    selected = docs.filter((doc) => doc.path.toLowerCase().startsWith("litigation/"));
-  }
-
-  if (selected.length === 0) {
-    selected = docs;
-  }
-
-  if (includeRegexes.length > 0) {
-    selected = selected.filter((doc) => includeRegexes.some((regex) => regex.test(doc.path)));
-  }
-
-  if (excludeRegexes.length > 0) {
-    selected = selected.filter((doc) => !excludeRegexes.some((regex) => regex.test(doc.path)));
-  }
-
-  return selected;
-}
-
 function inferClaimNumber(indexData: any): string | undefined {
   const direct = indexData?.summary?.wc_carrier?.claim_number;
   if (typeof direct === "string" && direct.trim()) return direct.trim();
@@ -1196,8 +877,12 @@ function inferClaimNumber(indexData: any): string | undefined {
   return undefined;
 }
 
-function inferOutputPathFromDocs(docs: IndexedPdfDoc[], hearingNumber: string, explicitPath?: string): string {
+function inferOutputPathFromDocs(docs: IndexedPdfDoc[], hearingNumber?: string, explicitPath?: string): string {
   if (explicitPath && explicitPath.trim()) return explicitPath.trim();
+
+  if (!hearingNumber || !hearingNumber.trim()) {
+    return "Litigation/Claimant Evidence Packet.pdf";
+  }
 
   const normalizedHo = normalizeHearingNumber(hearingNumber).toUpperCase();
   const dateStamp = new Date().toISOString().slice(0, 10).replace(/-/g, ".");
@@ -1250,7 +935,7 @@ async function buildPacketFromInputs(
   caseFolder: string,
   firmRoot: string,
   indexData: any,
-  hearingNumber: string,
+  hearingNumber: string | undefined,
   documents: EvidencePacketDocumentInput[],
   options: {
     outputPath?: string;
@@ -1276,12 +961,22 @@ async function buildPacketFromInputs(
   try {
     const firmInfo = await loadFirmInfo(firmRoot);
     if (firmInfo) {
+      const barLine = firmInfo.nevadaBarNo
+        ? /bar\s*no\.?/i.test(firmInfo.nevadaBarNo)
+          ? firmInfo.nevadaBarNo
+          : `Nevada Bar No. ${firmInfo.nevadaBarNo}`
+        : undefined;
+      const legacyCityStateZip = `${firmInfo.city || ""}${firmInfo.city && firmInfo.state ? ", " : ""}${firmInfo.state || ""} ${firmInfo.zip || ""}`.trim();
+      // Preserve blank lines so the attorney block keeps a stable court-style layout.
       firmBlockLines = [
-        firmInfo.firmName,
-        firmInfo.address,
-        `${firmInfo.city || ""}${firmInfo.city && firmInfo.state ? ", " : ""}${firmInfo.state || ""} ${firmInfo.zip || ""}`.trim(),
-        firmInfo.phone,
-      ].filter((line): line is string => Boolean(line && line.trim()));
+        (firmInfo.attorney || "").trim(),
+        (barLine || "").trim(),
+        (firmInfo.name || firmInfo.firmName || "").trim(),
+        (firmInfo.address || "").trim(),
+        (firmInfo.cityStateZip || legacyCityStateZip || "").trim(),
+        (firmInfo.phone || "").trim(),
+        "Attorney for Claimant",
+      ];
     }
   } catch {
     // no-op
@@ -1309,7 +1004,7 @@ async function buildPacketFromInputs(
     caption: {
       claimantName: indexData?.summary?.client || "Claimant",
       claimNumber: inferClaimNumber(indexData),
-      hearingNumber,
+      hearingNumber: hearingNumber || undefined,
       hearingDateTime: options.hearingDateTime,
       appearance: options.appearance,
     },
@@ -1451,224 +1146,35 @@ async function executeTool(
         });
       }
 
-      case "list_hearing_documents": {
-        const firmRoot = dirname(caseFolder);
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
-        const indexContent = await readFile(indexPath, "utf-8");
-        const indexData = JSON.parse(indexContent);
-
-        const allIndexedPdfs = collectIndexedPdfDocs(indexData);
-        if (allIndexedPdfs.length === 0) {
-          return JSON.stringify({
-            success: false,
-            error: "No PDF documents found in document_index.json. Re-index the case first.",
-          });
-        }
-
-        const hearingInput = typeof toolInput.hearing_number === "string" ? toolInput.hearing_number.trim() : "";
-        const inferredHearing = hearingInput || inferHearingNumberFromDocs(allIndexedPdfs);
-        if (!inferredHearing) {
-          return JSON.stringify({
-            success: false,
-            error: "hearing_number is required when multiple hearing folders exist.",
-          });
-        }
-
-        const hearingNumber = extractHearingCore(inferredHearing);
-        const {
-          config: knowledgeConfig,
-          source: knowledgeSource,
-          rawText: knowledgeRawText,
-        } = await loadKnowledgeEvidencePacketConfig(firmRoot);
-
-        const inputIncludePathRegexes = Array.isArray(toolInput.include_path_regexes)
-          ? toolInput.include_path_regexes.filter((v: any) => typeof v === "string")
-          : undefined;
-        const inputExcludePathRegexes = Array.isArray(toolInput.exclude_path_regexes)
-          ? toolInput.exclude_path_regexes.filter((v: any) => typeof v === "string")
-          : undefined;
-
-        const effectiveConfig: KnowledgeEvidencePacketConfig = {
-          includePathRegexes: inputIncludePathRegexes || knowledgeConfig?.includePathRegexes,
-          excludePathRegexes: inputExcludePathRegexes || knowledgeConfig?.excludePathRegexes,
-        };
-
-        const selectedDocs = selectDocsForHearing(allIndexedPdfs, hearingNumber, effectiveConfig);
-        const looseRules = parseLooseOrderRulesFromText(knowledgeRawText);
-
-        return JSON.stringify({
-          success: true,
-          hearingNumber,
-          candidateCount: selectedDocs.length,
-          candidates: selectedDocs,
-          knowledgeRuleSource: knowledgeSource,
-          ruleHints: knowledgeConfig?.orderRules || looseRules,
-          note: "Planning step only. Choose final ordered documents, then call build_evidence_packet.",
-        });
-      }
-
       case "create_evidence_packet": {
-        const firmRoot = dirname(caseFolder);
         const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const indexData = JSON.parse(indexContent);
-
-        const allIndexedPdfs = collectIndexedPdfDocs(indexData);
-        if (allIndexedPdfs.length === 0) {
-          return JSON.stringify({
-            success: false,
-            error: "No PDF documents found in document_index.json. Re-index the case first.",
-          });
+        const folders = indexData?.folders || {};
+        let docCount = 0;
+        for (const folderData of Object.values(folders) as any[]) {
+          const files = Array.isArray(folderData) ? folderData : (folderData as any)?.files || [];
+          docCount += files.length;
         }
 
-        const hearingInput = typeof toolInput.hearing_number === "string" ? toolInput.hearing_number.trim() : "";
-        const inferredHearing = hearingInput || inferHearingNumberFromDocs(allIndexedPdfs);
-        if (!inferredHearing) {
-          return JSON.stringify({
-            success: false,
-            error: "hearing_number is required when multiple hearing folders exist.",
-          });
-        }
-
-        const hearingNumber = extractHearingCore(inferredHearing);
-        const {
-          config: knowledgeConfig,
-          source: knowledgeSource,
-          rawText: knowledgeRawText,
-        } = await loadKnowledgeEvidencePacketConfig(firmRoot);
-
-        const inputOrderRules = normalizeOrderRulesInput(toolInput.order_rules);
-        const inputIncludePathRegexes = Array.isArray(toolInput.include_path_regexes)
-          ? toolInput.include_path_regexes.filter((v: any) => typeof v === "string")
-          : undefined;
-        const inputExcludePathRegexes = Array.isArray(toolInput.exclude_path_regexes)
-          ? toolInput.exclude_path_regexes.filter((v: any) => typeof v === "string")
-          : undefined;
-        const inputService = normalizeServiceInput(toolInput.service);
-        const inputRulesText = typeof toolInput.rules_text === "string" ? toolInput.rules_text : undefined;
-
-        const effectiveConfig: KnowledgeEvidencePacketConfig = {
-          orderRules: inputOrderRules || knowledgeConfig?.orderRules,
-          includePathRegexes: inputIncludePathRegexes || knowledgeConfig?.includePathRegexes,
-          excludePathRegexes: inputExcludePathRegexes || knowledgeConfig?.excludePathRegexes,
-          includeAffirmationPage: typeof toolInput.include_affirmation_page === "boolean"
-            ? toolInput.include_affirmation_page
-            : knowledgeConfig?.includeAffirmationPage,
-          pageStampPrefix: typeof toolInput.page_stamp_prefix === "string"
-            ? toolInput.page_stamp_prefix
-            : knowledgeConfig?.pageStampPrefix,
-          pageStampStart: typeof toolInput.page_stamp_start === "number"
-            ? toolInput.page_stamp_start
-            : knowledgeConfig?.pageStampStart,
-          service: inputService || knowledgeConfig?.service,
-          defaultRedactionMode: knowledgeConfig?.defaultRedactionMode,
-        };
-
-        const selectedDocs = selectDocsForHearing(allIndexedPdfs, hearingNumber, effectiveConfig);
-        if (selectedDocs.length === 0) {
-          return JSON.stringify({
-            success: false,
-            error: `No PDF documents matched hearing ${normalizeHearingNumber(hearingNumber)}.`,
-          });
-        }
-
-        const normalizedDocuments: EvidencePacketDocumentInput[] = selectedDocs.map((doc) => ({
-          path: doc.path,
-          title: doc.title,
-          date: doc.date,
-          docType: doc.docType,
-          include: true,
-        }));
-
-        const looseRules = parseLooseOrderRulesFromText(inputRulesText || knowledgeRawText);
-        const resolvedOrderRules =
-          effectiveConfig.orderRules && effectiveConfig.orderRules.length > 0
-            ? effectiveConfig.orderRules
-            : looseRules.length > 0
-              ? looseRules
-              : defaultEvidencePacketOrderRules();
-
-        const redaction = resolveRedactionOptions(
-          typeof toolInput.redaction_mode === "string" ? toolInput.redaction_mode : undefined,
-          effectiveConfig
-        );
-
-        let firmBlockLines: string[] | undefined;
-        try {
-          const firmInfo = await loadFirmInfo(firmRoot);
-          if (firmInfo) {
-            firmBlockLines = [
-              firmInfo.firmName,
-              firmInfo.address,
-              `${firmInfo.city || ""}${firmInfo.city && firmInfo.state ? ", " : ""}${firmInfo.state || ""} ${firmInfo.zip || ""}`.trim(),
-              firmInfo.phone,
-            ].filter((line): line is string => Boolean(line && line.trim()));
-          }
-        } catch {
-          // no-op
-        }
-
-        const outputPath = inferOutputPathFromDocs(
-          selectedDocs,
-          hearingNumber,
-          typeof toolInput.output_path === "string" ? toolInput.output_path : undefined
-        );
-
-        const resolvedCaseFolder = resolve(caseFolder);
-        const fullOutputPath = resolve(caseFolder, outputPath);
-        if (fullOutputPath !== resolvedCaseFolder && !fullOutputPath.startsWith(resolvedCaseFolder + sep)) {
-          return JSON.stringify({
-            success: false,
-            error: "output_path must be within the case folder.",
-          });
-        }
-
-        const packet = await buildEvidencePacket({
-          caseFolder,
-          documents: normalizedDocuments,
-          caption: {
-            claimantName: indexData?.summary?.client || "Claimant",
-            claimNumber: inferClaimNumber(indexData),
-            hearingNumber,
-            hearingDateTime: typeof toolInput.hearing_datetime === "string" ? toolInput.hearing_datetime : undefined,
-            appearance: typeof toolInput.appearance === "string" ? toolInput.appearance : undefined,
-          },
-          orderRules: resolvedOrderRules,
-          redaction,
-          service: effectiveConfig.service,
-          includeAffirmationPage: effectiveConfig.includeAffirmationPage ?? true,
-          pageStampPrefix: effectiveConfig.pageStampPrefix,
-          pageStampStart: effectiveConfig.pageStampStart,
-          firmBlockLines,
-        });
-
-        await mkdir(dirname(fullOutputPath), { recursive: true });
-        await writeFile(fullOutputPath, packet.pdfBytes);
-
-        const warnings = [...packet.warnings];
-        if (looseRules.length > 0 && (!effectiveConfig.orderRules || effectiveConfig.orderRules.length === 0)) {
-          warnings.push("Parsed ordering rules from narrative knowledge text (verbatim source) because no structured rule object was provided.");
-        }
-        if ((!effectiveConfig.orderRules || effectiveConfig.orderRules.length === 0) && looseRules.length === 0) {
-          warnings.push("No packet ordering rules found in provided knowledge/tool input; fallback default ordering rules were used.");
-        }
+        const hearingNumber = typeof toolInput.hearing_number === "string"
+          ? toolInput.hearing_number.trim()
+          : "";
 
         return JSON.stringify({
           success: true,
-          outputPath,
-          fullPath: fullOutputPath,
-          hearingNumber,
-          totalPages: packet.totalPages,
-          documentsIncluded: normalizedDocuments.length,
-          knowledgeRuleSource: knowledgeSource,
-          ruleMode: effectiveConfig.orderRules?.length
-            ? "structured"
-            : looseRules.length > 0
-              ? "narrative_parsed"
-              : "default_fallback",
-          warnings,
-          redactionFindings: packet.redactionFindings,
-          instruction: `Packet created. Include [[SHOW_FILE: ${outputPath}]] in your response so the user can review it in this workspace.`,
+          totalIndexedDocuments: docCount,
+          hearingNumber: hearingNumber || null,
+          instruction: [
+            "This is a PLANNING step only — no PDF has been generated yet.",
+            "You must now do the following before building the packet:",
+            "1. If a hearing number was provided, read the hearing notice to understand what this hearing is for.",
+            "2. Search the document index (already in your context) for relevant documents — filter by hearing number, folder, doc type, etc.",
+            "3. Check the EVIDENCE PACKET RULES section in your context for packet ordering rules.",
+            "4. Present the proposed ordered document list to the user for review. Show each document's path, title, and why it was included.",
+            "5. After the user confirms (or adjusts), call build_evidence_packet with the verified ordered list.",
+            "Do NOT skip straight to build_evidence_packet without showing the user the proposed list first.",
+          ].join("\n"),
         });
       }
 
@@ -1686,7 +1192,11 @@ async function executeTool(
           });
         }
 
-        const hearingInput = typeof toolInput.hearing_number === "string" ? toolInput.hearing_number.trim() : "";
+        const hearingInput = typeof toolInput.hearing_number === "string"
+          ? toolInput.hearing_number.trim()
+          : typeof toolInput.hearingNumber === "string"
+            ? toolInput.hearingNumber.trim()
+            : "";
         const inferredHearing = hearingInput || inferHearingNumberFromDocs(
           documents.map((doc) => ({
             path: doc.path,
@@ -1695,14 +1205,7 @@ async function executeTool(
             docType: doc.docType,
           }))
         );
-        if (!inferredHearing) {
-          return JSON.stringify({
-            success: false,
-            error: "hearing_number is required when it cannot be inferred from documents.",
-          });
-        }
-
-        const hearingNumber = extractHearingCore(inferredHearing);
+        const hearingNumber = inferredHearing ? extractHearingCore(inferredHearing) : undefined;
         const { config: knowledgeConfig } = await loadKnowledgeEvidencePacketConfig(firmRoot);
         const inputService = normalizeServiceInput(toolInput.service);
 
@@ -2273,30 +1776,23 @@ Requirements:
 
 7. **Review Document Conflicts**: When the user wants to review conflicts, use get_conflicts to get all items, analyze them, make recommendations, and present them in batches for approval.
 
-8. **Build Hearing Evidence Packets**: Use a strict two-pass workflow:
-- Pass 1 (agent planning): call list_hearing_documents, then choose and order documents according to knowledge rules.
-- Pass 2 (deterministic build): call build_evidence_packet with your explicit ordered documents list.
+8. **Build Hearing Evidence Packets**: Use create_evidence_packet to plan, then build_evidence_packet to generate. Always review the document list with the user before building.
 
 ## WHEN TO USE HEARING PACKET TOOLS
 
-Use this tool when the user asks for:
-- "evidence packet"
-- "hearing packet"
-- "document index packet"
-- "H.O. packet"
+Use these tools when the user asks for an "evidence packet", "hearing packet", "document index packet", or "H.O. packet".
 
-Rule handling requirement:
-- Use the evidence/hearing packet rules exactly as they appear in knowledge.
-- Do not require the user to reformat those rules.
-- If rules are narrative markdown, pass them through using rules_text and/or provide order_rules inferred from that text.
+Two-step flow:
+1. **create_evidence_packet** (planning step): Call this first. It returns instructions telling you to review the document index, check knowledge rules, and present a proposed document list to the user. No PDF is generated.
+2. **build_evidence_packet** (execution step): Call this AFTER the user has reviewed and confirmed the document list. Pass the explicit ordered documents array to generate the final PDF.
 
-Execution requirement:
-- Do NOT skip directly to building from implicit defaults when the user asked for a packet.
-- First list candidates, then submit an explicit ordered documents array to build_evidence_packet.
-
-After the tool succeeds, include a file reference using:
-[[SHOW_FILE: relative/path/to/output.pdf]]
-so the user can review the packet in this workspace.
+Requirements:
+- ALWAYS start with create_evidence_packet — never skip straight to build_evidence_packet.
+- Use the evidence/hearing packet rules from knowledge to determine document order.
+- Present the proposed document list to the user and wait for confirmation before building.
+- After build_evidence_packet succeeds, include a file reference using:
+  [[SHOW_FILE: relative/path/to/output.pdf]]
+  so the user can review the packet in this workspace.
 
 ## DOCUMENT REVIEW MODE
 

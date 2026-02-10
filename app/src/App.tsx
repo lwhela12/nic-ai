@@ -9,7 +9,6 @@ import FirmDashboard from './components/FirmDashboard'
 import Login from './components/Login'
 import TodoDrawer from './components/TodoDrawer'
 import ContactCard from './components/ContactCard'
-
 const API_URL = ''  // Use relative URLs - Vite proxies /api to localhost:3001
 
 interface FirmTodo {
@@ -133,6 +132,11 @@ export type DocumentFile =
       issues?: string
       type?: string
       key_info?: string
+      has_handwritten_data?: boolean
+      handwritten_fields?: string[]
+      user_reviewed?: boolean
+      reviewed_at?: string
+      review_notes?: string
       extracted_data?: Record<string, unknown>
       [key: string]: unknown
     }
@@ -266,6 +270,7 @@ const getDocumentFileName = (file: DocumentFile): string | undefined => {
   return file.filename || file.file
 }
 
+
 // Icon components
 const FolderIcon = () => (
   <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -296,6 +301,7 @@ const UserCircleIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" d="M17.982 18.725A7.488 7.488 0 0012 15.75a7.488 7.488 0 00-5.982 2.975m11.963 0a9 9 0 10-11.963 0m11.963 0A8.966 8.966 0 0112 21a8.966 8.966 0 01-5.982-2.275M15 9.75a3 3 0 11-6 0 3 3 0 016 0z" />
   </svg>
 )
+
 
 function App() {
   const [authState, setAuthState] = useState<AuthState | null>(null)
@@ -330,6 +336,7 @@ function App() {
   const [reviewPrompt, setReviewPrompt] = useState<string>('')
   const [viewDocPath, setViewDocPath] = useState<string | null>(null)
   const [refreshDraftsKey, setRefreshDraftsKey] = useState(0)
+  const [evidencePacketTakeover, setEvidencePacketTakeover] = useState<{ path: string; version: number } | null>(null)
   const [indexStatusForViewer, setIndexStatusForViewer] = useState<{ needsIndex: boolean; newFiles: string[]; modifiedFiles: string[] } | null>(null)
   const [agentDocumentView, setAgentDocumentView] = useState<AgentDocumentView | null>(null)
   const [savedAgentViews, setSavedAgentViews] = useState<AgentDocumentView[]>([])
@@ -341,6 +348,7 @@ function App() {
   // Agent-generated document views are case-specific and persist per-case locally
   useEffect(() => {
     setAgentDocumentView(null)
+    setEvidencePacketTakeover(null)
     if (!caseFolder) {
       setSavedAgentViews([])
       return
@@ -402,6 +410,7 @@ function App() {
     setAgentDocumentView(null)
     setSavedAgentViews([])
   }, [])
+
 
   // Contact card state
   const [isContactCardOpen, setIsContactCardOpen] = useState(false)
@@ -1126,6 +1135,15 @@ function App() {
     setViewContent('')
   }, [caseFolder, documentIndex])
 
+  const handleEvidencePacketGenerated = useCallback((filePath: string) => {
+    const normalizedPath = filePath.trim()
+    if (!normalizedPath) return
+    setEvidencePacketTakeover({
+      path: normalizedPath,
+      version: Date.now(),
+    })
+  }, [])
+
   // Handle logout
   const handleLogout = async () => {
     try {
@@ -1559,38 +1577,41 @@ function App() {
           />
         }
         centerPanel={
-          <Chat
-            caseFolder={caseFolder}
-            apiUrl={API_URL}
-            onViewUpdate={handleViewUpdate}
-            initialPrompt={reviewPrompt}
-            onInitialPromptUsed={() => setReviewPrompt('')}
-            onIndexMayHaveChanged={reloadDocumentIndex}
-            onDraftsMayHaveChanged={() => setRefreshDraftsKey(k => k + 1)}
-            onShowFile={handleShowFile}
-            onDocumentView={handleDocumentView}
-            onIndexStatusChange={setIndexStatusForViewer}
-            onStartReindex={(forceFullReindex) => {
-              if (forceFullReindex) {
-                startCaseIndexing(caseFolder)
-              } else {
-                // Check for changed files first, then start indexing only those
-                fetch(`${API_URL}/api/files/index-status?case=${encodeURIComponent(caseFolder)}`)
-                  .then(res => res.json())
-                  .then(status => {
-                    if (!status.needsIndex) return
-                    const changedFiles = [...(status.newFiles || []), ...(status.modifiedFiles || [])]
-                    if (changedFiles.length > 0 && status.reason !== 'no_index') {
-                      startCaseIndexing(caseFolder, changedFiles)
-                    } else {
-                      startCaseIndexing(caseFolder)
-                    }
-                  })
-                  .catch(() => startCaseIndexing(caseFolder))
-              }
-            }}
-            isReindexing={indexingProgress?.isRunning && indexingProgress?.caseFolder === caseFolder}
-          />
+          <div className="relative h-full">
+            <Chat
+              caseFolder={caseFolder}
+              apiUrl={API_URL}
+              onViewUpdate={handleViewUpdate}
+              initialPrompt={reviewPrompt}
+              onInitialPromptUsed={() => setReviewPrompt('')}
+              onIndexMayHaveChanged={reloadDocumentIndex}
+              onDraftsMayHaveChanged={() => setRefreshDraftsKey(k => k + 1)}
+              onEvidencePacketGenerated={handleEvidencePacketGenerated}
+              onShowFile={handleShowFile}
+              onDocumentView={handleDocumentView}
+              onIndexStatusChange={setIndexStatusForViewer}
+              onStartReindex={(forceFullReindex) => {
+                if (forceFullReindex) {
+                  startCaseIndexing(caseFolder)
+                } else {
+                  // Check for changed files first, then start indexing only those
+                  fetch(`${API_URL}/api/files/index-status?case=${encodeURIComponent(caseFolder)}`)
+                    .then(res => res.json())
+                    .then(status => {
+                      if (!status.needsIndex) return
+                      const changedFiles = [...(status.newFiles || []), ...(status.modifiedFiles || [])]
+                      if (changedFiles.length > 0 && status.reason !== 'no_index') {
+                        startCaseIndexing(caseFolder, changedFiles)
+                      } else {
+                        startCaseIndexing(caseFolder)
+                      }
+                    })
+                    .catch(() => startCaseIndexing(caseFolder))
+                }
+              }}
+              isReindexing={indexingProgress?.isRunning && indexingProgress?.caseFolder === caseFolder}
+            />
+          </div>
         }
         rightPanel={
           <Visualizer
@@ -1616,6 +1637,9 @@ function App() {
             onToggleViewMode={() => setVisualizerMode(m => m === 'summary' ? 'document' : 'summary')}
             hasFile={!!selectedFilePath}
             hasSummary={!!viewContent}
+            evidencePacketPath={evidencePacketTakeover?.path || null}
+            evidencePacketVersion={evidencePacketTakeover?.version || 0}
+            onOpenFilePath={handleShowFile}
           />
         }
       />

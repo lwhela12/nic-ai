@@ -12,7 +12,17 @@ import {
 } from "./cli-setup.js";
 
 // File-based logging for debugging GUI launch issues
-const LOG_DIR = join(homedir(), "AppData", "Local", "Claude PI");
+function getLogDir(): string {
+  if (process.platform === "win32") {
+    return join(homedir(), "AppData", "Local", "Claude PI");
+  }
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Logs", "Claude PI");
+  }
+  return join(homedir(), ".local", "state", "claude-pi");
+}
+
+const LOG_DIR = getLogDir();
 const LOG_FILE = join(LOG_DIR, "debug.log");
 const MAIN_START_MS = Date.now();
 
@@ -47,8 +57,119 @@ debugLog(`app.isPackaged: ${app.isPackaged}`);
 
 let serverManager: ServerManager | null = null;
 let mainWindow: BrowserWindow | null = null;
+let splashWindow: BrowserWindow | null = null;
 let serverPort: number = 0;
 let cliCommand: string | null = null;
+
+function createSplashWindow(): void {
+  if (splashWindow) return;
+
+  splashWindow = new BrowserWindow({
+    width: 520,
+    height: 320,
+    frame: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    closable: false,
+    center: true,
+    show: true,
+    backgroundColor: "#f8fafc",
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+
+  splashWindow.loadURL(
+    `data:text/html,${encodeURIComponent(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Claude PI</title>
+        <style>
+          :root {
+            color-scheme: light;
+          }
+          body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+            color: #111827;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+          }
+          .card {
+            width: 360px;
+            padding: 28px 24px;
+            border-radius: 16px;
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            box-shadow: 0 20px 40px rgba(15, 23, 42, 0.1);
+            text-align: center;
+          }
+          h1 {
+            margin: 0 0 8px 0;
+            font-size: 24px;
+            line-height: 1.2;
+          }
+          p {
+            margin: 0;
+            color: #4b5563;
+            font-size: 14px;
+          }
+          .row {
+            margin-top: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            color: #6b7280;
+            font-size: 13px;
+          }
+          .spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid #d1d5db;
+            border-top-color: #1f2937;
+            border-radius: 999px;
+            animation: spin 0.9s linear infinite;
+          }
+          @keyframes spin {
+            to { transform: rotate(360deg); }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1>Claude PI</h1>
+          <p>Starting services...</p>
+          <div class="row">
+            <div class="spinner"></div>
+            <span>Preparing workspace</span>
+          </div>
+        </div>
+      </body>
+      </html>
+    `)}`
+  );
+
+  splashWindow.on("closed", () => {
+    splashWindow = null;
+  });
+}
+
+function closeSplashWindow(): void {
+  if (!splashWindow) return;
+  if (!splashWindow.isDestroyed()) {
+    splashWindow.close();
+  }
+  splashWindow = null;
+}
 
 function createWindow(): void {
   const windowStartMs = Date.now();
@@ -76,6 +197,7 @@ function createWindow(): void {
     debugLog(
       `[perf] ready-to-show at +${elapsedMs(windowStartMs)}ms (total +${elapsedMs(MAIN_START_MS)}ms)`
     );
+    closeSplashWindow();
     mainWindow?.show();
   });
   mainWindow.loadURL(`http://127.0.0.1:${serverPort}`);
@@ -292,6 +414,8 @@ async function startApp(): Promise<void> {
   const startupStartMs = Date.now();
   debugLog(`startApp() called - isDev: ${isDev}`);
   debugLog(`[perf] startup begin (total +${elapsedMs(MAIN_START_MS)}ms since main import)`);
+  createSplashWindow();
+  debugLog(`[perf] splash shown at +${elapsedMs(startupStartMs)}ms`);
 
   // First, ensure CLI is available
   const cliStartMs = Date.now();
@@ -301,6 +425,7 @@ async function startApp(): Promise<void> {
   if (!cliCommand) {
     debugLog("CLI not available, quitting");
     debugLog(`[perf] startup aborted after ${elapsedMs(startupStartMs)}ms`);
+    closeSplashWindow();
     app.quit();
     return;
   }
@@ -324,12 +449,14 @@ async function startApp(): Promise<void> {
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     debugLog(`Server start FAILED: ${errMsg}`);
+    closeSplashWindow();
     dialog.showErrorBox("Startup Error", `Failed to start server:\n\n${errMsg}`);
     app.quit();
   }
 }
 
 async function cleanup(): Promise<void> {
+  closeSplashWindow();
   if (serverManager) {
     await serverManager.stop();
     serverManager = null;

@@ -25,8 +25,8 @@ Use sub-agents for each folder to manage context efficiently.
           "key_info": "2-3 sentence summary of most important information",
           "extracted_data": {
             "client_name": "...",
-            "dob": "MM/DD/YYYY",
-            "dol": "MM/DD/YYYY",
+            "dob": "MM-DD-YYYY",
+            "dol": "MM-DD-YYYY",
             "charges": 1234.56,
             "provider": "..."
           }

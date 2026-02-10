@@ -14,7 +14,17 @@ import { homedir } from "os";
 const execAsync = promisify(exec);
 
 // File-based logging for debugging GUI launch issues
-const LOG_DIR = join(homedir(), "AppData", "Local", "Claude PI");
+function getLogDir(): string {
+  if (process.platform === "win32") {
+    return join(homedir(), "AppData", "Local", "Claude PI");
+  }
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Logs", "Claude PI");
+  }
+  return join(homedir(), ".local", "state", "claude-pi");
+}
+
+const LOG_DIR = getLogDir();
 const LOG_FILE = join(LOG_DIR, "debug.log");
 const CLI_CACHE_DIR = process.env.CLAUDE_PI_CONFIG_DIR || join(homedir(), ".claude-pi");
 const CLI_CACHE_FILE = join(CLI_CACHE_DIR, "cli-command-cache.json");

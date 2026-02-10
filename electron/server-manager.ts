@@ -5,7 +5,17 @@ import { existsSync, appendFileSync, mkdirSync } from "fs";
 import { homedir } from "os";
 
 // File-based logging for debugging GUI launch issues
-const LOG_DIR = join(homedir(), "AppData", "Local", "Claude PI");
+function getLogDir(): string {
+  if (process.platform === "win32") {
+    return join(homedir(), "AppData", "Local", "Claude PI");
+  }
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Logs", "Claude PI");
+  }
+  return join(homedir(), ".local", "state", "claude-pi");
+}
+
+const LOG_DIR = getLogDir();
 const LOG_FILE = join(LOG_DIR, "debug.log");
 
 function debugLog(msg: string): void {
@@ -61,8 +71,8 @@ export class ServerManager {
    */
   private async waitForHealth(
     port: number,
-    maxAttempts = 30,
-    intervalMs = 500
+    maxAttempts = 150,
+    intervalMs = 100
   ): Promise<boolean> {
     for (let i = 0; i < maxAttempts; i++) {
       try {

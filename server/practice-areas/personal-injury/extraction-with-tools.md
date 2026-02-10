@@ -23,6 +23,15 @@ DOCUMENT TYPES:
 EXTRACTION FOCUS:
 - Client name, DOB, contact info (phone, email, address)
 - Date of loss (accident date)
+- Use MM-DD-YYYY as the default output format for DOB, DOL, and document dates
+- Document date (this document's own issued/signed/authored date, not incident/treatment dates)
+- If multiple dates appear, include:
+  * extracted_data.document_date (best document date)
+  * extracted_data.document_date_confidence: high|medium|low|unknown
+  * extracted_data.document_date_reason: short explanation
+- Handwriting detection:
+  * has_handwritten_data: true when substantive extracted values appear handwritten (exclude signature/initial-only markings), else false
+  * handwritten_fields: array of non-signature extracted field names that appear handwritten (use [] when none)
 - Insurance policy numbers and limits
 - Medical provider names
 - Treatment dates and charges (dollar amounts)
@@ -36,6 +45,8 @@ OUTPUT FORMAT - Return ONLY valid JSON:
   "folder": "<folder name>",
   "type": "<document_type from list above>",
   "key_info": "<2-3 sentence summary of most important information>",
+  "has_handwritten_data": false,
+  "handwritten_fields": [],
   "extracted_data": {
     // Include any specific data points found
   }

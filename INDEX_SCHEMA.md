@@ -32,7 +32,9 @@ This is the canonical schema for `.pi_tool/document_index.json`. All indexing ag
         {
           "filename": "Intake.pdf",
           "type": "intake_form",
-          "key_info": "Client intake with accident details"
+          "key_info": "Client intake with accident details",
+          "has_handwritten_data": true,
+          "handwritten_fields": ["client_name", "document_date"]
         }
       ]
     },
@@ -78,8 +80,8 @@ This is the canonical schema for `.pi_tool/document_index.json`. All indexing ag
 
 ### Summary Fields
 - `client` (string): Client's full name
-- `dol` (string): Date of loss in MM/DD/YYYY or YYYY-MM-DD format
-- `dob` (string): Client's date of birth in MM/DD/YYYY or YYYY-MM-DD format
+- `dol` (string): Date of loss in MM-DD-YYYY or YYYY-MM-DD format
+- `dob` (string): Client's date of birth in MM-DD-YYYY or YYYY-MM-DD format
 - `providers` (array): List of medical provider names
 - `total_charges` (number): Total medical charges in dollars
 - `policy_limits` (object): Policy limits organized by party:
@@ -113,6 +115,13 @@ Each folder is an object with:
 - `filename` (string): Name of the file (e.g., "Intake.pdf")
 - `type` (string): Document type (e.g., "intake_form", "lor", "demand", "medical_record", "hearing_decision")
 - `key_info` (string): Brief summary of important information extracted
+- `date` (string, optional): Document date (the document's own date, normalized to `YYYY-MM-DD` when available)
+- `issues` (string, optional): Extraction warning for this file (for example, date extraction uncertainty/failure)
+- `has_handwritten_data` (boolean): `true` when substantive extracted values appear handwritten (exclude signature/initial-only markings); otherwise `false`
+- `handwritten_fields` (array): Names of non-signature extracted fields that appear handwritten (for example `["client_name", "document_date"]`; empty array when none)
+- `user_reviewed` (boolean, optional): `true` when a user manually reviewed and saved updates for this file
+- `reviewed_at` (string, optional): ISO timestamp of when the file was marked reviewed
+- `review_notes` (string, optional): Brief note describing what the user reviewed/changed
 
 ### Case Note Object
 - `id` (string): Unique identifier (e.g., "note-1705933200000")

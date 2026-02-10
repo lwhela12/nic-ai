@@ -164,7 +164,7 @@ Sent via [Facsimile/Email/Mail]: [Fax number or address]
 Re:
     My Client:      [Client Name]
     Insured:        [Defendant Name]
-    Date of Loss:   [MM/DD/YYYY]
+    Date of Loss:   [MM-DD-YYYY]
     Claim No.:      [Claim Number]
 
                     TIME LIMIT SETTLEMENT DEMAND
@@ -252,7 +252,7 @@ Sent via [Facsimile/Email/Mail]: [Fax number or address]
 Re:
     My Client:      [Client Name]
     Insured:        [Defendant Name]
-    Date of Loss:   [MM/DD/YYYY]
+    Date of Loss:   [MM-DD-YYYY]
     Claim No.:      [Claim Number]
 
                     TIME LIMIT SETTLEMENT DEMAND

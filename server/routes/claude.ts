@@ -18,6 +18,7 @@ import { requireCaseAccess } from "../lib/team-access";
 import { acquireCaseLock, releaseCaseLock } from "../lib/case-lock";
 import { applyResolvedFieldToSummary } from "../lib/index-summary-sync";
 import { normalizePracticeArea, resolveFirmPracticeArea } from "../lib/practice-area";
+import { formatDateMMDDYYYY } from "../lib/date-format";
 
 // ============================================================================
 // Usage Reporting
@@ -342,13 +343,7 @@ Note: Each claim has its own carrier, injury date, and treatment history. Refere
     }
 
     // Get current date for document generation
-    const now = new Date();
-    const dateStr = now.toLocaleDateString('en-US', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    });
+    const dateStr = formatDateMMDDYYYY(new Date());
 
     caseContext = `
 TODAY'S DATE: ${dateStr}
@@ -361,13 +356,7 @@ WORKING DIRECTORY: ${caseFolder}
 USER REQUEST: `;
   } catch {
     // Get current date for document generation
-    const now = new Date();
-    const dateStr = now.toLocaleDateString('en-US', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    });
+    const dateStr = formatDateMMDDYYYY(new Date());
 
     caseContext = `
 TODAY'S DATE: ${dateStr}

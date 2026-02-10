@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { formatDateMMDDYYYY } from '../utils/dateFormat'
 
 interface Template {
   id: string
@@ -342,11 +343,7 @@ export default function TemplateManager({ firmRoot, apiUrl }: Props) {
   }
 
   const formatDate = (dateStr: string) => {
-    return new Date(dateStr).toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    })
+    return formatDateMMDDYYYY(dateStr, dateStr)
   }
 
   const getStatusBadge = (status: Template['status']) => {

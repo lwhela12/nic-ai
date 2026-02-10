@@ -22,13 +22,22 @@ DOCUMENT TYPES (use for the "type" field):
 
 EXTRACTION PRIORITIES:
 1. Client name, DOB, contact info (phone, email, address with street/city/state/zip)
-2. Date of loss (accident date) in MM/DD/YYYY format
-3. Insurance details - USE THE STRUCTURED FIELDS:
+2. Date of loss (accident date) in MM-DD-YYYY format
+3. Document date (the date of this specific document, not treatment/incident dates):
+   - Extract into extracted_data.document_date
+   - If multiple dates appear, choose the document's issued/signed/authored date
+   - Add extracted_data.document_date_confidence (high|medium|low|unknown)
+   - Add extracted_data.document_date_reason with a brief explanation
+4. Handwriting detection:
+   - Set has_handwritten_data to true only if substantive extracted values appear handwritten (exclude signature/initial-only markings); otherwise false
+   - Set handwritten_fields to non-signature extracted field names that appear handwritten (for example: ["client_name", "document_date"])
+   - Use an empty array [] when no handwritten values are present
+5. Insurance details - USE THE STRUCTURED FIELDS:
    - For client's own policy (1P): use insurance_1p with carrier, policy_number, claim_number, bodily_injury, medical_payments, um_uim
    - For at-fault party's policy (3P): use insurance_3p with carrier, policy_number, claim_number, bodily_injury, insured_name
-4. Medical provider name and charges (as numbers, not strings)
-5. Health insurance carrier, group_no, member_no
-6. Settlement/demand amounts as numbers
+6. Medical provider name and charges (as numbers, not strings)
+7. Health insurance carrier, group_no, member_no
+8. Settlement/demand amounts as numbers
 
 CRITICAL FOR DECLARATION PAGES:
 - Identify if this is the client's policy (1P) or adverse party's policy (3P) based on folder name or document content

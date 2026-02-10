@@ -10,6 +10,7 @@ interface Props {
   onInitialPromptUsed?: () => void
   onIndexMayHaveChanged?: () => void
   onDraftsMayHaveChanged?: () => void
+  onEvidencePacketGenerated?: (filePath: string) => void
   onShowFile?: (filePath: string) => void
   onDocumentView?: (view: AgentDocumentViewPayload) => void
   onIndexStatusChange?: (status: IndexStatus | null) => void
@@ -96,6 +97,12 @@ const ExclamationTriangleIcon = () => (
 const WrenchIcon = () => (
   <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75a4.5 4.5 0 01-4.884 4.484c-1.076-.091-2.264.071-2.95.904l-7.152 8.684a2.548 2.548 0 11-3.586-3.586l8.684-7.152c.833-.686.995-1.874.904-2.95a4.5 4.5 0 016.336-4.486l-3.276 3.276a3.004 3.004 0 002.25 2.25l3.276-3.276c.256.565.398 1.192.398 1.852z" />
+  </svg>
+)
+
+const PencilIcon = () => (
+  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487a2.1 2.1 0 113.151 2.788L8.757 20.006a3 3 0 01-1.533.928l-3.39.838.838-3.39a3 3 0 01.928-1.533L16.862 4.487z" />
   </svg>
 )
 
@@ -205,7 +212,7 @@ const KEEP_RECENT = 2
 // Context usage thresholds
 const CONTEXT_DANGER_PERCENT = 55   // Red warning, trigger auto-summarize (lowered for earlier prevention)
 
-export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onShowFile, onDocumentView, onIndexStatusChange, onStartReindex, isReindexing }: Props) {
+export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onEvidencePacketGenerated, onShowFile, onDocumentView, onIndexStatusChange, onStartReindex, isReindexing }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -727,11 +734,18 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                   onIndexMayHaveChanged()
                 }
                 // Check if file-writing tools were used or document agent created a file
-                const writeTools = ['Write', 'write_file', 'create_evidence_packet', 'build_evidence_packet']
+                const writeTools = ['Write', 'write_file', 'build_evidence_packet', 'create_evidence_packet']
                 const hasWriteTools = toolsUsed.some(t => writeTools.some(wt => t.includes(wt)))
                 const hasDocGenFile = !!data.filePath
                 if ((hasWriteTools || hasDocGenFile) && onDraftsMayHaveChanged) {
                   onDraftsMayHaveChanged()
+                }
+
+                // Trigger Drafts takeover flow when evidence packet tools create a file.
+                const evidencePacketTools = ['build_evidence_packet', 'create_evidence_packet']
+                const hasEvidencePacketWrite = toolsUsed.some(t => evidencePacketTools.some(tool => t.includes(tool)))
+                if (hasEvidencePacketWrite && typeof data.filePath === 'string' && data.filePath.trim() && onEvidencePacketGenerated) {
+                  onEvidencePacketGenerated(data.filePath.trim())
                 }
               }
 
@@ -804,7 +818,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="relative flex flex-col h-full">
       {/* Index status banner */}
       {indexStatus?.needsIndex && (
         <div className="px-4 py-3 bg-amber-50 border-b border-amber-200">
@@ -912,20 +926,19 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6 relative">
-        {/* Floating New Chat button */}
         {messages.length > 0 && (
-          <button
-            onClick={archiveConversation}
-            className="sticky top-0 float-right -mt-2 mb-2 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
-                       bg-white text-brand-600 rounded-lg border border-surface-200 shadow-sm
-                       hover:bg-surface-50 hover:border-surface-300 transition-colors z-10"
-            title="Archive and start new chat"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-            </svg>
-            New Chat
-          </button>
+          <div className="sticky top-2 z-10 flex justify-end pointer-events-none">
+            <button
+              onClick={archiveConversation}
+              className="pointer-events-auto h-10 w-10 rounded-full border border-surface-200 bg-white text-brand-600 shadow-sm
+                         hover:bg-surface-50 hover:border-surface-300 hover:text-brand-700 transition-colors
+                         flex items-center justify-center"
+              title="Archive and start new chat"
+              aria-label="Archive and start new chat"
+            >
+              <PencilIcon />
+            </button>
+          </div>
         )}
         {messages.length === 0 && (
           <div className="text-center py-12">

@@ -379,13 +379,36 @@ const ADMIN_HTML = `<!DOCTYPE html>
       localStorage.removeItem('adminApiKey');
       setState({ authenticated: false, apiKey: '' });
     }
+    function parseDateInput(value) {
+      if (!value) return null;
+      const raw = String(value).trim();
+      if (!raw) return null;
+      const dateOnly = raw.match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);
+      if (dateOnly) {
+        const year = Number(dateOnly[1]);
+        const month = Number(dateOnly[2]);
+        const day = Number(dateOnly[3]);
+        const parsed = new Date(year, month - 1, day);
+        if (parsed.getFullYear() === year && parsed.getMonth() === month - 1 && parsed.getDate() === day) {
+          return parsed;
+        }
+        return null;
+      }
+      const parsed = new Date(raw);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+    function pad2(n) {
+      return String(n).padStart(2, '0');
+    }
     function formatDate(dateStr) {
-      if (!dateStr) return '-';
-      return new Date(dateStr).toLocaleDateString();
+      const parsed = parseDateInput(dateStr);
+      if (!parsed) return '-';
+      return pad2(parsed.getMonth() + 1) + '-' + pad2(parsed.getDate()) + '-' + parsed.getFullYear();
     }
     function formatDateTime(dateStr) {
-      if (!dateStr) return '-';
-      return new Date(dateStr).toLocaleString();
+      const parsed = parseDateInput(dateStr);
+      if (!parsed) return '-';
+      return pad2(parsed.getMonth() + 1) + '-' + pad2(parsed.getDate()) + '-' + parsed.getFullYear() + ' ' + parsed.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     }
     function formatTokens(n) {
       if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';

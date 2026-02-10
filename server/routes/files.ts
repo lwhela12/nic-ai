@@ -180,6 +180,222 @@ app.get("/index", async (c) => {
   }
 });
 
+// Update extracted summary metadata for a single indexed document
+app.post("/document-summary", async (c) => {
+  const body = await c.req.json();
+  const caseFolder = typeof body?.caseFolder === "string" ? body.caseFolder : "";
+  const filePath = typeof body?.filePath === "string" ? body.filePath : "";
+  const updatesRaw = body?.updates && typeof body.updates === "object" ? body.updates : null;
+  const hasExtractedDataUpdate = Object.prototype.hasOwnProperty.call(body ?? {}, "extractedData");
+  const extractedDataRaw = hasExtractedDataUpdate ? body?.extractedData : undefined;
+  const reviewNotesRaw = typeof body?.reviewNotes === "string" ? body.reviewNotes.trim() : "";
+
+  if (!caseFolder || !filePath || (!updatesRaw && !hasExtractedDataUpdate)) {
+    return c.json({ error: "caseFolder, filePath, and at least one update payload are required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+
+  const normalizePath = (value: string): string =>
+    value
+      .replace(/\\/g, "/")
+      .replace(/^\.\/+/, "")
+      .replace(/^\/+/, "")
+      .replace(/\/+/g, "/")
+      .trim();
+
+  const normalizeComparablePath = (value: string): string =>
+    normalizePath(value)
+      .replace(/\s+/g, " ")
+      .replace(/\s+\./g, ".")
+      .toLowerCase();
+
+  const joinRelativePath = (folderName: string, fileName: string): string => {
+    const folder = normalizePath(folderName);
+    const file = normalizePath(fileName);
+    if (!file) return "";
+    if (!folder || folder === "." || folder.toLowerCase() === "root") return file;
+    return `${folder}/${file}`;
+  };
+
+  const allowedFields = new Set(["title", "type", "date", "key_info", "issues"]);
+  const updates: Record<string, string> = {};
+
+  if (updatesRaw) {
+    for (const [key, rawValue] of Object.entries(updatesRaw as Record<string, unknown>)) {
+      if (!allowedFields.has(key)) continue;
+      if (rawValue === null || rawValue === undefined) {
+        updates[key] = "";
+        continue;
+      }
+      updates[key] = typeof rawValue === "string" ? rawValue : String(rawValue);
+    }
+  }
+
+  if (hasExtractedDataUpdate && extractedDataRaw !== null && typeof extractedDataRaw !== "object") {
+    return c.json({ error: "extractedData must be an object, array, or null" }, 400);
+  }
+
+  const buildUpdatedFields = (): string[] => {
+    const fields = Object.keys(updates);
+    if (hasExtractedDataUpdate) {
+      fields.push("extracted_data");
+    }
+    return fields;
+  };
+
+  if (buildUpdatedFields().length === 0) {
+    return c.json({ error: "No valid update fields provided" }, 400);
+  }
+
+  try {
+    const content = await readFile(indexPath, "utf-8");
+    const index = JSON.parse(content);
+    const reviewedAt = new Date().toISOString();
+
+    if (!index.folders || typeof index.folders !== "object") {
+      return c.json({ error: "Index has no folders section" }, 400);
+    }
+
+    const requestedPath = normalizeComparablePath(filePath);
+    let matched = false;
+    let updatedFilePath = normalizePath(filePath);
+    let updatedFileName = "";
+    let previousValues: Record<string, unknown> = {};
+
+    for (const [folderName, folderData] of Object.entries(index.folders)) {
+      let filesRef: any[] | null = null;
+      if (Array.isArray(folderData)) {
+        filesRef = folderData as any[];
+      } else if (folderData && typeof folderData === "object") {
+        const folderObj = folderData as Record<string, unknown>;
+        if (Array.isArray(folderObj.files)) {
+          filesRef = folderObj.files as any[];
+        } else if (Array.isArray(folderObj.documents)) {
+          filesRef = folderObj.documents as any[];
+        }
+      }
+
+      if (!filesRef) continue;
+
+      for (let i = 0; i < filesRef.length; i++) {
+        const fileEntry = filesRef[i];
+        let candidatePath = "";
+        let fallbackFileName = "";
+
+        if (typeof fileEntry === "string") {
+          fallbackFileName = fileEntry;
+          candidatePath = joinRelativePath(folderName, fileEntry);
+        } else if (fileEntry && typeof fileEntry === "object") {
+          const entry = fileEntry as Record<string, unknown>;
+          const entryPathRaw = typeof entry.path === "string" ? normalizePath(entry.path) : "";
+          const entryFile = typeof entry.file === "string" ? entry.file : "";
+          const entryFilename = typeof entry.filename === "string" ? entry.filename : "";
+          fallbackFileName =
+            entryFilename ||
+            entryFile ||
+            (entryPathRaw ? entryPathRaw.split("/").pop() || "" : "");
+          const entryPath =
+            entryPathRaw && entryPathRaw.includes("/")
+              ? entryPathRaw
+              : joinRelativePath(folderName, entryPathRaw || fallbackFileName);
+          candidatePath = entryPath || joinRelativePath(folderName, fallbackFileName);
+        }
+
+        if (!candidatePath || normalizeComparablePath(candidatePath) !== requestedPath) {
+          continue;
+        }
+
+        const nextEntry: Record<string, unknown> =
+          typeof fileEntry === "string"
+            ? { filename: fileEntry }
+            : { ...(fileEntry as Record<string, unknown>) };
+
+        if (!nextEntry.filename && typeof nextEntry.file === "string") {
+          nextEntry.filename = nextEntry.file;
+        }
+
+        previousValues = {};
+        for (const [field, value] of Object.entries(updates)) {
+          previousValues[field] = nextEntry[field];
+          const normalizedValue = value.trim();
+          if ((field === "date" || field === "issues" || field === "type" || field === "title") && normalizedValue === "") {
+            delete nextEntry[field];
+          } else {
+            nextEntry[field] = normalizedValue;
+          }
+        }
+
+        if (hasExtractedDataUpdate) {
+          previousValues.extracted_data = nextEntry.extracted_data;
+          if (extractedDataRaw === null) {
+            delete nextEntry.extracted_data;
+          } else {
+            nextEntry.extracted_data = JSON.parse(JSON.stringify(extractedDataRaw));
+          }
+        }
+
+        const updatedFields = buildUpdatedFields();
+        nextEntry.user_reviewed = true;
+        nextEntry.reviewed_at = reviewedAt;
+        nextEntry.review_notes =
+          reviewNotesRaw ||
+          `User reviewed and updated fields: ${updatedFields.join(", ")}`;
+
+        filesRef[i] = nextEntry;
+        updatedFilePath = candidatePath;
+        updatedFileName =
+          (typeof nextEntry.filename === "string" && nextEntry.filename) ||
+          (typeof nextEntry.file === "string" && nextEntry.file) ||
+          fallbackFileName ||
+          updatedFilePath.split("/").pop() ||
+          updatedFilePath;
+        matched = true;
+        break;
+      }
+
+      if (matched) break;
+    }
+
+    if (!matched) {
+      return c.json({ error: "File not found in document index" }, 404);
+    }
+
+    if (!Array.isArray(index.case_notes)) {
+      index.case_notes = [];
+    }
+
+    const updatedFields = buildUpdatedFields();
+    index.case_notes.push({
+      id: `note-${Date.now()}`,
+      content: `Updated document summary fields for ${updatedFileName}: ${updatedFields.join(", ")}`,
+      field_updated: `document:${updatedFilePath}`,
+      previous_value: previousValues,
+      source: "manual",
+      createdAt: new Date().toISOString(),
+    });
+
+    await writeFile(indexPath, JSON.stringify(index, null, 2));
+
+    return c.json({
+      success: true,
+      filePath: updatedFilePath,
+      updatedFields,
+    });
+  } catch (error) {
+    if ((error as any)?.code === "ENOENT") {
+      return c.json({ error: "Document index not found. Run /init-case first." }, 404);
+    }
+    console.error("Failed to update document summary:", error);
+    return c.json({ error: "Could not update document summary" }, 500);
+  }
+});
+
 // Check if index needs refresh (new/modified files)
 app.get("/index-status", async (c) => {
   const caseFolder = c.req.query("case");

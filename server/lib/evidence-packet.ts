@@ -65,6 +65,7 @@ export interface BuildEvidencePacketOptions {
 export interface EvidencePacketTocEntry {
   title: string;
   path: string;
+  date?: string;
   startPage: number;
   endPage: number;
 }
@@ -200,6 +201,7 @@ export async function buildEvidencePacket(
     tocEntries.push({
       title: processed.document.title,
       path: processed.document.path,
+      date: processed.document.date,
       startPage,
       endPage,
     });
@@ -647,39 +649,45 @@ function addIndexPages(
   let page = pdf.addPage([612, 792]);
   pages.push(page);
   const firmBlockBottomY = drawPleadingPaper(page, regularFont, options.firmBlockLines, 1, true);
+  const baseFirstCaptionLineY = 693;
+  const requiredCaptionGap = 16;
+  const preferredExtraDrop = 64;
+  const captionYOffset = typeof firmBlockBottomY === "number"
+    ? Math.max(preferredExtraDrop, (firmBlockBottomY + requiredCaptionGap) - baseFirstCaptionLineY)
+    : preferredExtraDrop;
+  const cy = (y: number) => y - captionYOffset;
 
-  drawCentered(page, boldFont, "NEVADA DEPARTMENT OF ADMINISTRATION", 13, 744);
-  drawCentered(page, boldFont, "BEFORE THE HEARING OFFICER", 12, 724);
+  drawCentered(page, boldFont, "BEFORE THE HEARING OFFICER", 12, cy(724));
 
-  drawCaptionDivider(page, regularFont);
+  drawCaptionDivider(page, regularFont, captionYOffset);
 
-  page.drawText("In the Matter of the Contested", { x: 84, y: 693, size: 11, font: regularFont });
-  page.drawText("Industrial Insurance Claim of", { x: 84, y: 678, size: 11, font: regularFont });
-  page.drawText(`${options.caption.claimantName},`, { x: 84, y: 646, size: 11, font: regularFont });
-  page.drawText("Claimant.", { x: 84, y: 631, size: 11, font: regularFont });
+  page.drawText("In the Matter of the Contested", { x: 84, y: cy(693), size: 12, font: regularFont });
+  page.drawText("Industrial Insurance Claim of", { x: 84, y: cy(678), size: 12, font: regularFont });
+  page.drawText(`${options.caption.claimantName},`, { x: 84, y: cy(646), size: 12, font: regularFont });
+  page.drawText("Claimant.", { x: 84, y: cy(631), size: 12, font: regularFont });
 
   const rightX = 362;
-  drawRightField(page, boldFont, regularFont, rightX, 693, "Claim No.:", options.caption.claimNumber ?? "");
-  drawRightField(page, boldFont, regularFont, rightX, 673, "Hearing No.:", options.caption.hearingNumber ?? "");
-  drawRightField(page, boldFont, regularFont, rightX, 653, "Date/Time:", options.caption.hearingDateTime ?? "");
-  drawRightField(page, boldFont, regularFont, rightX, 633, "Appearance:", options.caption.appearance ?? "");
+  drawRightField(page, boldFont, regularFont, rightX, cy(693), "Claim No.:", options.caption.claimNumber ?? "", 12);
+  drawRightField(page, boldFont, regularFont, rightX, cy(673), "Hearing No.:", options.caption.hearingNumber ?? "", 12);
+  drawRightField(page, boldFont, regularFont, rightX, cy(653), "Date/Time:", options.caption.hearingDateTime ?? "", 12);
+  drawRightField(page, boldFont, regularFont, rightX, cy(633), "Appearance:", options.caption.appearance ?? "", 12);
 
   drawCentered(page, boldFont, "DOCUMENT INDEX", 14, 548);
 
   const intro = options.caption.introductoryCounselLine ||
     `COMES NOW, ${options.caption.claimantName}, by and through counsel, and submits the attached documentation for consideration in the above-cited matter.`;
   const introStartY = typeof firmBlockBottomY === "number"
-    ? Math.min(498, firmBlockBottomY - 10)
-    : 498;
-  let currentY = drawWrappedText(page, intro, 84, introStartY, 470, regularFont, 11, 14);
+    ? Math.min(488, firmBlockBottomY - 12)
+    : 488;
+  let currentY = drawWrappedText(page, intro, 84, introStartY, 470, regularFont, 12, 16);
   currentY -= 12;
 
-  page.drawText("Document", { x: 84, y: currentY, size: 11, font: boldFont });
-  page.drawText("Page(s)", { x: 500, y: currentY, size: 11, font: boldFont });
+  page.drawText("Document", { x: 84, y: currentY, size: 12, font: boldFont });
+  page.drawText("Page(s)", { x: 500, y: currentY, size: 12, font: boldFont });
   currentY -= 22;
 
   const tableBottom = 90;
-  const rowHeight = 24;
+  const rowHeight = 30;
   let index = 0;
   while (index < tocEntries.length) {
     if (currentY < tableBottom) {
@@ -687,13 +695,13 @@ function addIndexPages(
       pages.push(page);
       drawPleadingPaper(page, regularFont, options.firmBlockLines, pages.length, false);
       drawCentered(page, boldFont, "DOCUMENT INDEX (CONT.)", 14, 724);
-      page.drawText("Document", { x: 84, y: 692, size: 11, font: boldFont });
-      page.drawText("Page(s)", { x: 500, y: 692, size: 11, font: boldFont });
+      page.drawText("Document", { x: 84, y: 692, size: 12, font: boldFont });
+      page.drawText("Page(s)", { x: 500, y: 692, size: 12, font: boldFont });
       currentY = 666;
     }
 
     const entry = tocEntries[index];
-    const left = `${index + 1}. ${entry.title}`;
+    const left = `${index + 1}. ${formatTocDocumentLabel(entry)}`;
     const right = `Pg. ${formatPageRange(entry.startPage, entry.endPage)}`;
     drawTocRow(page, regularFont, left, right, currentY);
     currentY -= rowHeight;
@@ -794,28 +802,36 @@ function drawPleadingPaper(
   let firmBlockBottomY: number | undefined;
 
   if (showFirmBlock) {
-    const firmLines = (firmBlockLines || [])
+    const providedFirmLines = (firmBlockLines || [])
       .map((line) => line.trim())
       .map((line) => line.replace(/\[[^\]]+\]/g, "").trim())
-      .filter((line) =>
-        line.length > 0 &&
-        !/not configured/i.test(line)
-      );
+      .map((line) => (/not configured/i.test(line) ? "" : line));
 
-    const visibleFirmLines = firmLines.length > 0 ? firmLines : ["Attorney for Claimant"];
-
-    let firmY = 544;
-    for (const line of visibleFirmLines.slice(0, 7)) {
-      page.drawText(line, {
-        x: 60,
-        y: firmY,
-        size: 8.5,
-        font,
-        color: rgb(0.2, 0.2, 0.2),
-      });
-      firmY -= 12;
+    // Keep a consistent 7-line attorney block footprint in the top-left.
+    // If firm data is missing, preserve blank lines instead of injecting fallback text.
+    const attorneyBlockLineCount = 7;
+    const visibleFirmLines: string[] = [];
+    for (let i = 0; i < attorneyBlockLineCount; i += 1) {
+      visibleFirmLines.push(providedFirmLines[i] ?? "");
     }
-    firmBlockBottomY = firmY + 12;
+
+    const blockLineHeight = 12.5;
+    // Keep the full attorney block inside page bounds and above the caption.
+    // Previous anchoring was too high and could clip the top lines.
+    let firmY = 758;
+    for (const line of visibleFirmLines) {
+      if (line) {
+        page.drawText(line, {
+          x: 60,
+          y: firmY,
+          size: 12,
+          font,
+          color: rgb(0.2, 0.2, 0.2),
+        });
+      }
+      firmY -= blockLineHeight;
+    }
+    firmBlockBottomY = firmY + blockLineHeight;
   }
 
   page.drawText(String(pageNumber), {
@@ -836,10 +852,11 @@ function drawRightField(
   x: number,
   y: number,
   label: string,
-  value: string
+  value: string,
+  size = 10
 ): void {
-  page.drawText(label, { x, y, size: 10, font: labelFont });
-  page.drawText(value, { x: x + 76, y, size: 10, font: valueFont });
+  page.drawText(label, { x, y, size, font: labelFont });
+  page.drawText(value, { x: x + 76, y, size, font: valueFont });
 }
 
 function drawCentered(page: PDFPage, font: PDFFont, text: string, size: number, y: number): void {
@@ -898,7 +915,7 @@ function drawWrappedText(
 }
 
 function drawTocRow(page: PDFPage, font: PDFFont, left: string, right: string, y: number): void {
-  const size = 11;
+  const size = 12;
   const leftX = 84;
   const rightX = 500;
   const maxLeftWidth = rightX - leftX - 40;
@@ -918,26 +935,20 @@ function drawTocRow(page: PDFPage, font: PDFFont, left: string, right: string, y
   }
 }
 
-function drawCaptionDivider(page: PDFPage, font: PDFFont): void {
+function drawCaptionDivider(page: PDFPage, font: PDFFont, yOffset = 0): void {
   const dividerX = 336;
-  const topY = 708;
-  const bottomY = 618;
+  const topY = 708 - yOffset;
+  const bottomY = 618 - yOffset;
   const parenSpacing = 14;
 
   for (let y = topY - 2; y >= bottomY + 2; y -= parenSpacing) {
     page.drawText(")", { x: dividerX, y, size: 11, font });
   }
 
-  // Subtle top/bottom rules to mimic the filing caption frame.
-  page.drawLine({
-    start: { x: 84, y: topY },
-    end: { x: 550, y: topY },
-    thickness: 0.4,
-    color: rgb(0.72, 0.72, 0.72),
-  });
+  // Match court index style: only a bottom rule ending at the parenthesis column.
   page.drawLine({
     start: { x: 84, y: bottomY },
-    end: { x: 550, y: bottomY },
+    end: { x: dividerX - 6, y: bottomY },
     thickness: 0.4,
     color: rgb(0.72, 0.72, 0.72),
   });
@@ -954,6 +965,14 @@ function truncateToWidth(text: string, font: PDFFont, size: number, maxWidth: nu
 
 function formatPageRange(start: number, end: number): string {
   return start === end ? `${start}` : `${start}-${end}`;
+}
+
+function formatTocDocumentLabel(entry: EvidencePacketTocEntry): string {
+  const title = (entry.title || "").trim();
+  const date = (entry.date || "").trim();
+  if (!date) return title;
+  if (title.toLowerCase().includes(date.toLowerCase())) return title;
+  return `${title} - ${date}`;
 }
 
 function stampExhibitPageNumber(page: PDFPage, font: PDFFont, label: string): void {

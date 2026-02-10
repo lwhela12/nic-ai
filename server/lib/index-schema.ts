@@ -139,6 +139,13 @@ export const FileEntrySchema = z.object({
   filename: z.string(),
   type: z.string(),
   key_info: z.string(),
+  date: z.string().optional(),
+  issues: z.string().optional(),
+  has_handwritten_data: z.boolean().optional(),
+  handwritten_fields: z.array(z.string()).optional(),
+  user_reviewed: z.boolean().optional(),
+  reviewed_at: z.string().optional(),
+  review_notes: z.string().optional(),
   extracted_data: z.record(z.string(), z.unknown()).optional(),
 });
 
@@ -417,6 +424,17 @@ export const FILE_EXTRACTION_TOOL_SCHEMA = {
         description:
           "2-3 sentence summary of the most important information in this document",
       },
+      has_handwritten_data: {
+        type: "boolean" as const,
+        description:
+          "True only when extracted handwritten values include substantive data (not just signature/initial markers); otherwise false",
+      },
+      handwritten_fields: {
+        type: "array" as const,
+        items: { type: "string" as const },
+        description:
+          "List of non-signature extracted field names that appear handwritten (for example: client_name, document_date). Exclude signature-only markers and use [] when none",
+      },
       extracted_data: {
         type: "object" as const,
         description: "Structured data extracted from the document",
@@ -425,7 +443,7 @@ export const FILE_EXTRACTION_TOOL_SCHEMA = {
           client_name: { type: "string" as const },
           dob: {
             type: "string" as const,
-            description: "Date of birth in MM/DD/YYYY format",
+            description: "Date of birth in MM-DD-YYYY format",
           },
           phone: { type: "string" as const },
           email: { type: "string" as const },
@@ -442,7 +460,23 @@ export const FILE_EXTRACTION_TOOL_SCHEMA = {
           // Accident info
           dol: {
             type: "string" as const,
-            description: "Date of loss/accident in MM/DD/YYYY format",
+            description: "Date of loss/accident in MM-DD-YYYY format",
+          },
+          document_date: {
+            type: "string" as const,
+            description:
+              "Date of this document (e.g., letter/report/signature date) in MM-DD-YYYY or YYYY-MM-DD format",
+          },
+          document_date_confidence: {
+            type: "string" as const,
+            enum: ["high", "medium", "low", "unknown"],
+            description:
+              "Confidence that document_date is the document's own date rather than another date in the text",
+          },
+          document_date_reason: {
+            type: "string" as const,
+            description:
+              "Short note explaining why this date was chosen when multiple dates appear",
           },
           accident_location: { type: "string" as const },
           accident_description: { type: "string" as const },
@@ -546,7 +580,7 @@ export const FILE_EXTRACTION_TOOL_SCHEMA = {
           job_title: { type: "string" as const },
           doi: {
             type: "string" as const,
-            description: "Date of injury in MM/DD/YYYY format (Workers' Comp)",
+            description: "Date of injury in MM-DD-YYYY format (Workers' Comp)",
           },
           injury_description: { type: "string" as const },
           body_parts: {
@@ -589,10 +623,24 @@ export const FILE_EXTRACTION_TOOL_SCHEMA = {
             type: "string" as const,
             description: "Hearing/docket case number (e.g., D-16-12345)",
           },
+          next_hearing_date: {
+            type: "string" as const,
+            description: "Next hearing date if shown in the document",
+          },
+          hearing_issue: {
+            type: "string" as const,
+            description: "Issue in dispute for the hearing",
+          },
         },
       },
     },
-    required: ["type", "key_info", "extracted_data"],
+    required: [
+      "type",
+      "key_info",
+      "has_handwritten_data",
+      "handwritten_fields",
+      "extracted_data",
+    ],
   },
 };
 
@@ -824,16 +872,75 @@ export function normalizeFolders(
   return result;
 }
 
+function isSignatureOnlyHandwrittenField(value: string): boolean {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+
+  if (!normalized) return false;
+
+  return (
+    /\bsignature\b/.test(normalized) ||
+    /\bsigned by\b/.test(normalized) ||
+    /\bsigned\b/.test(normalized) ||
+    /\bsigner\b/.test(normalized) ||
+    /\binitials?\b/.test(normalized) ||
+    normalized === "sign"
+  );
+}
+
 function normalizeFileEntry(value: unknown): FileEntry {
   if (!value || typeof value !== "object") {
-    return { filename: "unknown", type: "other", key_info: "" };
+    return {
+      filename: "unknown",
+      type: "other",
+      key_info: "",
+      has_handwritten_data: false,
+      handwritten_fields: [],
+    };
   }
 
   const obj = value as Record<string, unknown>;
+  const seenHandwrittenFields = new Set<string>();
+  const handwrittenFields = Array.isArray(obj.handwritten_fields)
+    ? obj.handwritten_fields
+        .filter(
+          (field): field is string =>
+            typeof field === "string" && field.trim().length > 0
+        )
+        .map((field) => field.trim())
+        .filter((field) => !isSignatureOnlyHandwrittenField(field))
+        .filter((field) => {
+          const key = field.toLowerCase();
+          if (seenHandwrittenFields.has(key)) return false;
+          seenHandwrittenFields.add(key);
+          return true;
+        })
+    : [];
+  const hasHandwrittenData = handwrittenFields.length > 0;
+
   return {
     filename: typeof obj.filename === "string" ? obj.filename : "unknown",
     type: typeof obj.type === "string" ? obj.type : "other",
     key_info: typeof obj.key_info === "string" ? obj.key_info : "",
+    date: typeof obj.date === "string" && obj.date.trim() ? obj.date.trim() : undefined,
+    issues:
+      typeof obj.issues === "string" && obj.issues.trim()
+        ? obj.issues.trim()
+        : undefined,
+    has_handwritten_data: hasHandwrittenData,
+    handwritten_fields: hasHandwrittenData ? handwrittenFields : [],
+    user_reviewed: typeof obj.user_reviewed === "boolean" ? obj.user_reviewed : undefined,
+    reviewed_at:
+      typeof obj.reviewed_at === "string" && obj.reviewed_at.trim()
+        ? obj.reviewed_at.trim()
+        : undefined,
+    review_notes:
+      typeof obj.review_notes === "string" && obj.review_notes.trim()
+        ? obj.review_notes.trim()
+        : undefined,
     extracted_data:
       typeof obj.extracted_data === "object" && obj.extracted_data !== null
         ? (obj.extracted_data as Record<string, unknown>)

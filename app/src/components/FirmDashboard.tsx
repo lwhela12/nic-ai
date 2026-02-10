@@ -5,6 +5,7 @@ import KnowledgeChat from './KnowledgeChat'
 import TemplateManager from './TemplateManager'
 import TeamManager from './TeamManager'
 import CaseAssignmentDropdown from './CaseAssignmentDropdown'
+import { formatDateMMDDYYYY } from '../utils/dateFormat'
 
 // URL param helpers for persisting view state across refreshes
 const getUrlParam = (key: string): string | null => {
@@ -805,13 +806,7 @@ export default function FirmDashboard({
 
   const formatDate = (dateStr?: string) => {
     if (!dateStr || dateStr === 'Unknown') return '—'
-    try {
-      const d = new Date(dateStr)
-      if (isNaN(d.getTime())) return dateStr
-      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
-    } catch {
-      return dateStr
-    }
+    return formatDateMMDDYYYY(dateStr, dateStr)
   }
 
   /**
@@ -1685,7 +1680,10 @@ export default function FirmDashboard({
                 <div className="space-y-3">
                   {[
                     { key: 'firmName', label: 'Firm Name' },
+                    { key: 'attorneyName', label: 'Attorney Name' },
+                    { key: 'nevadaBarNo', label: 'Nevada Bar No.' },
                     { key: 'address', label: 'Address' },
+                    { key: 'cityStateZip', label: 'City, State ZIP' },
                     { key: 'phone', label: 'Phone' },
                     { key: 'practiceArea', label: 'Practice Area' },
                     { key: 'feeStructure', label: 'Fee Structure' },

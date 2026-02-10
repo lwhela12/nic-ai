@@ -9,6 +9,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { readFile, writeFile, readdir, mkdir } from "fs/promises";
 import { join } from "path";
+import { formatDateMMDDYYYY, formatDateYYYYMMDD, parseFlexibleDate } from "./date-format";
 
 // Lazy client creation - API key is set by auth middleware before requests
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -427,12 +428,7 @@ async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOption
 
   // Current date
   const now = new Date();
-  const dateStr = now.toLocaleDateString('en-US', {
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric'
-  });
+  const dateStr = formatDateMMDDYYYY(now);
   parts.push(`TODAY'S DATE: ${dateStr}`);
   if (!scope || scope.mode === "firm") {
     parts.push("ACTIVE CASE VIEW: Firm (all cases)");
@@ -534,22 +530,11 @@ async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOption
         let statuteOfLimitations = index.statute_of_limitations || index.summary?.statute_of_limitations;
 
         if (!statuteOfLimitations && dateOfLoss) {
-          try {
-            const dolStr = dateOfLoss;
-            let dolDate: Date;
-            if (dolStr.includes('/')) {
-              const [month, day, year] = dolStr.split('/');
-              dolDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
-            } else {
-              dolDate = new Date(dolStr);
-            }
-            if (!isNaN(dolDate.getTime())) {
-              const solDate = new Date(dolDate);
-              solDate.setFullYear(solDate.getFullYear() + 2);
-              statuteOfLimitations = solDate.toISOString().split('T')[0];
-            }
-          } catch {
-            // Could not parse DOL
+          const dolDate = parseFlexibleDate(dateOfLoss);
+          if (dolDate) {
+            const solDate = new Date(dolDate);
+            solDate.setFullYear(solDate.getFullYear() + 2);
+            statuteOfLimitations = formatDateYYYYMMDD(solDate);
           }
         }
 

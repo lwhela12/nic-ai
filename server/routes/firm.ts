@@ -25,6 +25,7 @@ import {
 import { practiceAreaRegistry, PRACTICE_AREAS } from "../practice-areas";
 import { normalizePracticeArea, resolveFirmPracticeArea } from "../lib/practice-area";
 import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
+import { formatDateYYYYMMDD, parseFlexibleDate } from "../lib/date-format";
 
 // ============================================================================
 // Usage Reporting
@@ -201,7 +202,7 @@ const SYNTHESIS_SCHEMA_PI = {
       description: "Case summary fields",
       properties: {
         client: { type: "string" as const, description: "Client's full name" },
-        dol: { type: "string" as const, description: "Date of loss (MM/DD/YYYY or YYYY-MM-DD)" },
+        dol: { type: "string" as const, description: "Date of loss (MM-DD-YYYY preferred, or YYYY-MM-DD)" },
         dob: { type: "string" as const, description: "Client's date of birth" },
         providers: {
           type: "array" as const,
@@ -363,7 +364,7 @@ const SYNTHESIS_SCHEMA_WC = {
       description: "Case summary fields for Workers' Compensation",
       properties: {
         client: { type: "string" as const, description: "Client's full name" },
-        doi: { type: "string" as const, description: "Date of injury (MM/DD/YYYY or YYYY-MM-DD)" },
+        doi: { type: "string" as const, description: "Date of injury (MM-DD-YYYY preferred, or YYYY-MM-DD)" },
         dob: { type: "string" as const, description: "Client's date of birth" },
         providers: {
           type: "array" as const,
@@ -577,27 +578,11 @@ async function buildCaseSummary(
 
     // If no explicit SOL, calculate from DOL (Nevada PI = 2 years)
     if (!caseSummary.statuteOfLimitations && caseSummary.dateOfLoss) {
-      try {
-        // Parse DOL - handle various formats like "01/04/2024" or "2024-03-21"
-        const dolStr = caseSummary.dateOfLoss;
-        let dolDate: Date;
-        if (dolStr.includes('/')) {
-          // MM/DD/YYYY format
-          const [month, day, year] = dolStr.split('/');
-          dolDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
-        } else {
-          // ISO format
-          dolDate = new Date(dolStr);
-        }
-
-        if (!isNaN(dolDate.getTime())) {
-          // Add 2 years for Nevada PI statute
-          const solDate = new Date(dolDate);
-          solDate.setFullYear(solDate.getFullYear() + 2);
-          caseSummary.statuteOfLimitations = solDate.toISOString().split('T')[0];
-        }
-      } catch {
-        // Could not parse DOL
+      const dolDate = parseFlexibleDate(caseSummary.dateOfLoss);
+      if (dolDate) {
+        const solDate = new Date(dolDate);
+        solDate.setFullYear(solDate.getFullYear() + 2);
+        caseSummary.statuteOfLimitations = formatDateYYYYMMDD(solDate);
       }
     }
 
@@ -900,13 +885,22 @@ DOCUMENT TYPES (use for the "type" field):
 
 EXTRACTION PRIORITIES:
 1. Client name, DOB, contact info (phone, email, address with street/city/state/zip)
-2. Date of loss (accident date) in MM/DD/YYYY format
-3. Insurance details - USE THE STRUCTURED FIELDS:
+2. Date of loss (accident date) in MM-DD-YYYY format
+3. Document date (the date of this specific document, not treatment/incident dates):
+   - Extract into extracted_data.document_date
+   - If multiple dates appear, choose the document's issued/signed/authored date
+   - Add extracted_data.document_date_confidence (high|medium|low|unknown)
+   - Add extracted_data.document_date_reason with a brief explanation
+4. Handwriting detection:
+   - Set has_handwritten_data to true only if substantive extracted values appear handwritten (exclude signature/initial-only markings)
+   - Set handwritten_fields to non-signature extracted field names that appear handwritten (for example: ["client_name", "document_date"])
+   - Use an empty array [] when no handwritten values are present
+5. Insurance details - USE THE STRUCTURED FIELDS:
    - For client's own policy (1P): use insurance_1p with carrier, policy_number, claim_number, bodily_injury, medical_payments, um_uim
    - For at-fault party's policy (3P): use insurance_3p with carrier, policy_number, claim_number, bodily_injury, insured_name
-4. Medical provider name and charges (as numbers, not strings)
-5. Health insurance carrier, group_no, member_no
-6. Settlement/demand amounts as numbers
+6. Medical provider name and charges (as numbers, not strings)
+7. Health insurance carrier, group_no, member_no
+8. Settlement/demand amounts as numbers
 
 CRITICAL FOR DECLARATION PAGES:
 - Identify if this is the client's policy (1P) or adverse party's policy (3P) based on folder name or document content
@@ -944,21 +938,30 @@ DOCUMENT TYPES (use for the "type" field):
 
 EXTRACTION PRIORITIES:
 1. Claimant name, DOB, SSN (last 4), contact info
-2. Date of injury (DOI) in MM/DD/YYYY format
-3. Employer information:
+2. Date of injury (DOI) in MM-DD-YYYY format
+3. Document date (the date of this specific document, not DOI/treatment dates):
+   - Extract into extracted_data.document_date
+   - If multiple dates appear, choose the document's issued/signed/authored date
+   - Add extracted_data.document_date_confidence (high|medium|low|unknown)
+   - Add extracted_data.document_date_reason with a brief explanation
+4. Handwriting detection:
+   - Set has_handwritten_data to true only if substantive extracted values appear handwritten (exclude signature/initial-only markings)
+   - Set handwritten_fields to non-signature extracted field names that appear handwritten (for example: ["claimant_name", "doi"])
+   - Use an empty array [] when no handwritten values are present
+5. Employer information:
    - Employer name, address
    - Job title at time of injury
    - Date of hire
-4. WC Carrier/TPA information:
+6. WC Carrier/TPA information:
    - Carrier name, claim number, adjuster name/contact
-5. Injury details:
+7. Injury details:
    - Body parts injured
    - Mechanism of injury
    - ICD-10 diagnosis codes if present
-6. Wage information:
+8. Wage information:
    - Average Monthly Wage (AMW)
    - Compensation rate (typically 2/3 of AMW)
-7. Disability status (IMPORTANT - always determine disability_type when work status is mentioned):
+9. Disability status (IMPORTANT - always determine disability_type when work status is mentioned):
    - TTD (Temporary Total Disability): Patient is completely off work, cannot work at all
    - TPD (Temporary Partial Disability): Patient on modified/light duty, working with restrictions
    - PPD (Permanent Partial Disability): Patient has reached MMI with permanent impairment rating
@@ -969,11 +972,11 @@ EXTRACTION PRIORITIES:
    - "Modified duty", "light duty", "work restrictions", "limited duty" → TPD
    - "MMI reached" + impairment rating → PPD
    - Always extract disability_type if work status or benefits are mentioned
-8. Medical treatment:
+10. Medical treatment:
    - Treating physician name (ATP)
    - Treatment dates and types
    - Work restrictions
-9. Hearing information:
+11. Hearing information:
    - Case/docket number
    - Hearing dates
    - Issues in dispute
@@ -1023,6 +1026,15 @@ DOCUMENT TYPES:
 EXTRACTION FOCUS:
 - Client name, DOB, contact info (phone, email, address)
 - Date of loss (accident date)
+- Use MM-DD-YYYY as the default output format for DOB, DOL, and document dates
+- Document date (this document's own issued/signed/authored date, not incident/treatment dates)
+- If multiple dates appear, include:
+  * extracted_data.document_date (best document date)
+  * extracted_data.document_date_confidence: high|medium|low|unknown
+  * extracted_data.document_date_reason: short explanation
+- Handwriting detection:
+  * has_handwritten_data: true when substantive extracted values appear handwritten (exclude signature/initial-only markings), else false
+  * handwritten_fields: array of non-signature extracted field names that appear handwritten (use [] when none)
 - Insurance policy numbers and limits
 - Medical provider names
 - Treatment dates and charges (dollar amounts)
@@ -1036,6 +1048,8 @@ OUTPUT FORMAT - Return ONLY valid JSON:
   "folder": "<folder name>",
   "type": "<document_type from list above>",
   "key_info": "<2-3 sentence summary of most important information>",
+  "has_handwritten_data": false,
+  "handwritten_fields": [],
   "extracted_data": {
     // Include any specific data points found
   }
@@ -1077,6 +1091,15 @@ DOCUMENT TYPES:
 EXTRACTION FOCUS:
 - Claimant name, DOB, SSN (last 4), contact info
 - Date of injury (DOI)
+- Use MM-DD-YYYY as the default output format for DOB, DOI, and document dates
+- Document date (this document's own issued/signed/authored date, not DOI/treatment dates)
+- If multiple dates appear, include:
+  * extracted_data.document_date (best document date)
+  * extracted_data.document_date_confidence: high|medium|low|unknown
+  * extracted_data.document_date_reason: short explanation
+- Handwriting detection:
+  * has_handwritten_data: true when substantive extracted values appear handwritten (exclude signature/initial-only markings), else false
+  * handwritten_fields: array of non-signature extracted field names that appear handwritten (use [] when none)
 - Employer name, job title
 - WC Carrier name, claim number, adjuster
 - Body parts injured, diagnosis codes
@@ -1101,6 +1124,8 @@ OUTPUT FORMAT - Return ONLY valid JSON:
   "folder": "<folder name>",
   "type": "<document_type from list above>",
   "key_info": "<2-3 sentence summary of most important information>",
+  "has_handwritten_data": false,
+  "handwritten_fields": [],
   "extracted_data": {
     // Include any specific data points found
   }
@@ -1210,7 +1235,7 @@ Return a JSON object with these fields:
 - disability_type: "ttd" | "tpd" | "ppd" | "ptd"
 - summary: Object with:
   - client: Claimant name
-  - doi: Date of injury (MM/DD/YYYY)
+  - doi: Date of injury (MM-DD-YYYY)
   - dob: Date of birth
   - providers: Array of provider names (strings)
   - total_charges: Total medical charges
@@ -1328,6 +1353,8 @@ interface FileExtraction {
   folder: string;
   type: string;
   key_info: string;
+  has_handwritten_data?: boolean;
+  handwritten_fields?: string[];
   extracted_data?: Record<string, any>;
   error?: string;
   usage?: UsageStats;
@@ -1362,6 +1389,146 @@ function normalizeFolders(input: any): Record<string, { files: any[] }> {
   return normalized;
 }
 
+function normalizeDateToIso(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const parsed = parseFlexibleDate(trimmed);
+  if (!parsed) return null;
+  return formatDateYYYYMMDD(parsed);
+}
+
+function inferDateFromFilename(filename: string): string | null {
+  const ymd = filename.match(/(20\d{2})[-_](\d{1,2})[-_](\d{1,2})/);
+  if (ymd) {
+    const year = parseInt(ymd[1], 10);
+    const month = parseInt(ymd[2], 10);
+    const day = parseInt(ymd[3], 10);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+    }
+  }
+
+  const mdy = filename.match(/(\d{1,2})[-_](\d{1,2})[-_](20\d{2})/);
+  if (mdy) {
+    const month = parseInt(mdy[1], 10);
+    const day = parseInt(mdy[2], 10);
+    const year = parseInt(mdy[3], 10);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+    }
+  }
+
+  return null;
+}
+
+function isSignatureOnlyHandwrittenField(value: string): boolean {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+
+  if (!normalized) return false;
+
+  return (
+    /\bsignature\b/.test(normalized) ||
+    /\bsigned by\b/.test(normalized) ||
+    /\bsigned\b/.test(normalized) ||
+    /\bsigner\b/.test(normalized) ||
+    /\binitials?\b/.test(normalized) ||
+    normalized === "sign"
+  );
+}
+
+function normalizeHandwrittenFields(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const field = item.trim();
+    if (!field) continue;
+    if (isSignatureOnlyHandwrittenField(field)) continue;
+    const key = field.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(field);
+  }
+
+  return normalized;
+}
+
+function resolveHandwritingMetadata(extraction: FileExtraction): {
+  hasHandwrittenData: boolean;
+  handwrittenFields: string[];
+  issue?: string;
+} {
+  const handwrittenFields = normalizeHandwrittenFields(
+    extraction.handwritten_fields
+  );
+  const hasHandwrittenData = handwrittenFields.length > 0;
+
+  if (!hasHandwrittenData) {
+    return {
+      hasHandwrittenData: false,
+      handwrittenFields: [],
+    };
+  }
+
+  const issue =
+    handwrittenFields.length > 0
+      ? `Contains handwritten extracted values in fields: ${handwrittenFields.join(", ")}.`
+      : "Contains handwritten extracted values. Review extracted data.";
+
+  return {
+    hasHandwrittenData: true,
+    handwrittenFields,
+    issue,
+  };
+}
+
+function resolveDocumentDate(extraction: FileExtraction): {
+  date?: string;
+  issue?: string;
+} {
+  const extractedData = extraction.extracted_data;
+  const explicitDate = normalizeDateToIso(extractedData?.document_date);
+  const confidenceRaw = typeof extractedData?.document_date_confidence === "string"
+    ? extractedData.document_date_confidence.trim().toLowerCase()
+    : "";
+  const reason = typeof extractedData?.document_date_reason === "string"
+    ? extractedData.document_date_reason.trim()
+    : "";
+
+  if (explicitDate) {
+    if (confidenceRaw === "low" || confidenceRaw === "unknown") {
+      const reasonSuffix = reason ? ` Reason: ${reason}` : "";
+      return {
+        date: explicitDate,
+        issue: `Document date extracted with ${confidenceRaw} confidence.${reasonSuffix}`,
+      };
+    }
+    return { date: explicitDate };
+  }
+
+  const inferredFromName = inferDateFromFilename(extraction.filename);
+  if (inferredFromName) {
+    return {
+      date: inferredFromName,
+      issue:
+        "Document date not explicitly extracted from document text; inferred from filename. Verify manually.",
+    };
+  }
+
+  return {
+    issue:
+      "Document date extraction failed: no reliable document date was identified. Review this file.",
+  };
+}
+
 async function extractFile(
   caseFolder: string,
   filePath: string, // relative path like "Intake/Intake.pdf"
@@ -1394,6 +1561,8 @@ async function extractFile(
         folder,
         type: 'other',
         key_info: 'File not found or inaccessible',
+        has_handwritten_data: false,
+        handwritten_fields: [],
         error: `File not found: ${fullPath}`,
       };
     }
@@ -1434,7 +1603,14 @@ async function extractFile(
     // Track extraction method for logging (updated below if large file uses agent)
     let extractionMethod = usePreExtracted ? 'pre-extracted' : 'pdf-direct';
 
-    let result: FileExtraction = { filename, folder, type: 'other', key_info: '' };
+    let result: FileExtraction = {
+      filename,
+      folder,
+      type: 'other',
+      key_info: '',
+      has_handwritten_data: false,
+      handwritten_fields: [],
+    };
     let usage: UsageStats = {
       inputTokens: 0,
       inputTokensNew: 0,
@@ -1464,6 +1640,12 @@ FOLDER: ${folder}
 DOCUMENT TEXT:
 ${extractedText}
 
+CRITICAL:
+- Include extracted_data.document_date for this specific document's own date.
+- If multiple dates appear, include extracted_data.document_date_confidence and extracted_data.document_date_reason.
+- Set has_handwritten_data to true only for substantive handwritten extracted values (exclude signature/initial-only markings).
+- Include handwritten_fields as non-signature extracted field names that are handwritten (use [] when none).
+
 Use the extract_document tool to return your findings.`
           }],
           tools: [FILE_EXTRACTION_TOOL_SCHEMA],
@@ -1484,14 +1666,20 @@ Use the extract_document tool to return your findings.`
           const extracted = toolBlock.input as {
             type: string;
             key_info: string;
+            has_handwritten_data?: boolean;
+            handwritten_fields?: string[];
             extracted_data: Record<string, unknown>;
           };
+          const handwrittenFields = normalizeHandwrittenFields(extracted.handwritten_fields);
+          const hasHandwrittenData = handwrittenFields.length > 0;
 
           result = {
             filename,
             folder,
             type: extracted.type || 'other',
             key_info: extracted.key_info || '',
+            has_handwritten_data: hasHandwrittenData,
+            handwritten_fields: hasHandwrittenData ? handwrittenFields : [],
             extracted_data: extracted.extracted_data,
           };
         }
@@ -1532,7 +1720,12 @@ Use the extract_document tool to return your findings.`
 Use the Read tool to read the file. Then return the JSON extraction with these fields:
 - type: document type
 - key_info: 2-3 sentence summary
-- extracted_data: object with any data found
+- has_handwritten_data: true/false when substantive extracted values appear handwritten (exclude signature/initial-only markings)
+- handwritten_fields: array of non-signature extracted field names that are handwritten (use [] when none)
+- extracted_data: object with any data found, including:
+  * document_date (this specific document's date)
+  * document_date_confidence (high|medium|low|unknown)
+  * document_date_reason (short explanation when multiple dates exist)
 
 Return ONLY valid JSON, no markdown.`;
 
@@ -1566,6 +1759,8 @@ Return ONLY valid JSON, no markdown.`;
                       folder,
                       type: parsed.type || 'other',
                       key_info: parsed.key_info || '',
+                      has_handwritten_data: normalizeHandwrittenFields(parsed.handwritten_fields).length > 0,
+                      handwritten_fields: normalizeHandwrittenFields(parsed.handwritten_fields),
                       extracted_data: parsed.extracted_data,
                     };
                   }
@@ -1656,6 +1851,8 @@ Return ONLY valid JSON, no markdown.`;
       folder,
       type: 'other',
       key_info: 'Failed to extract',
+      has_handwritten_data: false,
+      handwritten_fields: [],
       error: errorDetails.message,
     };
   }
@@ -2160,6 +2357,8 @@ async function indexCase(
                 folder,
                 type: 'other' as const,
                 key_info: 'Failed to extract',
+                has_handwritten_data: false,
+                handwritten_fields: [],
                 error: err instanceof Error ? err.message : String(err),
               };
             }
@@ -2224,8 +2423,18 @@ async function indexCase(
 
     // Step 3: Build preliminary index for hypergraph analysis
     // For incremental mode, start with existing folders and merge new extractions
-    const folders: Record<string, { files: Array<{ filename: string; type: string; key_info: string; extracted_data?: Record<string, any> }> }> =
+    const folders: Record<string, { files: Array<{
+      filename: string;
+      type: string;
+      key_info: string;
+      date?: string;
+      issues?: string;
+      has_handwritten_data: boolean;
+      handwritten_fields: string[];
+      extracted_data?: Record<string, any>;
+    }> }> =
       isIncremental && existingIndex?.folders ? normalizeFolders(existingIndex.folders) : {};
+    const runIssues: string[] = [];
 
     for (const extraction of extractions) {
       if (!folders[extraction.folder]) {
@@ -2239,12 +2448,50 @@ async function indexCase(
         );
       }
 
-      folders[extraction.folder].files.push({
+      const fileEntry: {
+        filename: string;
+        type: string;
+        key_info: string;
+        date?: string;
+        issues?: string;
+        has_handwritten_data: boolean;
+        handwritten_fields: string[];
+        extracted_data?: Record<string, any>;
+      } = {
         filename: extraction.filename,
         type: extraction.type,
         key_info: extraction.key_info,
+        has_handwritten_data: false,
+        handwritten_fields: [],
         extracted_data: extraction.extracted_data,
-      });
+      };
+
+      const dateResolution = resolveDocumentDate(extraction);
+      const handwritingResolution = resolveHandwritingMetadata(extraction);
+      if (dateResolution.date) {
+        fileEntry.date = dateResolution.date;
+      }
+      fileEntry.has_handwritten_data = handwritingResolution.hasHandwrittenData;
+      fileEntry.handwritten_fields = handwritingResolution.handwrittenFields;
+      if (dateResolution.issue) {
+        fileEntry.issues = dateResolution.issue;
+        runIssues.push(`[Document Date] ${extraction.folder}/${extraction.filename}: ${dateResolution.issue}`);
+      }
+      if (handwritingResolution.issue) {
+        fileEntry.issues = fileEntry.issues
+          ? `${fileEntry.issues} ${handwritingResolution.issue}`
+          : handwritingResolution.issue;
+        runIssues.push(`[Handwriting] ${extraction.folder}/${extraction.filename}: ${handwritingResolution.issue}`);
+      }
+      if (extraction.error) {
+        const extractionIssue = `Extraction failed: ${extraction.error}`;
+        fileEntry.issues = fileEntry.issues
+          ? `${fileEntry.issues} ${extractionIssue}`
+          : extractionIssue;
+        runIssues.push(`[Extraction] ${extraction.folder}/${extraction.filename}: ${extraction.error}`);
+      }
+
+      folders[extraction.folder].files.push(fileEntry);
     }
 
     // Step 4: Write initial document_index.json (before hypergraph/Sonnet)
@@ -2273,6 +2520,11 @@ async function indexCase(
       failed_at: new Date().toISOString(),
     }));
 
+    const existingIssues = Array.isArray(existingIndex?.issues_found)
+      ? existingIndex.issues_found.filter((issue: unknown): issue is string => typeof issue === "string")
+      : [];
+    const issuesFound = Array.from(new Set([...existingIssues, ...runIssues]));
+
     const initialIndex: Record<string, any> = {
       indexed_at: new Date().toISOString(),
       case_name: caseName,
@@ -2280,7 +2532,7 @@ async function indexCase(
       summary: baseSummary,
       folders,
       failed_files: failedFiles,
-      issues_found: [],
+      issues_found: issuesFound,
       reconciled_values: existingIndex?.reconciled_values ?? {},
       needs_review: existingIndex?.needs_review ?? [],
       errata: existingIndex?.errata ?? [],
@@ -2853,13 +3105,37 @@ app.post("/batch-index", async (c) => {
   });
 });
 
+// Cache recent reindex checks to avoid rescanning large case trees on quick dashboard revisits.
+const REINDEX_CHECK_TTL_MS = 15000;
+const REINDEX_CHECK_CACHE_MAX = 512;
+const reindexCheckCache = new Map<string, { value: boolean; checkedAt: number }>();
+
+function pruneReindexCheckCache(now: number) {
+  if (reindexCheckCache.size <= REINDEX_CHECK_CACHE_MAX) return;
+  for (const [key, cached] of reindexCheckCache) {
+    if (now - cached.checkedAt > REINDEX_CHECK_TTL_MS) {
+      reindexCheckCache.delete(key);
+    }
+  }
+}
+
 // Helper to check if case needs reindexing
 async function checkNeedsReindex(casePath: string, indexedAt: number): Promise<boolean> {
+  const now = Date.now();
+  const cacheKey = `${casePath}::${indexedAt}`;
+  const cached = reindexCheckCache.get(cacheKey);
+  if (cached && now - cached.checkedAt <= REINDEX_CHECK_TTL_MS) {
+    return cached.value;
+  }
+
+  pruneReindexCheckCache(now);
+
   async function checkDir(dir: string): Promise<boolean> {
     try {
       const entries = await readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
         if (entry.name === ".pi_tool") continue;
+        if (entry.name.startsWith(".")) continue;
         const fullPath = join(dir, entry.name);
         if (entry.isDirectory()) {
           if (await checkDir(fullPath)) return true;
@@ -2876,7 +3152,9 @@ async function checkNeedsReindex(casePath: string, indexedAt: number): Promise<b
     }
     return false;
   }
-  return checkDir(casePath);
+  const needsReindex = await checkDir(casePath);
+  reindexCheckCache.set(cacheKey, { value: needsReindex, checkedAt: now });
+  return needsReindex;
 }
 
 // ============================================================================
@@ -3394,22 +3672,11 @@ async function buildFirmContext(
       let statuteOfLimitations = index.statute_of_limitations || index.summary?.statute_of_limitations;
 
       if (!statuteOfLimitations && dateOfLoss) {
-        try {
-          const dolStr = dateOfLoss;
-          let dolDate: Date;
-          if (dolStr.includes('/')) {
-            const [month, day, year] = dolStr.split('/');
-            dolDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
-          } else {
-            dolDate = new Date(dolStr);
-          }
-          if (!isNaN(dolDate.getTime())) {
-            const solDate = new Date(dolDate);
-            solDate.setFullYear(solDate.getFullYear() + 2);
-            statuteOfLimitations = solDate.toISOString().split('T')[0];
-          }
-        } catch {
-          // Could not parse DOL
+        const dolDate = parseFlexibleDate(dateOfLoss);
+        if (dolDate) {
+          const solDate = new Date(dolDate);
+          solDate.setFullYear(solDate.getFullYear() + 2);
+          statuteOfLimitations = formatDateYYYYMMDD(solDate);
         }
       }
 

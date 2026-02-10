@@ -26,25 +26,34 @@ DOCUMENT TYPES (use for the "type" field):
 
 EXTRACTION PRIORITIES:
 1. Claimant name, DOB, SSN (last 4), contact info
-2. Date of injury (DOI) in MM/DD/YYYY format
-3. Employer information:
+2. Date of injury (DOI) in MM-DD-YYYY format
+3. Document date (the date of this specific document, not DOI or treatment dates):
+   - Extract into extracted_data.document_date
+   - If multiple dates appear, choose the document's issued/signed/authored date
+   - Add extracted_data.document_date_confidence (high|medium|low|unknown)
+   - Add extracted_data.document_date_reason with a brief explanation
+4. Handwriting detection:
+   - Set has_handwritten_data to true only if substantive extracted values appear handwritten (exclude signature/initial-only markings); otherwise false
+   - Set handwritten_fields to non-signature extracted field names that appear handwritten (for example: ["claimant_name", "doi"])
+   - Use an empty array [] when no handwritten values are present
+5. Employer information:
    - Employer name, address
    - Job title at time of injury
    - Date of hire
-4. WC Carrier/TPA information:
+6. WC Carrier/TPA information:
    - Carrier name, claim number, adjuster name/contact
-5. Injury details:
+7. Injury details:
    - Body parts injured
    - Mechanism of injury
    - ICD-10 diagnosis codes if present
-6. Wage information (IMPORTANT - Nevada uses AMW, not AWW):
+8. Wage information (IMPORTANT - Nevada uses AMW, not AWW):
    - Average Monthly Wage (AMW) - this is the primary metric in Nevada WC
    - Daily Rate (AMW ÷ ~30.4 days, used for daily benefit calculations)
    - Compensation rate (typically 66 2/3% of AMW)
    - DO NOT confuse daily rate with AWW - they are different:
      * Daily rate ~$88 means AMW ~$4,000/month
      * AWW would be AMW × 12 ÷ 52 (e.g., $4,054 AMW = ~$935 AWW)
-7. Disability status (IMPORTANT - always determine disability_type when work status is mentioned):
+9. Disability status (IMPORTANT - always determine disability_type when work status is mentioned):
    - TTD (Temporary Total Disability): Patient is completely off work, cannot work at all
    - TPD (Temporary Partial Disability): Patient on modified/light duty, working with restrictions
    - PPD (Permanent Partial Disability): Patient has reached MMI with permanent impairment rating
@@ -55,11 +64,11 @@ EXTRACTION PRIORITIES:
    - "Modified duty", "light duty", "work restrictions", "limited duty" → TPD
    - "MMI reached" + impairment rating → PPD
    - Always extract disability_type if work status or benefits are mentioned
-8. Medical treatment:
+10. Medical treatment:
    - Treating physician name (ATP)
    - Treatment dates and types
    - Work restrictions
-9. Hearing information:
+11. Hearing information:
    - Case/docket number
    - Hearing dates
    - Issues in dispute

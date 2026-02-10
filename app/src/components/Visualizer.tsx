@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback, useRef, type MouseEvent } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type MouseEvent } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 import type { DocumentIndex, ErrataItem, NeedsReviewItem } from '../App'
+import { formatDateMMDDYYYY } from '../utils/dateFormat'
 
 // Set up PDF.js worker (using local copy since CDN may not have latest version)
 pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs'
@@ -36,6 +37,9 @@ interface Props {
   onToggleViewMode?: () => void
   hasFile?: boolean
   hasSummary?: boolean
+  evidencePacketPath?: string | null
+  evidencePacketVersion?: number
+  onOpenFilePath?: (path: string) => void
 }
 
 interface PiiFinding {
@@ -65,6 +69,327 @@ interface DraftRedactionBox {
   startY: number
   currentX: number
   currentY: number
+}
+
+interface EditableDocumentSummaryFields {
+  title: string
+  type: string
+  date: string
+  key_info: string
+  issues: string
+}
+
+interface IndexedSummaryTarget {
+  filePath: string
+  fileName: string
+  fields: EditableDocumentSummaryFields
+  extractedData: unknown
+}
+
+const normalizeRelativePath = (value: string): string =>
+  value
+    .replace(/\\/g, '/')
+    .replace(/^\.\/+/, '')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/')
+    .trim()
+
+const joinRelativePath = (folderName: string, fileName: string): string => {
+  const folder = normalizeRelativePath(folderName)
+  const file = normalizeRelativePath(fileName)
+  if (!file) return ''
+  if (!folder || folder === '.' || folder.toLowerCase() === 'root') return file
+  return `${folder}/${file}`
+}
+
+const getFolderFiles = (folderData: unknown): unknown[] => {
+  if (Array.isArray(folderData)) return folderData
+  if (folderData && typeof folderData === 'object') {
+    const folderObject = folderData as Record<string, unknown>
+    if (Array.isArray(folderObject.files)) return folderObject.files
+    if (Array.isArray(folderObject.documents)) return folderObject.documents
+  }
+  return []
+}
+
+const getObjectStringValue = (value: unknown, key: string): string => {
+  if (!value || typeof value !== 'object') return ''
+  const raw = (value as Record<string, unknown>)[key]
+  return typeof raw === 'string' ? raw : ''
+}
+
+const getIndexedFileName = (value: unknown): string => {
+  if (typeof value === 'string') return value
+  if (!value || typeof value !== 'object') return ''
+  const entry = value as Record<string, unknown>
+  if (typeof entry.filename === 'string' && entry.filename.trim()) return entry.filename
+  if (typeof entry.file === 'string' && entry.file.trim()) return entry.file
+  if (typeof entry.path === 'string' && entry.path.trim()) {
+    const normalized = normalizeRelativePath(entry.path)
+    return normalized.split('/').pop() || normalized
+  }
+  return ''
+}
+
+const getIndexedFilePath = (folderName: string, value: unknown): string => {
+  if (value && typeof value === 'object') {
+    const directPath = getObjectStringValue(value, 'path')
+    if (directPath.trim()) {
+      const normalizedDirectPath = normalizeRelativePath(directPath)
+      if (normalizedDirectPath.includes('/')) {
+        return normalizedDirectPath
+      }
+      return joinRelativePath(folderName, normalizedDirectPath)
+    }
+  }
+  const fileName = getIndexedFileName(value)
+  return joinRelativePath(folderName, fileName)
+}
+
+const emptyEditableSummaryFields = (): EditableDocumentSummaryFields => ({
+  title: '',
+  type: '',
+  date: '',
+  key_info: '',
+  issues: '',
+})
+
+const cloneJsonValue = <T,>(value: T): T => {
+  if (value === undefined) return value
+  try {
+    return JSON.parse(JSON.stringify(value)) as T
+  } catch {
+    return value
+  }
+}
+
+const areEditableSummaryFieldsEqual = (
+  a: EditableDocumentSummaryFields | null,
+  b: EditableDocumentSummaryFields | null,
+): boolean => {
+  if (!a || !b) return false
+  return (
+    a.title === b.title &&
+    a.type === b.type &&
+    a.date === b.date &&
+    a.key_info === b.key_info &&
+    a.issues === b.issues
+  )
+}
+
+interface ExtractedFieldEntry {
+  path: string
+  value: string
+}
+
+interface DisplayedExtractedField extends ExtractedFieldEntry {
+  rawPath: string
+  section: string
+  label: string
+}
+
+interface ExtractedFieldSection {
+  section: string
+  fields: DisplayedExtractedField[]
+}
+
+type PathSegment = string | number
+
+const parsePathSegments = (path: string): PathSegment[] => {
+  const segments: PathSegment[] = []
+  const matcher = /([^[.\]]+)|\[(\d+)\]/g
+  let match: RegExpExecArray | null
+  while ((match = matcher.exec(path)) !== null) {
+    if (match[1] !== undefined) {
+      segments.push(match[1])
+    } else if (match[2] !== undefined) {
+      segments.push(Number(match[2]))
+    }
+  }
+  return segments
+}
+
+const FIELD_WORD_OVERRIDES: Record<string, string> = {
+  aoe: 'AOE',
+  amw: 'AMW',
+  coe: 'COE',
+  dob: 'DOB',
+  doi: 'DOI',
+  dol: 'DOL',
+  id: 'ID',
+  mmi: 'MMI',
+  ppd: 'PPD',
+  ptd: 'PTD',
+  ssn: 'SSN',
+  tpd: 'TPD',
+  ttd: 'TTD',
+  uim: 'UIM',
+  um: 'UM',
+  vin: 'VIN',
+  wc: 'WC',
+  zip: 'ZIP',
+}
+
+const splitIdentifierWords = (token: string): string[] =>
+  token
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+
+const singularizeToken = (token: string): string => {
+  if (token.endsWith('ies') && token.length > 3) return `${token.slice(0, -3)}y`
+  if (token.endsWith('ses') && token.length > 3) return token.slice(0, -2)
+  if (token.endsWith('s') && token.length > 3) return token.slice(0, -1)
+  return token
+}
+
+const formatIdentifierToken = (token: string): string => {
+  const words = splitIdentifierWords(token)
+  if (words.length === 0) return token
+  return words
+    .map((word) => {
+      const normalized = word.toLowerCase()
+      if (FIELD_WORD_OVERRIDES[normalized]) return FIELD_WORD_OVERRIDES[normalized]
+      return `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}`
+    })
+    .join(' ')
+}
+
+const formatSectionNameFromSegments = (segments: PathSegment[]): string => {
+  if (segments.length === 0) return 'General'
+  const parts: string[] = []
+
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i]
+    if (typeof segment === 'number') {
+      parts.push(`Item ${segment + 1}`)
+      continue
+    }
+
+    const next = segments[i + 1]
+    if (typeof next === 'number') {
+      parts.push(`${formatIdentifierToken(segment)} ${next + 1}`)
+      i += 1
+      continue
+    }
+
+    parts.push(formatIdentifierToken(segment))
+  }
+
+  return parts.join(' / ')
+}
+
+const formatExtractedFieldForDisplay = (entry: ExtractedFieldEntry): DisplayedExtractedField => {
+  const segments = parsePathSegments(entry.path)
+  if (segments.length === 0) {
+    return {
+      ...entry,
+      rawPath: entry.path,
+      section: 'General',
+      label: 'Value',
+    }
+  }
+
+  const lastSegment = segments[segments.length - 1]
+  const sectionSegments = segments.slice(0, -1)
+
+  if (typeof lastSegment === 'number') {
+    const previous = segments.length > 1 && typeof segments[segments.length - 2] === 'string'
+      ? singularizeToken(segments[segments.length - 2] as string)
+      : 'item'
+    return {
+      ...entry,
+      rawPath: entry.path,
+      section: formatSectionNameFromSegments(sectionSegments),
+      label: `${formatIdentifierToken(previous)} ${lastSegment + 1}`,
+    }
+  }
+
+  return {
+    ...entry,
+    rawPath: entry.path,
+    section: formatSectionNameFromSegments(sectionSegments),
+    label: formatIdentifierToken(lastSegment),
+  }
+}
+
+const flattenExtractedFields = (
+  value: unknown,
+  parentPath = '',
+  acc: ExtractedFieldEntry[] = [],
+): ExtractedFieldEntry[] => {
+  if (value === null || value === undefined) {
+    if (parentPath) {
+      acc.push({ path: parentPath, value: '' })
+    }
+    return acc
+  }
+
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      const nextPath = parentPath ? `${parentPath}[${i}]` : `[${i}]`
+      flattenExtractedFields(value[i], nextPath, acc)
+    }
+    return acc
+  }
+
+  if (typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      const nextPath = parentPath ? `${parentPath}.${key}` : key
+      flattenExtractedFields(child, nextPath, acc)
+    }
+    return acc
+  }
+
+  acc.push({ path: parentPath, value: String(value) })
+  return acc
+}
+
+const writeValueAtPath = (value: unknown, path: string, nextRawValue: string): unknown => {
+  const clone = cloneJsonValue(value)
+  const segments = parsePathSegments(path)
+  if (segments.length === 0) return clone
+
+  let cursor: unknown = clone
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const segment = segments[i]
+    if (typeof segment === 'number') {
+      if (!Array.isArray(cursor)) return clone
+      cursor = cursor[segment]
+      continue
+    }
+    if (!cursor || typeof cursor !== 'object') return clone
+    cursor = (cursor as Record<string, unknown>)[segment]
+  }
+
+  const last = segments[segments.length - 1]
+  if (typeof last === 'number') {
+    if (!Array.isArray(cursor)) return clone
+    const currentValue = cursor[last]
+    cursor[last] = coerceEditedPrimitive(nextRawValue, currentValue)
+    return clone
+  }
+
+  if (!cursor || typeof cursor !== 'object') return clone
+  const target = cursor as Record<string, unknown>
+  target[last] = coerceEditedPrimitive(nextRawValue, target[last])
+  return clone
+}
+
+const coerceEditedPrimitive = (rawValue: string, originalValue: unknown): unknown => {
+  if (typeof originalValue === 'number') {
+    const parsed = Number(rawValue)
+    return Number.isFinite(parsed) ? parsed : originalValue
+  }
+  if (typeof originalValue === 'boolean') {
+    const normalized = rawValue.trim().toLowerCase()
+    if (normalized === 'true' || normalized === '1' || normalized === 'yes') return true
+    if (normalized === 'false' || normalized === '0' || normalized === 'no') return false
+    return originalValue
+  }
+  return rawValue
 }
 
 const clamp01 = (value: number): number => {
@@ -162,7 +487,28 @@ const DocumentTextIcon = () => (
   </svg>
 )
 
-export default function Visualizer({ content, docPath, fileUrl, fileName, filePath, caseFolder, apiUrl, documentIndex, firmRoot: _firmRoot, onCloseFile, onIndexUpdated, onDraftsUpdated, refreshDraftsKey, viewMode = 'summary', onToggleViewMode, hasFile, hasSummary }: Props) {
+export default function Visualizer({
+  content,
+  docPath,
+  fileUrl,
+  fileName,
+  filePath,
+  caseFolder,
+  apiUrl,
+  documentIndex,
+  firmRoot: _firmRoot,
+  onCloseFile,
+  onIndexUpdated,
+  onDraftsUpdated,
+  refreshDraftsKey,
+  viewMode = 'summary',
+  onToggleViewMode,
+  hasFile,
+  hasSummary,
+  evidencePacketPath,
+  evidencePacketVersion,
+  onOpenFilePath,
+}: Props) {
   const [activeTab, setActiveTab] = useState<'view' | 'review' | 'drafts'>('view')
   const [verifiedItems, setVerifiedItems] = useState<Set<string>>(new Set())
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
@@ -175,6 +521,7 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
   const [draftContent, setDraftContent] = useState<string>('')
   const [isApprovingDraft, setIsApprovingDraft] = useState(false)
   const [draftExportMenuOpen, setDraftExportMenuOpen] = useState(false)
+  const [pendingEvidencePacketPath, setPendingEvidencePacketPath] = useState<string | null>(null)
 
   // Bundle state
   const [canBundle, setCanBundle] = useState(false)
@@ -202,9 +549,56 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
   const [redactionMessage, setRedactionMessage] = useState<string | null>(null)
   const [redactionError, setRedactionError] = useState<string | null>(null)
   const [redactedOutputPath, setRedactedOutputPath] = useState<string | null>(null)
+  const [editableSummary, setEditableSummary] = useState<EditableDocumentSummaryFields>(emptyEditableSummaryFields)
+  const [initialEditableSummary, setInitialEditableSummary] = useState<EditableDocumentSummaryFields>(emptyEditableSummaryFields)
+  const [editableExtractedData, setEditableExtractedData] = useState<unknown>(null)
+  const [initialEditableExtractedData, setInitialEditableExtractedData] = useState<unknown>(null)
+  const [isSavingDocumentSummary, setIsSavingDocumentSummary] = useState(false)
+  const [documentSummarySaveError, setDocumentSummarySaveError] = useState<string | null>(null)
+  const [documentSummarySaveMessage, setDocumentSummarySaveMessage] = useState<string | null>(null)
 
   const errata: ErrataItem[] = Array.isArray(documentIndex?.errata) ? documentIndex.errata : []
   const needsReview: NeedsReviewItem[] = Array.isArray(documentIndex?.needs_review) ? documentIndex.needs_review : []
+
+  const indexedSummaryTarget = useMemo<IndexedSummaryTarget | null>(() => {
+    if (!documentIndex?.folders || !filePath) return null
+    const requestedPath = normalizeRelativePath(filePath).toLowerCase()
+    if (!requestedPath) return null
+
+    for (const [folderName, folderData] of Object.entries(documentIndex.folders)) {
+      const files = getFolderFiles(folderData)
+      for (const fileEntry of files) {
+        const entryPath = getIndexedFilePath(folderName, fileEntry)
+        if (!entryPath || entryPath.toLowerCase() !== requestedPath) continue
+
+        const fileName =
+          getIndexedFileName(fileEntry) ||
+          filePath.split('/').pop() ||
+          filePath
+
+        const titleFromIndex = getObjectStringValue(fileEntry, 'title')
+        const keyInfoFromIndex = getObjectStringValue(fileEntry, 'key_info')
+        const fields: EditableDocumentSummaryFields = {
+          title: titleFromIndex || fileName,
+          type: getObjectStringValue(fileEntry, 'type'),
+          date: getObjectStringValue(fileEntry, 'date'),
+          key_info: keyInfoFromIndex,
+          issues: getObjectStringValue(fileEntry, 'issues'),
+        }
+
+        return {
+          filePath: entryPath,
+          fileName,
+          fields,
+          extractedData: fileEntry && typeof fileEntry === 'object'
+            ? cloneJsonValue((fileEntry as Record<string, unknown>).extracted_data ?? null)
+            : null,
+        }
+      }
+    }
+
+    return null
+  }, [documentIndex, filePath])
 
   // Load drafts when caseFolder changes or tab is activated
   const loadDrafts = useCallback(async () => {
@@ -232,6 +626,14 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
       loadDrafts()
     }
   }, [refreshDraftsKey, loadDrafts])
+
+  useEffect(() => {
+    if (!evidencePacketPath) return
+    setPendingEvidencePacketPath(evidencePacketPath)
+    setSelectedDraft(null)
+    setDraftContent('')
+    setActiveTab('drafts')
+  }, [evidencePacketPath, evidencePacketVersion])
 
   // Load draft content when selected
   useEffect(() => {
@@ -288,6 +690,10 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
     checkBundleStatus()
   }, [selectedDraft, caseFolder, apiUrl])
 
+  useEffect(() => {
+    setPendingEvidencePacketPath(null)
+  }, [caseFolder])
+
   // Reset PDF state when file changes
   useEffect(() => {
     setPdfPageNumber(1)
@@ -340,6 +746,97 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
     setRedactionError(null)
     setRedactedOutputPath(null)
   }, [filePath])
+
+  useEffect(() => {
+    if (!indexedSummaryTarget) {
+      setEditableSummary(emptyEditableSummaryFields())
+      setInitialEditableSummary(emptyEditableSummaryFields())
+      setEditableExtractedData(null)
+      setInitialEditableExtractedData(null)
+      setDocumentSummarySaveError(null)
+      setDocumentSummarySaveMessage(null)
+      return
+    }
+
+    setEditableSummary(indexedSummaryTarget.fields)
+    setInitialEditableSummary(indexedSummaryTarget.fields)
+    setEditableExtractedData(cloneJsonValue(indexedSummaryTarget.extractedData))
+    setInitialEditableExtractedData(cloneJsonValue(indexedSummaryTarget.extractedData))
+    setDocumentSummarySaveError(null)
+    setDocumentSummarySaveMessage(null)
+  }, [indexedSummaryTarget])
+
+  const handleEditableSummaryFieldChange = (
+    field: keyof EditableDocumentSummaryFields,
+    value: string,
+  ) => {
+    setEditableSummary((prev) => ({ ...prev, [field]: value }))
+    if (documentSummarySaveError) setDocumentSummarySaveError(null)
+    if (documentSummarySaveMessage) setDocumentSummarySaveMessage(null)
+  }
+
+  const handleResetEditableSummary = () => {
+    setEditableSummary(initialEditableSummary)
+    setEditableExtractedData(cloneJsonValue(initialEditableExtractedData))
+    setDocumentSummarySaveError(null)
+    setDocumentSummarySaveMessage(null)
+  }
+
+  const handleEditableExtractedFieldChange = (path: string, value: string) => {
+    setEditableExtractedData((prev: unknown) => writeValueAtPath(prev, path, value))
+    if (documentSummarySaveError) setDocumentSummarySaveError(null)
+    if (documentSummarySaveMessage) setDocumentSummarySaveMessage(null)
+  }
+
+  const handleSaveEditableSummary = useCallback(async () => {
+    if (!caseFolder || !indexedSummaryTarget) return
+
+    setIsSavingDocumentSummary(true)
+    setDocumentSummarySaveError(null)
+    setDocumentSummarySaveMessage(null)
+
+    try {
+      const extractedDataIsDirty =
+        JSON.stringify(editableExtractedData ?? null) !== JSON.stringify(initialEditableExtractedData ?? null)
+
+      const requestBody: Record<string, unknown> = {
+        caseFolder,
+        filePath: indexedSummaryTarget.filePath,
+        updates: {
+          title: editableSummary.title,
+          type: editableSummary.type,
+          date: editableSummary.date,
+          key_info: editableSummary.key_info,
+          issues: editableSummary.issues,
+        },
+      }
+
+      if (extractedDataIsDirty) {
+        requestBody.extractedData = editableExtractedData
+      }
+
+      const res = await fetch(`${apiUrl}/api/files/document-summary`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      })
+
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(typeof data?.error === 'string' ? data.error : 'Failed to save document summary')
+      }
+
+      setInitialEditableSummary(editableSummary)
+      setInitialEditableExtractedData(cloneJsonValue(editableExtractedData))
+      setDocumentSummarySaveMessage('Saved to document index.')
+      onIndexUpdated()
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to save document summary'
+      setDocumentSummarySaveError(message)
+    } finally {
+      setIsSavingDocumentSummary(false)
+    }
+  }, [apiUrl, caseFolder, editableExtractedData, editableSummary, indexedSummaryTarget, initialEditableExtractedData, onIndexUpdated])
 
   const redactionBoxKey = useCallback((box: RedactionBoxInput) => (
     `${box.page}:${box.xPct.toFixed(5)}:${box.yPct.toFixed(5)}:${box.widthPct.toFixed(5)}:${box.heightPct.toFixed(5)}`
@@ -538,6 +1035,19 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
     window.open(url, '_blank', 'width=1200,height=900')
   }, [apiUrl, caseFolder, redactedOutputPath])
 
+  const handleReviewEvidencePacket = useCallback(() => {
+    if (!pendingEvidencePacketPath) return
+
+    if (onOpenFilePath) {
+      onOpenFilePath(pendingEvidencePacketPath)
+    } else {
+      const url = `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(pendingEvidencePacketPath)}#view=FitH`
+      window.open(url, '_blank', 'width=1200,height=900')
+    }
+
+    setActiveTab('view')
+  }, [apiUrl, caseFolder, onOpenFilePath, pendingEvidencePacketPath])
+
   // Handle bundle generation
   const handleGeneratePackage = async () => {
     if (!caseFolder) return
@@ -623,8 +1133,7 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
   }
 
   const formatDate = (dateStr: string) => {
-    const date = new Date(dateStr)
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+    return formatDateMMDDYYYY(dateStr, dateStr)
   }
 
   const getDraftTypeIcon = (type: string) => {
@@ -738,6 +1247,36 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
 
   // Check if current content is exportable (has a doc path and is markdown-like)
   const isExportable = docPath && (docPath.endsWith('.md') || content.startsWith('#') || content.includes('\n##'))
+  const hasIndexedSummaryEditor = viewMode === 'summary' && !!indexedSummaryTarget
+  const extractedFieldRows = useMemo(
+    () => flattenExtractedFields(editableExtractedData).filter((entry) => entry.path.trim().length > 0),
+    [editableExtractedData],
+  )
+  const extractedFieldSections = useMemo<ExtractedFieldSection[]>(() => {
+    const grouped = new Map<string, DisplayedExtractedField[]>()
+    for (const row of extractedFieldRows) {
+      const display = formatExtractedFieldForDisplay(row)
+      if (!grouped.has(display.section)) {
+        grouped.set(display.section, [])
+      }
+      grouped.get(display.section)?.push(display)
+    }
+
+    return Array.from(grouped.entries())
+      .map(([section, fields]) => ({
+        section,
+        fields: [...fields].sort((a, b) => {
+          const byLabel = a.label.localeCompare(b.label, undefined, { numeric: true })
+          if (byLabel !== 0) return byLabel
+          return a.rawPath.localeCompare(b.rawPath, undefined, { numeric: true })
+        }),
+      }))
+      .sort((a, b) => a.section.localeCompare(b.section, undefined, { numeric: true }))
+  }, [extractedFieldRows])
+  const isEditableSummaryDirty = !areEditableSummaryFieldsEqual(editableSummary, initialEditableSummary)
+  const isEditableExtractedDirty =
+    JSON.stringify(editableExtractedData ?? null) !== JSON.stringify(initialEditableExtractedData ?? null)
+  const hasAnyDocumentEdits = isEditableSummaryDirty || isEditableExtractedDirty
 
   const isHtml = content.includes('<div') || content.includes('<table')
   const isMarkdown = content.startsWith('#') || content.includes('\n##') || content.includes('\n- ') || content.includes('\n* ')
@@ -925,6 +1464,32 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
           ) : (
             // Drafts list view
             <div className="p-6">
+              {pendingEvidencePacketPath && (
+                <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-emerald-900">Evidence packet ready for review</p>
+                      <p className="text-xs text-emerald-700 mt-1 break-all">
+                        {pendingEvidencePacketPath}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={handleReviewEvidencePacket}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 transition-colors"
+                      >
+                        Review Packet
+                      </button>
+                      <button
+                        onClick={() => setPendingEvidencePacketPath(null)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-emerald-300 text-emerald-800 bg-white hover:bg-emerald-100 transition-colors"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className="flex items-center gap-3 mb-6">
                 <div className="w-10 h-10 rounded-xl bg-accent-100 flex items-center justify-center text-accent-600">
                   <DocumentTextIcon />
@@ -981,7 +1546,7 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
       ) : activeTab === 'view' ? (
         <div className="flex-1 overflow-auto flex flex-col">
           {/* Determine what to show based on viewMode */}
-          {(viewMode === 'document' && fileUrl) || (viewMode === 'summary' && !content && fileUrl) ? (
+          {(viewMode === 'document' && fileUrl) || (viewMode === 'summary' && !content && fileUrl && !hasIndexedSummaryEditor) ? (
             <>
               {/* File viewing header */}
               <div className="px-4 py-3 border-b border-surface-200 flex items-center justify-between bg-surface-50">
@@ -1336,11 +1901,13 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
                 )}
               </div>
             </>
-          ) : (viewMode === 'summary' && content) || (viewMode === 'document' && !fileUrl && content) ? (
+          ) : hasIndexedSummaryEditor || (viewMode === 'summary' && content) || (viewMode === 'document' && !fileUrl && content) ? (
             <>
               {/* Summary header */}
               <div className="px-4 py-3 border-b border-surface-200 flex items-center justify-between bg-surface-50">
-                <span className="text-sm font-medium text-brand-700">AI Summary</span>
+                <span className="text-sm font-medium text-brand-700">
+                  {hasIndexedSummaryEditor ? 'Document Summary' : 'AI Summary'}
+                </span>
                 <div className="flex gap-2">
                   {/* Toggle button - show when file is available */}
                   {hasFile && onToggleViewMode && (
@@ -1355,7 +1922,30 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
                       Document
                     </button>
                   )}
-                  {isExportable && (
+                  {hasIndexedSummaryEditor && (
+                    <>
+                      <button
+                        onClick={handleResetEditableSummary}
+                        disabled={!hasAnyDocumentEdits || isSavingDocumentSummary}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                   bg-white border border-surface-200 hover:bg-surface-100
+                                   rounded-lg text-brand-700 transition-colors
+                                   disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Reset
+                      </button>
+                      <button
+                        onClick={handleSaveEditableSummary}
+                        disabled={!hasAnyDocumentEdits || isSavingDocumentSummary}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                   bg-brand-900 border border-brand-900 text-white hover:bg-brand-800
+                                   rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {isSavingDocumentSummary ? 'Saving...' : 'Save'}
+                      </button>
+                    </>
+                  )}
+                  {!hasIndexedSummaryEditor && isExportable && (
                     <div className="relative">
                       <button
                         onClick={() => setExportMenuOpen(!exportMenuOpen)}
@@ -1413,15 +2003,17 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
                       )}
                     </div>
                   )}
-                  <button
-                    onClick={() => navigator.clipboard.writeText(content)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
-                               bg-white border border-surface-200 hover:bg-surface-100
-                               rounded-lg text-brand-700 transition-colors"
-                  >
-                    <ClipboardIcon />
-                    Copy
-                  </button>
+                  {!hasIndexedSummaryEditor && (
+                    <button
+                      onClick={() => navigator.clipboard.writeText(content)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                 bg-white border border-surface-200 hover:bg-surface-100
+                                 rounded-lg text-brand-700 transition-colors"
+                    >
+                      <ClipboardIcon />
+                      Copy
+                    </button>
+                  )}
                   {hasFile && (
                     <button
                       onClick={onCloseFile}
@@ -1436,26 +2028,145 @@ export default function Visualizer({ content, docPath, fileUrl, fileName, filePa
 
               {/* Rendered content */}
               <div className="p-6 flex-1 overflow-auto">
-                {isHtml ? (
-                  <div
-                    className="prose prose-sm max-w-none prose-headings:text-brand-900"
-                    dangerouslySetInnerHTML={{ __html: content }}
-                  />
-                ) : isMarkdown ? (
-                  <div className="prose prose-sm max-w-none
-                                  prose-headings:my-3 prose-headings:text-brand-900
-                                  prose-p:my-2 prose-ul:my-2 prose-li:my-0.5
-                                  prose-table:border-collapse prose-th:border prose-th:border-surface-200
-                                  prose-th:bg-surface-50 prose-th:px-3 prose-th:py-2
-                                  prose-td:border prose-td:border-surface-200 prose-td:px-3 prose-td:py-2
-                                  prose-a:text-accent-600">
-                    <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+                {hasIndexedSummaryEditor && indexedSummaryTarget ? (
+                  <div className="max-w-3xl space-y-4">
+                    <p className="text-xs text-brand-500">
+                      Editing metadata for <span className="font-medium text-brand-700">{indexedSummaryTarget.fileName}</span>
+                    </p>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <label className="block">
+                        <span className="block text-xs font-medium text-brand-600 mb-1">Title</span>
+                        <input
+                          type="text"
+                          value={editableSummary.title}
+                          onChange={(e) => handleEditableSummaryFieldChange('title', e.target.value)}
+                          disabled={isSavingDocumentSummary}
+                          className="w-full px-3 py-2 text-sm border border-surface-300 rounded-lg
+                                     bg-white text-brand-700 focus:outline-none focus:ring-2 focus:ring-accent-500
+                                     disabled:opacity-60 disabled:cursor-not-allowed"
+                        />
+                      </label>
+
+                      <label className="block">
+                        <span className="block text-xs font-medium text-brand-600 mb-1">Type</span>
+                        <input
+                          type="text"
+                          value={editableSummary.type}
+                          onChange={(e) => handleEditableSummaryFieldChange('type', e.target.value)}
+                          disabled={isSavingDocumentSummary}
+                          className="w-full px-3 py-2 text-sm border border-surface-300 rounded-lg
+                                     bg-white text-brand-700 focus:outline-none focus:ring-2 focus:ring-accent-500
+                                     disabled:opacity-60 disabled:cursor-not-allowed"
+                        />
+                      </label>
+
+                      <label className="block">
+                        <span className="block text-xs font-medium text-brand-600 mb-1">Document Date</span>
+                        <input
+                          type="text"
+                          value={editableSummary.date}
+                          onChange={(e) => handleEditableSummaryFieldChange('date', e.target.value)}
+                          placeholder="MM-DD-YYYY"
+                          disabled={isSavingDocumentSummary}
+                          className="w-full px-3 py-2 text-sm border border-surface-300 rounded-lg
+                                     bg-white text-brand-700 focus:outline-none focus:ring-2 focus:ring-accent-500
+                                     disabled:opacity-60 disabled:cursor-not-allowed"
+                        />
+                      </label>
+                    </div>
+
+                    <label className="block">
+                      <span className="block text-xs font-medium text-brand-600 mb-1">Key Information</span>
+                      <textarea
+                        value={editableSummary.key_info}
+                        onChange={(e) => handleEditableSummaryFieldChange('key_info', e.target.value)}
+                        rows={8}
+                        disabled={isSavingDocumentSummary}
+                        className="w-full px-3 py-2 text-sm border border-surface-300 rounded-lg
+                                   bg-white text-brand-700 focus:outline-none focus:ring-2 focus:ring-accent-500
+                                   disabled:opacity-60 disabled:cursor-not-allowed"
+                      />
+                    </label>
+
+                    <label className="block">
+                      <span className="block text-xs font-medium text-brand-600 mb-1">Issues</span>
+                      <textarea
+                        value={editableSummary.issues}
+                        onChange={(e) => handleEditableSummaryFieldChange('issues', e.target.value)}
+                        rows={3}
+                        disabled={isSavingDocumentSummary}
+                        className="w-full px-3 py-2 text-sm border border-surface-300 rounded-lg
+                                   bg-white text-brand-700 focus:outline-none focus:ring-2 focus:ring-accent-500
+                                   disabled:opacity-60 disabled:cursor-not-allowed"
+                      />
+                    </label>
+
+                    {extractedFieldSections.length > 0 && (
+                      <div className="rounded-xl border border-surface-200 bg-surface-50/60 p-4">
+                        <p className="text-xs font-semibold text-brand-700 mb-1">Extracted Fields</p>
+                        <p className="text-[11px] text-brand-500 mb-3">
+                          Friendly labels for extracted values. Edits still map back to the original indexed data.
+                        </p>
+                        <div className="space-y-3 max-h-96 overflow-auto pr-1">
+                          {extractedFieldSections.map((section) => (
+                            <div key={section.section} className="rounded-lg border border-surface-200 bg-white p-3">
+                              <p className="text-xs font-semibold text-brand-700 mb-2">{section.section}</p>
+                              <div className="space-y-2">
+                                {section.fields.map((field) => (
+                                  <label key={field.rawPath} className="block">
+                                    <span className="block text-xs text-brand-600 mb-1" title={field.rawPath}>
+                                      {field.label}
+                                    </span>
+                                    <input
+                                      type="text"
+                                      value={field.value}
+                                      onChange={(e) => handleEditableExtractedFieldChange(field.path, e.target.value)}
+                                      disabled={isSavingDocumentSummary}
+                                      className="w-full px-3 py-2 text-sm border border-surface-300 rounded-lg
+                                                 bg-white text-brand-700 focus:outline-none focus:ring-2 focus:ring-accent-500
+                                                 disabled:opacity-60 disabled:cursor-not-allowed"
+                                    />
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {documentSummarySaveError && (
+                      <p className="text-sm text-red-700">{documentSummarySaveError}</p>
+                    )}
+                    {documentSummarySaveMessage && (
+                      <p className="text-sm text-emerald-700">{documentSummarySaveMessage}</p>
+                    )}
                   </div>
                 ) : (
-                  <pre className="text-sm text-brand-700 whitespace-pre-wrap font-mono
-                                  bg-surface-50 rounded-xl p-4">
-                    {content}
-                  </pre>
+                  <>
+                    {isHtml ? (
+                      <div
+                        className="prose prose-sm max-w-none prose-headings:text-brand-900"
+                        dangerouslySetInnerHTML={{ __html: content }}
+                      />
+                    ) : isMarkdown ? (
+                      <div className="prose prose-sm max-w-none
+                                      prose-headings:my-3 prose-headings:text-brand-900
+                                      prose-p:my-2 prose-ul:my-2 prose-li:my-0.5
+                                      prose-table:border-collapse prose-th:border prose-th:border-surface-200
+                                      prose-th:bg-surface-50 prose-th:px-3 prose-th:py-2
+                                      prose-td:border prose-td:border-surface-200 prose-td:px-3 prose-td:py-2
+                                      prose-a:text-accent-600">
+                        <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+                      </div>
+                    ) : (
+                      <pre className="text-sm text-brand-700 whitespace-pre-wrap font-mono
+                                      bg-surface-50 rounded-xl p-4">
+                        {content}
+                      </pre>
+                    )}
+                  </>
                 )}
               </div>
             </>

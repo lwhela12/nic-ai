@@ -34,6 +34,7 @@ export interface FirmInfo {
   address: string;
   cityStateZip?: string;
   phone: string;
+  nevadaBarNo?: string;
   fax?: string;
   website?: string;
   attorney?: string;
@@ -70,23 +71,58 @@ export async function loadFirmInfo(firmRoot: string): Promise<FirmInfo | null> {
   };
 
   let hasAnyInfo = false;
+  const pickConfigValue = (config: Record<string, any>, keys: string[]): string | undefined => {
+    for (const key of keys) {
+      const value = config[key];
+      if (typeof value === "string" && value.trim().length > 0) return value.trim();
+    }
+    return undefined;
+  };
 
   // First try firm-config.json (from Firm Settings UI)
   try {
     const configPath = join(firmRoot, ".pi_tool", "firm-config.json");
     const configContent = await readFile(configPath, "utf-8");
     const config = JSON.parse(configContent);
+    const configObj = config as Record<string, any>;
 
-    if (config.firmName) {
-      firmInfo.name = config.firmName;
+    const firmName = pickConfigValue(configObj, ["firmName", "name", "lawFirm", "firm"]);
+    if (firmName) {
+      firmInfo.name = firmName;
       hasAnyInfo = true;
     }
-    if (config.address) {
-      firmInfo.address = config.address;
+    const attorney = pickConfigValue(configObj, ["attorneyName", "attorney", "lawyerName"]);
+    if (attorney) {
+      firmInfo.attorney = attorney;
       hasAnyInfo = true;
     }
-    if (config.phone) {
-      firmInfo.phone = config.phone;
+    const nevadaBarNo = pickConfigValue(configObj, ["nevadaBarNo", "barNo", "barNumber", "nevadaBarNumber"]);
+    if (nevadaBarNo) {
+      firmInfo.nevadaBarNo = nevadaBarNo;
+      hasAnyInfo = true;
+    }
+    const address = pickConfigValue(configObj, ["address", "streetAddress", "addressLine1"]);
+    if (address) {
+      firmInfo.address = address;
+      hasAnyInfo = true;
+    }
+    const cityStateZip = pickConfigValue(configObj, ["cityStateZip"]);
+    if (cityStateZip) {
+      firmInfo.cityStateZip = cityStateZip;
+      hasAnyInfo = true;
+    } else {
+      const city = pickConfigValue(configObj, ["city"]);
+      const state = pickConfigValue(configObj, ["state"]);
+      const zip = pickConfigValue(configObj, ["zip", "postalCode"]);
+      const fallbackCityStateZip = `${city || ""}${city && state ? ", " : ""}${state || ""}${(city || state) && zip ? " " : ""}${zip || ""}`.trim();
+      if (fallbackCityStateZip) {
+        firmInfo.cityStateZip = fallbackCityStateZip;
+        hasAnyInfo = true;
+      }
+    }
+    const phone = pickConfigValue(configObj, ["phone", "phoneNumber", "telephone"]);
+    if (phone) {
+      firmInfo.phone = phone;
       hasAnyInfo = true;
     }
   } catch {
@@ -141,6 +177,13 @@ export async function loadFirmInfo(firmRoot: string): Promise<FirmInfo | null> {
         if (attorneyLine) {
           firmInfo.attorney = attorneyLine.replace("Attorney:", "").trim();
         }
+
+        // Parse Nevada bar line if present.
+        const barLine = lines.find((l) => /bar\s*no\.?/i.test(l));
+        if (barLine) {
+          const barMatch = barLine.match(/bar\s*no\.?\s*[:#-]?\s*(.+)$/i);
+          firmInfo.nevadaBarNo = barMatch ? barMatch[1].trim() : barLine.trim();
+        }
       }
     } catch {
       // No preferences file either
@@ -156,6 +199,42 @@ export async function loadFirmInfo(firmRoot: string): Promise<FirmInfo | null> {
 
   console.log(`[FirmInfo] Result: hasAnyInfo=${hasAnyInfo}, hasLogo=${!!firmInfo.logoBase64}, name="${firmInfo.name}"`);
   return hasAnyInfo ? firmInfo : null;
+}
+
+function normalizeFirmField(value?: string): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+export function buildAttorneyFirmBlockLines(firmInfo?: FirmInfo | null): string[] {
+  if (!firmInfo) return [];
+
+  const firmName = normalizeFirmField(firmInfo.name);
+  const address = normalizeFirmField(firmInfo.address);
+  const cityStateZip = normalizeFirmField(firmInfo.cityStateZip);
+  const phone = normalizeFirmField(firmInfo.phone);
+  const attorney = normalizeFirmField(firmInfo.attorney);
+  const barValue = normalizeFirmField(firmInfo.nevadaBarNo);
+  const barLine = barValue
+    ? (/bar\s*no\.?/i.test(barValue) ? barValue : `Nevada Bar No. ${barValue}`)
+    : undefined;
+
+  const addressLine = address && cityStateZip
+    ? `${address}, ${cityStateZip}`
+    : (address || cityStateZip);
+
+  const orderedLines = [
+    firmName,
+    addressLine,
+    barLine,
+    phone,
+  ].filter((line): line is string => Boolean(line));
+
+  if (orderedLines.length > 0) {
+    return orderedLines;
+  }
+  return attorney ? [attorney] : [];
 }
 
 // Generate letterhead HTML block
