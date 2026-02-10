@@ -1282,9 +1282,15 @@ app.post("/preview-front-matter", async (c) => {
       includeAffirmationPage: true,
     });
 
-    c.header("Content-Type", "application/pdf");
-    c.header("Content-Disposition", 'inline; filename="front-matter-preview.pdf"');
-    return c.body(pdfBytes);
+    // Write to .pi_tool so the preview can be served via GET /api/files/view
+    // (blob URLs don't work with Electron's window.open pop-out on Windows)
+    const piToolDir = join(caseFolder, ".pi_tool");
+    await mkdir(piToolDir, { recursive: true });
+    const previewPath = join(piToolDir, "front-matter-preview.pdf");
+    await writeFile(previewPath, pdfBytes);
+
+    const viewUrl = `/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(".pi_tool/front-matter-preview.pdf")}#view=FitH`;
+    return c.json({ url: viewUrl });
   } catch (err) {
     console.error("preview-front-matter error:", err);
     return c.json({ error: `Preview failed: ${err}` }, 500);

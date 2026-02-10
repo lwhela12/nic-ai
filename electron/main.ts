@@ -166,7 +166,7 @@ function createSplashWindow(): void {
 function closeSplashWindow(): void {
   if (!splashWindow) return;
   if (!splashWindow.isDestroyed()) {
-    splashWindow.close();
+    splashWindow.destroy();
   }
   splashWindow = null;
 }

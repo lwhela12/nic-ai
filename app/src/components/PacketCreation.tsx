@@ -235,9 +235,8 @@ export default function PacketCreation({
         }),
       })
       if (res.ok) {
-        const blob = await res.blob()
-        const url = URL.createObjectURL(blob)
-        onPreviewReady(url)
+        const { url } = await res.json()
+        onPreviewReady(`${apiUrl}${url}`)
       }
     } catch { /* ignore */ }
     setIsPreviewing(false)
