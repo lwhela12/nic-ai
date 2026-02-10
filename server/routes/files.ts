@@ -188,10 +188,15 @@ app.post("/document-summary", async (c) => {
   const updatesRaw = body?.updates && typeof body.updates === "object" ? body.updates : null;
   const hasExtractedDataUpdate = Object.prototype.hasOwnProperty.call(body ?? {}, "extractedData");
   const extractedDataRaw = hasExtractedDataUpdate ? body?.extractedData : undefined;
+  const approveOnly = body?.approveOnly === true;
   const reviewNotesRaw = typeof body?.reviewNotes === "string" ? body.reviewNotes.trim() : "";
 
-  if (!caseFolder || !filePath || (!updatesRaw && !hasExtractedDataUpdate)) {
-    return c.json({ error: "caseFolder, filePath, and at least one update payload are required" }, 400);
+  if (!caseFolder || !filePath) {
+    return c.json({ error: "caseFolder and filePath are required" }, 400);
+  }
+
+  if (!updatesRaw && !hasExtractedDataUpdate && !approveOnly) {
+    return c.json({ error: "Provide updates/extractedData or set approveOnly=true" }, 400);
   }
 
   const access = await requireCaseAccess(c, caseFolder);
@@ -248,9 +253,10 @@ app.post("/document-summary", async (c) => {
     }
     return fields;
   };
+  const updatedFields = buildUpdatedFields();
 
-  if (buildUpdatedFields().length === 0) {
-    return c.json({ error: "No valid update fields provided" }, 400);
+  if (updatedFields.length === 0 && !approveOnly) {
+    return c.json({ error: "No valid update fields provided. Set approveOnly=true to mark reviewed without edits." }, 400);
   }
 
   try {
@@ -267,6 +273,7 @@ app.post("/document-summary", async (c) => {
     let updatedFilePath = normalizePath(filePath);
     let updatedFileName = "";
     let previousValues: Record<string, unknown> = {};
+    let wasPreviouslyReviewed = false;
 
     for (const [folderName, folderData] of Object.entries(index.folders)) {
       let filesRef: any[] | null = null;
@@ -320,6 +327,7 @@ app.post("/document-summary", async (c) => {
           nextEntry.filename = nextEntry.file;
         }
 
+        wasPreviouslyReviewed = Boolean(nextEntry.user_reviewed);
         previousValues = {};
         for (const [field, value] of Object.entries(updates)) {
           previousValues[field] = nextEntry[field];
@@ -340,12 +348,15 @@ app.post("/document-summary", async (c) => {
           }
         }
 
-        const updatedFields = buildUpdatedFields();
         nextEntry.user_reviewed = true;
         nextEntry.reviewed_at = reviewedAt;
         nextEntry.review_notes =
           reviewNotesRaw ||
-          `User reviewed and updated fields: ${updatedFields.join(", ")}`;
+          (updatedFields.length > 0
+            ? `User reviewed and updated fields: ${updatedFields.join(", ")}`
+            : wasPreviouslyReviewed
+              ? "User re-approved extraction with no changes."
+              : "User reviewed and approved extraction with no changes.");
 
         filesRef[i] = nextEntry;
         updatedFilePath = candidatePath;
@@ -370,10 +381,17 @@ app.post("/document-summary", async (c) => {
       index.case_notes = [];
     }
 
-    const updatedFields = buildUpdatedFields();
+    const approvalOnly = updatedFields.length === 0;
+    const reviewStatus = approvalOnly
+      ? (wasPreviouslyReviewed ? "already-reviewed" : "approved")
+      : "updated";
     index.case_notes.push({
       id: `note-${Date.now()}`,
-      content: `Updated document summary fields for ${updatedFileName}: ${updatedFields.join(", ")}`,
+      content: approvalOnly
+        ? (wasPreviouslyReviewed
+          ? `Re-approved extracted data for ${updatedFileName} with no metadata changes`
+          : `Approved extracted data for ${updatedFileName} with no metadata changes`)
+        : `Updated document summary fields for ${updatedFileName}: ${updatedFields.join(", ")}`,
       field_updated: `document:${updatedFilePath}`,
       previous_value: previousValues,
       source: "manual",
@@ -386,6 +404,8 @@ app.post("/document-summary", async (c) => {
       success: true,
       filePath: updatedFilePath,
       updatedFields,
+      approvalOnly,
+      reviewStatus,
     });
   } catch (error) {
     if ((error as any)?.code === "ENOENT") {

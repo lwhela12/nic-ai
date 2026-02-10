@@ -84,6 +84,7 @@ interface IndexedSummaryTarget {
   fileName: string
   fields: EditableDocumentSummaryFields
   extractedData: unknown
+  isUserReviewed: boolean
 }
 
 const normalizeRelativePath = (value: string): string =>
@@ -531,6 +532,7 @@ export default function Visualizer({
   // PDF viewer state
   const [pdfNumPages, setPdfNumPages] = useState<number | null>(null)
   const [pdfPageNumber, setPdfPageNumber] = useState(1)
+  const [pdfPageInput, setPdfPageInput] = useState('1')
   const [pdfScale, setPdfScale] = useState(1.0)
   const pdfContainerRef = useRef<HTMLDivElement>(null)
   const [pdfContainerWidth, setPdfContainerWidth] = useState<number | null>(null)
@@ -559,6 +561,15 @@ export default function Visualizer({
 
   const errata: ErrataItem[] = Array.isArray(documentIndex?.errata) ? documentIndex.errata : []
   const needsReview: NeedsReviewItem[] = Array.isArray(documentIndex?.needs_review) ? documentIndex.needs_review : []
+
+  const clampPdfPageNumber = useCallback((requestedPage: number): number => {
+    const maxPage = pdfNumPages ?? 1
+    return Math.min(maxPage, Math.max(1, requestedPage))
+  }, [pdfNumPages])
+
+  const goToPdfPage = useCallback((requestedPage: number) => {
+    setPdfPageNumber(clampPdfPageNumber(requestedPage))
+  }, [clampPdfPageNumber])
 
   const indexedSummaryTarget = useMemo<IndexedSummaryTarget | null>(() => {
     if (!documentIndex?.folders || !filePath) return null
@@ -593,6 +604,11 @@ export default function Visualizer({
           extractedData: fileEntry && typeof fileEntry === 'object'
             ? cloneJsonValue((fileEntry as Record<string, unknown>).extracted_data ?? null)
             : null,
+          isUserReviewed: Boolean(
+            fileEntry &&
+            typeof fileEntry === 'object' &&
+            (fileEntry as Record<string, unknown>).user_reviewed,
+          ),
         }
       }
     }
@@ -697,9 +713,14 @@ export default function Visualizer({
   // Reset PDF state when file changes
   useEffect(() => {
     setPdfPageNumber(1)
+    setPdfPageInput('1')
     setPdfNumPages(null)
     setPdfScale(1.0)
   }, [fileUrl])
+
+  useEffect(() => {
+    setPdfPageInput(String(pdfPageNumber))
+  }, [pdfPageNumber])
 
   // Measure PDF container width for responsive sizing
   useEffect(() => {
@@ -775,6 +796,24 @@ export default function Visualizer({
     if (documentSummarySaveMessage) setDocumentSummarySaveMessage(null)
   }
 
+  const commitPdfPageInput = useCallback(() => {
+    const trimmedInput = pdfPageInput.trim()
+    if (!trimmedInput) {
+      setPdfPageInput(String(pdfPageNumber))
+      return
+    }
+
+    const parsedPage = Number.parseInt(trimmedInput, 10)
+    if (Number.isNaN(parsedPage)) {
+      setPdfPageInput(String(pdfPageNumber))
+      return
+    }
+
+    const clampedPage = clampPdfPageNumber(parsedPage)
+    setPdfPageNumber(clampedPage)
+    setPdfPageInput(String(clampedPage))
+  }, [clampPdfPageNumber, pdfPageInput, pdfPageNumber])
+
   const handleResetEditableSummary = () => {
     setEditableSummary(initialEditableSummary)
     setEditableExtractedData(cloneJsonValue(initialEditableExtractedData))
@@ -788,7 +827,7 @@ export default function Visualizer({
     if (documentSummarySaveMessage) setDocumentSummarySaveMessage(null)
   }
 
-  const handleSaveEditableSummary = useCallback(async () => {
+  const handleApproveEditableSummary = useCallback(async () => {
     if (!caseFolder || !indexedSummaryTarget) return
 
     setIsSavingDocumentSummary(true)
@@ -796,23 +835,31 @@ export default function Visualizer({
     setDocumentSummarySaveMessage(null)
 
     try {
+      const summaryIsDirty = !areEditableSummaryFieldsEqual(editableSummary, initialEditableSummary)
       const extractedDataIsDirty =
         JSON.stringify(editableExtractedData ?? null) !== JSON.stringify(initialEditableExtractedData ?? null)
 
       const requestBody: Record<string, unknown> = {
         caseFolder,
         filePath: indexedSummaryTarget.filePath,
-        updates: {
+      }
+
+      if (summaryIsDirty) {
+        requestBody.updates = {
           title: editableSummary.title,
           type: editableSummary.type,
           date: editableSummary.date,
           key_info: editableSummary.key_info,
           issues: editableSummary.issues,
-        },
+        }
       }
 
       if (extractedDataIsDirty) {
         requestBody.extractedData = editableExtractedData
+      }
+
+      if (!summaryIsDirty && !extractedDataIsDirty) {
+        requestBody.approveOnly = true
       }
 
       const res = await fetch(`${apiUrl}/api/files/document-summary`, {
@@ -828,7 +875,15 @@ export default function Visualizer({
 
       setInitialEditableSummary(editableSummary)
       setInitialEditableExtractedData(cloneJsonValue(editableExtractedData))
-      setDocumentSummarySaveMessage('Saved to document index.')
+      const isApprovalOnly = Boolean(data?.approvalOnly)
+      const reviewStatus = typeof data?.reviewStatus === 'string' ? data.reviewStatus : ''
+      if (isApprovalOnly && reviewStatus === 'already-reviewed') {
+        setDocumentSummarySaveMessage('Already approved.')
+      } else if (isApprovalOnly) {
+        setDocumentSummarySaveMessage('Approved with no changes.')
+      } else {
+        setDocumentSummarySaveMessage('Approved and saved to document index.')
+      }
       onIndexUpdated()
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to save document summary'
@@ -836,7 +891,7 @@ export default function Visualizer({
     } finally {
       setIsSavingDocumentSummary(false)
     }
-  }, [apiUrl, caseFolder, editableExtractedData, editableSummary, indexedSummaryTarget, initialEditableExtractedData, onIndexUpdated])
+  }, [apiUrl, caseFolder, editableExtractedData, editableSummary, indexedSummaryTarget, initialEditableExtractedData, initialEditableSummary, onIndexUpdated])
 
   const redactionBoxKey = useCallback((box: RedactionBoxInput) => (
     `${box.page}:${box.xPct.toFixed(5)}:${box.yPct.toFixed(5)}:${box.widthPct.toFixed(5)}:${box.heightPct.toFixed(5)}`
@@ -1277,6 +1332,15 @@ export default function Visualizer({
   const isEditableExtractedDirty =
     JSON.stringify(editableExtractedData ?? null) !== JSON.stringify(initialEditableExtractedData ?? null)
   const hasAnyDocumentEdits = isEditableSummaryDirty || isEditableExtractedDirty
+  const isIndexedSummaryReviewed = Boolean(indexedSummaryTarget?.isUserReviewed)
+  const canSubmitDocumentReview = !isSavingDocumentSummary && (hasAnyDocumentEdits || !isIndexedSummaryReviewed)
+  const documentReviewActionLabel = isSavingDocumentSummary
+    ? 'Approving...'
+    : hasAnyDocumentEdits
+      ? 'Approve Changes'
+      : isIndexedSummaryReviewed
+        ? 'Approved'
+        : 'Approve'
 
   const isHtml = content.includes('<div') || content.includes('<table')
   const isMarkdown = content.startsWith('#') || content.includes('\n##') || content.includes('\n- ') || content.includes('\n* ')
@@ -1606,7 +1670,7 @@ export default function Visualizer({
                     {/* PDF toolbar */}
                     <div className="flex items-center gap-2 px-3 py-2 bg-surface-50 border-b border-surface-200 flex-wrap">
                       <button
-                        onClick={() => setPdfPageNumber(Math.max(1, pdfPageNumber - 1))}
+                        onClick={() => goToPdfPage(pdfPageNumber - 1)}
                         disabled={pdfPageNumber <= 1}
                         className="p-1.5 rounded hover:bg-surface-200 disabled:opacity-40 disabled:cursor-not-allowed"
                         title="Previous page"
@@ -1615,11 +1679,44 @@ export default function Visualizer({
                           <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
                         </svg>
                       </button>
-                      <span className="text-xs text-brand-600 min-w-[80px] text-center">
-                        {pdfPageNumber} / {pdfNumPages || '...'}
-                      </span>
+                      <div className="flex items-center gap-1 text-xs text-brand-600 min-w-[110px] justify-center">
+                        <label htmlFor="pdf-page-input" className="sr-only">
+                          Page number
+                        </label>
+                        <input
+                          id="pdf-page-input"
+                          type="text"
+                          inputMode="numeric"
+                          pattern="[0-9]*"
+                          value={pdfPageInput}
+                          onChange={(event) => {
+                            const nextValue = event.target.value
+                            if (nextValue === '' || /^\d+$/.test(nextValue)) {
+                              setPdfPageInput(nextValue)
+                            }
+                          }}
+                          onBlur={commitPdfPageInput}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              event.preventDefault()
+                              commitPdfPageInput()
+                              return
+                            }
+                            if (event.key === 'Escape') {
+                              event.preventDefault()
+                              setPdfPageInput(String(pdfPageNumber))
+                              event.currentTarget.blur()
+                            }
+                          }}
+                          disabled={!pdfNumPages}
+                          className="w-14 px-1 py-0.5 text-center rounded border border-surface-300 bg-white text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                          aria-label="Page number"
+                          title="Go to page"
+                        />
+                        <span>/ {pdfNumPages || '...'}</span>
+                      </div>
                       <button
-                        onClick={() => setPdfPageNumber(Math.min(pdfNumPages || 1, pdfPageNumber + 1))}
+                        onClick={() => goToPdfPage(pdfPageNumber + 1)}
                         disabled={!pdfNumPages || pdfPageNumber >= pdfNumPages}
                         className="p-1.5 rounded hover:bg-surface-200 disabled:opacity-40 disabled:cursor-not-allowed"
                         title="Next page"
@@ -1759,7 +1856,7 @@ export default function Visualizer({
                             {piiFindings.map((item, index) => (
                               <button
                                 key={`${item.page}-${item.kind}-${index}`}
-                                onClick={() => setPdfPageNumber(item.page)}
+                                onClick={() => goToPdfPage(item.page)}
                                 className="w-full text-left px-2 py-1 text-xs rounded bg-white border border-amber-200 hover:bg-amber-100 transition-colors"
                               >
                                 Pg {item.page} • {item.kind.toUpperCase()} • {item.preview || 'masked'}
@@ -1782,7 +1879,10 @@ export default function Visualizer({
                         <div className="min-w-fit min-h-fit mx-auto" style={{ width: 'fit-content' }}>
                           <Document
                             file={fileUrl}
-                            onLoadSuccess={({ numPages }) => setPdfNumPages(numPages)}
+                            onLoadSuccess={({ numPages }) => {
+                              setPdfNumPages(numPages)
+                              setPdfPageNumber((currentPage) => Math.min(numPages, Math.max(1, currentPage)))
+                            }}
                             loading={
                               <div className="flex items-center justify-center h-64">
                                 <div className="text-brand-500">Loading PDF...</div>
@@ -1935,13 +2035,13 @@ export default function Visualizer({
                         Reset
                       </button>
                       <button
-                        onClick={handleSaveEditableSummary}
-                        disabled={!hasAnyDocumentEdits || isSavingDocumentSummary}
+                        onClick={handleApproveEditableSummary}
+                        disabled={!canSubmitDocumentReview}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
                                    bg-brand-900 border border-brand-900 text-white hover:bg-brand-800
                                    rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        {isSavingDocumentSummary ? 'Saving...' : 'Save'}
+                        {documentReviewActionLabel}
                       </button>
                     </>
                   )}
