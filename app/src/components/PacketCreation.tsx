@@ -23,8 +23,16 @@ const GripIcon = () => (
 )
 
 const PinIcon = ({ active }: { active: boolean }) => (
-  <svg className={`w-3.5 h-3.5 ${active ? 'text-accent-600' : 'text-brand-400'}`} fill={active ? 'currentColor' : 'none'} viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 3.75V16.5L12 14.25 7.5 16.5V3.75" />
+  <svg
+    className={`w-3.5 h-3.5 ${active ? 'text-accent-600' : 'text-brand-400'}`}
+    fill="none"
+    viewBox="0 0 24 24"
+    stroke="currentColor"
+    strokeWidth={2}
+  >
+    <path strokeLinecap="round" strokeLinejoin="round" d="M9 3h6" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M10 3v5l-2 2v1h8v-1l-2-2V3" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M12 11v10" />
   </svg>
 )
 
