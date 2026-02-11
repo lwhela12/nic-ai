@@ -186,9 +186,33 @@ export interface DocumentIndex {
       member_no?: string
     }
     claim_numbers?: Record<string, string>
+    employer?: {
+      name?: string
+      address?: { street?: string; city?: string; state?: string; zip?: string } | string
+      phone?: string
+      contact_name?: string
+    }
+    wc_carrier?: {
+      name?: string
+      carrier?: string
+      claim_number?: string
+      adjuster_name?: string
+      adjuster?: string
+      adjuster_phone?: string
+      adjuster_email?: string
+      tpa_name?: string
+      tpa?: string
+    }
     disability_status?: {
       type?: string
+      amw?: number
+      compensation_rate?: number
+      mmi_date?: string
+      ppd_rating?: number
     }
+    job_title?: string
+    injury_description?: string
+    body_parts?: string[]
   }
   issues_found?: string[]
   case_analysis?: string
@@ -208,6 +232,62 @@ export interface AgentDocumentView {
   sortDirection?: 'asc' | 'desc'
   createdAt: string
   totalMatches: number
+}
+
+// Derive contact info from per-file extracted_data when summary.contact is missing.
+// Uses majority-voting across all files to pick the most common phone/email/address.
+function deriveContactFromFiles(folders: Record<string, DocumentFolder>): {
+  phone?: string; email?: string; address?: { street?: string; city?: string; state?: string; zip?: string }
+} | undefined {
+  const phones: Record<string, number> = {}
+  const emails: Record<string, number> = {}
+  const addresses: Record<string, { obj: Record<string, string>; count: number }> = {}
+
+  for (const folder of Object.values(folders)) {
+    for (const file of folder.files) {
+      const ed = file.extracted_data as Record<string, unknown> | undefined
+      if (!ed) continue
+
+      const phone = ed.phone || ed.client_phone
+      if (typeof phone === 'string' && phone.trim() && !phone.includes('UNKNOWN')) {
+        const digits = phone.replace(/\D/g, '').replace(/^1/, '')
+        if (digits.length >= 7) phones[digits] = (phones[digits] || 0) + 1
+      }
+
+      const email = ed.email || ed.client_email
+      if (typeof email === 'string' && email.includes('@') && !email.includes('UNKNOWN')) {
+        const normalized = email.trim().toLowerCase()
+        emails[normalized] = (emails[normalized] || 0) + 1
+      }
+
+      const addr = ed.address || ed.client_address
+      if (addr && typeof addr === 'object' && (addr as Record<string, unknown>).street) {
+        const obj = addr as Record<string, string>
+        const key = obj.street.trim().toUpperCase()
+        if (!addresses[key]) addresses[key] = { obj, count: 0 }
+        addresses[key].count++
+      } else if (typeof addr === 'string' && addr.trim() && !addr.includes('UNKNOWN')) {
+        const key = addr.trim().toUpperCase()
+        if (!addresses[key]) addresses[key] = { obj: { street: addr.trim() }, count: 0 }
+        addresses[key].count++
+      }
+    }
+  }
+
+  const topPhone = Object.entries(phones).sort((a, b) => b[1] - a[1])[0]
+  const topEmail = Object.entries(emails).sort((a, b) => b[1] - a[1])[0]
+  const topAddr = Object.values(addresses).sort((a, b) => b.count - a.count)[0]
+
+  if (!topPhone && !topEmail && !topAddr) return undefined
+
+  const result: { phone?: string; email?: string; address?: Record<string, string> } = {}
+  if (topPhone) {
+    const d = topPhone[0]
+    result.phone = d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : d
+  }
+  if (topEmail) result.email = topEmail[0]
+  if (topAddr) result.address = topAddr.obj
+  return result
 }
 
 const normalizeAgentViewPath = (path: string): string =>
@@ -652,6 +732,11 @@ function App() {
   // Contact card state
   const [isContactCardOpen, setIsContactCardOpen] = useState(false)
   const contactButtonRef = useRef<HTMLButtonElement>(null)
+  const derivedContact = useMemo(() => {
+    if (documentIndex?.summary?.contact) return documentIndex.summary.contact
+    if (documentIndex?.folders) return deriveContactFromFiles(documentIndex.folders)
+    return undefined
+  }, [documentIndex])
 
   // Todo drawer state (global - accessible from any view)
   const [todos, setTodos] = useState<FirmTodo[]>([])
@@ -1686,7 +1771,7 @@ function App() {
   return (
     <div className="h-screen flex flex-col bg-surface-50">
       {/* Header */}
-      <header className="bg-brand-900/95 text-white px-6 py-4 shadow-lg backdrop-blur">
+      <header className="relative z-20 bg-brand-900/95 text-white px-6 py-4 shadow-lg backdrop-blur">
         <div className="flex items-center justify-between">
           <div className="flex items-center justify-end gap-2 flex-wrap">
             <div className="w-9 h-9 rounded-lg bg-white/10 flex items-center justify-center">
@@ -1789,10 +1874,16 @@ function App() {
                 anchorRef={contactButtonRef}
                 clientName={documentIndex?.summary?.client}
                 dob={documentIndex?.summary?.dob}
-                contact={documentIndex?.summary?.contact}
+                contact={derivedContact}
                 policyLimits={documentIndex?.summary?.policy_limits as Record<string, string> | string | undefined}
                 healthInsurance={documentIndex?.summary?.health_insurance}
                 claimNumbers={documentIndex?.summary?.claim_numbers}
+                practiceArea={documentIndex?.practice_area}
+                employer={documentIndex?.summary?.employer}
+                wcCarrier={documentIndex?.summary?.wc_carrier}
+                disabilityStatus={documentIndex?.summary?.disability_status}
+                jobTitle={documentIndex?.summary?.job_title}
+                bodyParts={documentIndex?.summary?.body_parts}
               />
             </div>
             {/* Tasks button */}
