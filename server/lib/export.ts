@@ -9,7 +9,6 @@ import {
   TableCell,
   WidthType,
   BorderStyle,
-  HeadingLevel,
   AlignmentType,
   ImageRun,
 } from "docx";
@@ -19,6 +18,8 @@ import { readFile } from "fs/promises";
 import { join } from "path";
 import type { DocxStyles } from "./extract";
 
+export type ExportStyleProfile = "auto" | "court_safe" | "template";
+
 // Export options interface for customization
 export interface ExportOptions {
   documentType?: "demand" | "settlement" | "memo" | "letter" | "hearing_decision" | "generic";
@@ -27,6 +28,7 @@ export interface ExportOptions {
   showPageNumbers?: boolean;
   showLetterhead?: boolean;
   templateStyles?: DocxStyles;
+  styleProfile?: ExportStyleProfile;
 }
 
 export interface FirmInfo {
@@ -280,6 +282,10 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
   const html = marked.parse(markdown, { async: false, breaks: true, gfm: true }) as string;
   const styles = options.templateStyles;
   const isPleadingPaper = options.documentType === "hearing_decision";
+  const styleProfile = options.styleProfile ?? "auto";
+  const isCourtCriticalByType = options.documentType === "letter" || options.documentType === "hearing_decision";
+  const isCourtCritical = styleProfile === "court_safe" || (styleProfile === "auto" && isCourtCriticalByType);
+  const effectiveStyles = isCourtCritical ? undefined : styles;
 
   const showLetterhead = options.showLetterhead && options.firmInfo;
   console.log(`[Export] markdownToHtml: showLetterhead option=${options.showLetterhead}, hasFirmInfo=${!!options.firmInfo}, result=${showLetterhead}`);
@@ -289,30 +295,30 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
   const letterheadHtml = showLetterhead ? generateLetterheadHtml(options.firmInfo!) : "";
 
   // Apply extracted template styles or use defaults
-  const fontFamily = styles?.defaultFont
-    ? `'${styles.defaultFont}', Times, serif`
+  const fontFamily = effectiveStyles?.defaultFont
+    ? `'${effectiveStyles.defaultFont}', Times, serif`
     : "'Times New Roman', Times, serif";
-  const fontSize = styles?.defaultFontSize || 12;
-  const lineHeight = styles?.bodyText?.lineHeight || 1.6;
+  const fontSize = effectiveStyles?.defaultFontSize || 12;
+  const lineHeight = effectiveStyles?.bodyText?.lineHeight || 1.6;
 
   // Heading styles from template or defaults
-  const h1Size = styles?.heading1?.size || 16;
-  const h1Color = styles?.heading1?.color || "#000";
-  const h2Size = styles?.heading2?.size || 14;
-  const h2Color = styles?.heading2?.color || "#000";
-  const h3Size = styles?.heading3?.size || 12;
-  const h3Color = styles?.heading3?.color || "#000";
+  const h1Size = effectiveStyles?.heading1?.size || 16;
+  const h1Color = effectiveStyles?.heading1?.color || "#000";
+  const h2Size = effectiveStyles?.heading2?.size || 14;
+  const h2Color = effectiveStyles?.heading2?.color || "#000";
+  const h3Size = effectiveStyles?.heading3?.size || 12;
+  const h3Color = effectiveStyles?.heading3?.color || "#000";
 
   // Page margins from template or defaults
-  const margins = styles?.pageMargins || { top: 1, right: 1, bottom: 1, left: 1 };
+  const margins = effectiveStyles?.pageMargins || { top: 1, right: 1, bottom: 1, left: 1 };
   const paddingCss = `${margins.top}in ${margins.right}in ${margins.bottom}in ${margins.left}in`;
 
   // Table styling
-  const tableBorderColor = styles?.tableBorderColor || "#666";
-  const tableHeaderBg = styles?.tableHeaderBg || "#f5f5f5";
+  const tableBorderColor = effectiveStyles?.tableBorderColor || "#666";
+  const tableHeaderBg = effectiveStyles?.tableHeaderBg || "#f5f5f5";
 
   // Primary color for borders etc
-  const primaryColor = styles?.primaryColor || "#666";
+  const primaryColor = effectiveStyles?.primaryColor || "#666";
 
   // Add letterhead-specific CSS only if showing letterhead
   const letterheadCss = showLetterhead
@@ -646,6 +652,7 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
       font-weight: bold;
       border-bottom: 2px solid ${tableBorderColor};
     }
+    ${isCourtCritical ? "" : `
     /* Zebra striping for table rows */
     tbody tr:nth-child(even) {
       background-color: #fafafa;
@@ -653,6 +660,7 @@ export function markdownToHtml(markdown: string, options: ExportOptions = {}): s
     tbody tr:hover {
       background-color: #f0f0f0;
     }
+    `}
     ul, ol {
       margin: 10pt 0;
       padding-left: 36pt;
@@ -915,18 +923,18 @@ export async function htmlToDocx(
   let inItalic = false;
   let inList = false;
   let listType: "bullet" | "number" = "bullet";
+  let headingLevel: 0 | 1 | 2 | 3 = 0;
   let inTable = false;
   let tableRows: TableRow[] = [];
   let currentRowCells: TableCell[] = [];
   let isHeaderRow = false;
 
-  const flushText = (heading?: HeadingLevel, alignment?: AlignmentType) => {
+  const flushText = (alignment?: AlignmentType, spacingAfter: number = 200) => {
     if (currentText.length > 0) {
       const para = new Paragraph({
         children: currentText,
-        heading,
         alignment,
-        spacing: { after: 200 },
+        spacing: { after: spacingAfter },
       });
       children.push(para);
       currentText = [];
@@ -958,21 +966,24 @@ export async function htmlToDocx(
 
       switch (tag) {
         case "h1":
+          if (!isClosing) headingLevel = 1;
           if (isClosing) {
-            // For letters and demands: render as bold paragraph, not styled heading
-            flushText(isCleanFormat ? undefined : HeadingLevel.HEADING_1, isCleanFormat ? undefined : AlignmentType.CENTER);
+            flushText(AlignmentType.CENTER, 280);
+            headingLevel = 0;
           }
           break;
         case "h2":
+          if (!isClosing) headingLevel = 2;
           if (isClosing) {
-            // For letters and demands: render as bold paragraph, not styled heading
-            flushText(isCleanFormat ? undefined : HeadingLevel.HEADING_2);
+            flushText(undefined, 240);
+            headingLevel = 0;
           }
           break;
         case "h3":
+          if (!isClosing) headingLevel = 3;
           if (isClosing) {
-            // For letters and demands: render as bold paragraph, not styled heading
-            flushText(isCleanFormat ? undefined : HeadingLevel.HEADING_3);
+            flushText(undefined, 220);
+            headingLevel = 0;
           }
           break;
         case "p":
@@ -1111,7 +1122,7 @@ export async function htmlToDocx(
         currentText.push(
           new TextRun({
             text: decoded,
-            bold: inBold,
+            bold: inBold || headingLevel > 0,
             italics: inItalic,
           })
         );

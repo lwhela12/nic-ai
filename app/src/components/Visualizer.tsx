@@ -21,6 +21,8 @@ interface Draft {
   outputPath?: string
 }
 
+type ExportStyleProfile = 'auto' | 'court_safe' | 'template'
+
 interface Props {
   content: string
   docPath: string | null
@@ -517,6 +519,7 @@ export default function Visualizer({
   const [activeTab, setActiveTab] = useState<'view' | 'review' | 'drafts'>('view')
   const [verifiedItems, setVerifiedItems] = useState<Set<string>>(new Set())
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
+  const [exportStyleProfile, setExportStyleProfile] = useState<ExportStyleProfile>('auto')
   const [editingItem, setEditingItem] = useState<string | null>(null)
   const [correctionValue, setCorrectionValue] = useState('')
 
@@ -1188,6 +1191,7 @@ export default function Visualizer({
           draftPath: draft.path,
           targetPath: draft.targetPath.replace('.pdf', `.${format}`),
           format,
+          styleProfile: exportStyleProfile,
         }),
       })
 
@@ -1208,11 +1212,21 @@ export default function Visualizer({
     }
   }
 
+  const buildExportUrl = useCallback((path: string, format: 'md' | 'docx' | 'pdf') => {
+    const params = new URLSearchParams({
+      case: caseFolder,
+      path,
+      format,
+      styleProfile: exportStyleProfile,
+    })
+    return `${apiUrl}/api/docs/download?${params.toString()}`
+  }, [apiUrl, caseFolder, exportStyleProfile])
+
   const handleExportDraft = (format: 'md' | 'docx' | 'pdf') => {
     setDraftExportMenuOpen(false)
     if (!selectedDraft || !caseFolder) return
 
-    const url = `${apiUrl}/api/docs/download?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(selectedDraft.path)}&format=${format}`
+    const url = buildExportUrl(selectedDraft.path, format)
 
     if (format === 'pdf') {
       window.open(url, '_blank')
@@ -1323,7 +1337,7 @@ export default function Visualizer({
     setExportMenuOpen(false)
     if (!docPath || !caseFolder) return
 
-    const url = `${apiUrl}/api/docs/download?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(docPath)}&format=${format}`
+    const url = buildExportUrl(docPath, format)
 
     if (format === 'pdf') {
       // PDF opens in new tab (browser renders it natively)
@@ -1467,6 +1481,18 @@ export default function Visualizer({
 
               {/* Draft actions */}
               <div className="px-4 py-3 border-t border-surface-200 bg-surface-50 flex items-center gap-3">
+                <label className="inline-flex items-center gap-2 text-xs text-brand-600">
+                  Style
+                  <select
+                    value={exportStyleProfile}
+                    onChange={(e) => setExportStyleProfile(e.target.value as ExportStyleProfile)}
+                    className="px-2 py-1.5 text-xs rounded border border-surface-300 bg-white text-brand-700"
+                  >
+                    <option value="auto">Auto</option>
+                    <option value="court_safe">Court-safe</option>
+                    <option value="template">Template-matched</option>
+                  </select>
+                </label>
                 {/* Export dropdown */}
                 <div className="relative">
                   <button
@@ -2181,7 +2207,20 @@ export default function Visualizer({
                     </>
                   )}
                   {!hasIndexedSummaryEditor && isExportable && (
-                    <div className="relative">
+                    <div className="flex items-center gap-2">
+                      <label className="inline-flex items-center gap-1.5 text-xs text-brand-600">
+                        Style
+                        <select
+                          value={exportStyleProfile}
+                          onChange={(e) => setExportStyleProfile(e.target.value as ExportStyleProfile)}
+                          className="px-2 py-1 text-xs rounded border border-surface-300 bg-white text-brand-700"
+                        >
+                          <option value="auto">Auto</option>
+                          <option value="court_safe">Court-safe</option>
+                          <option value="template">Template-matched</option>
+                        </select>
+                      </label>
+                      <div className="relative">
                       <button
                         onClick={() => setExportMenuOpen(!exportMenuOpen)}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
@@ -2236,6 +2275,7 @@ export default function Visualizer({
                           </div>
                         </>
                       )}
+                      </div>
                     </div>
                   )}
                   {!hasIndexedSummaryEditor && (

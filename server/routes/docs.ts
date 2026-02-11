@@ -10,8 +10,8 @@ import {
   htmlToPdf,
   markdownToHearingDecisionPdf,
   loadFirmInfo,
-  ExportOptions,
 } from "../lib/export";
+import type { ExportOptions, ExportStyleProfile } from "../lib/export";
 import type { DocxStyles } from "../lib/extract";
 import { requireCaseAccess } from "../lib/team-access";
 import {
@@ -26,8 +26,29 @@ import {
 
 const execAsync = promisify(exec);
 
+function isCourtCriticalDocumentType(documentType?: ExportOptions["documentType"]): boolean {
+  return documentType === "letter" || documentType === "hearing_decision";
+}
+
+function resolveStyleProfile(
+  documentType: ExportOptions["documentType"],
+  requested?: unknown
+): ExportStyleProfile {
+  if (requested === "court_safe" || requested === "template" || requested === "auto") {
+    if (requested !== "auto") return requested;
+  }
+  return isCourtCriticalDocumentType(documentType) ? "court_safe" : "template";
+}
+
 // Helper to load template styles from .pi_tool/template-styles.json
-async function loadTemplateStyles(firmRoot: string): Promise<DocxStyles | undefined> {
+async function loadTemplateStyles(
+  firmRoot: string,
+  styleProfile: ExportStyleProfile
+): Promise<DocxStyles | undefined> {
+  if (styleProfile === "court_safe") {
+    return undefined;
+  }
+
   try {
     const stylesPath = join(firmRoot, ".pi_tool", "template-styles.json");
     const content = await readFile(stylesPath, "utf-8");
@@ -234,6 +255,7 @@ app.post("/export", async (c) => {
     caseName,
     showLetterhead,
     showPageNumbers,
+    styleProfile,
   } = await c.req.json();
 
   if (!caseFolder || !sourcePath || !format) {
@@ -265,6 +287,7 @@ app.post("/export", async (c) => {
 
     // Infer document type from path if not provided
     const inferredType = documentType || inferTypeFromPath(sourcePath);
+    const resolvedStyleProfile = resolveStyleProfile(inferredType, styleProfile);
     console.log(`[Export] caseFolder=${caseFolder}, sourcePath=${sourcePath}, documentType=${inferredType}`);
 
     // Load firm info if firmRoot provided (or try parent of caseFolder)
@@ -273,7 +296,7 @@ app.post("/export", async (c) => {
     const firmInfo = await loadFirmInfo(firmInfoRoot);
 
     // Load template styles if available
-    const templateStyles = await loadTemplateStyles(firmInfoRoot);
+    const templateStyles = await loadTemplateStyles(firmInfoRoot, resolvedStyleProfile);
 
     // Build export options
     // Show letterhead by default for demands and letters, or if explicitly requested
@@ -288,6 +311,7 @@ app.post("/export", async (c) => {
       showLetterhead: shouldShowLetterhead,
       showPageNumbers: showPageNumbers ?? inferredType !== "memo",
       templateStyles,
+      styleProfile: resolvedStyleProfile,
     };
     console.log(`[Export] exportOptions: showLetterhead=${exportOptions.showLetterhead}, documentType=${inferredType}, hasFirmInfo=${!!exportOptions.firmInfo}`);
 
@@ -374,6 +398,7 @@ app.get("/download", async (c) => {
   const caseName = c.req.query("caseName");
   const showLetterhead = c.req.query("letterhead") !== "false";
   const showPageNumbers = c.req.query("pageNumbers") !== "false";
+  const styleProfile = c.req.query("styleProfile");
 
   if (!caseFolder || !docPath) {
     return c.json({ error: "case and path query params required" }, 400);
@@ -393,11 +418,12 @@ app.get("/download", async (c) => {
 
     // Infer document type and load firm info
     const documentType = inferTypeFromPath(docPath);
+    const resolvedStyleProfile = resolveStyleProfile(documentType, styleProfile);
     const firmInfoRoot = firmRoot || dirname(caseFolder);
     const firmInfo = await loadFirmInfo(firmInfoRoot);
 
     // Load template styles if available
-    const templateStyles = await loadTemplateStyles(firmInfoRoot);
+    const templateStyles = await loadTemplateStyles(firmInfoRoot, resolvedStyleProfile);
 
     // Show letterhead for demands and letters by default
     const shouldShowLetterhead = showLetterhead && (documentType === "demand" || documentType === "letter");
@@ -410,6 +436,7 @@ app.get("/download", async (c) => {
       showLetterhead: shouldShowLetterhead,
       showPageNumbers: showPageNumbers && documentType !== "memo",
       templateStyles,
+      styleProfile: resolvedStyleProfile,
     };
 
     switch (format) {
@@ -601,6 +628,7 @@ app.post("/approve", async (c) => {
     caseName,
     showLetterhead,
     showPageNumbers,
+    styleProfile,
   } = await c.req.json();
 
   if (!caseFolder || !draftPath) {
@@ -625,13 +653,14 @@ app.post("/approve", async (c) => {
 
     // 3. Infer document type and load firm info
     const documentType = inferTypeFromPath(draftPath);
+    const resolvedStyleProfile = resolveStyleProfile(documentType, styleProfile);
     const firmInfoRoot = firmRoot || dirname(caseFolder);
     const firmInfo = await loadFirmInfo(firmInfoRoot);
 
     const clientName = await resolveCaseName(caseFolder, caseName);
 
     // 4. Load template styles if available
-    const templateStyles = await loadTemplateStyles(firmInfoRoot);
+    const templateStyles = await loadTemplateStyles(firmInfoRoot, resolvedStyleProfile);
 
     // Build export options
     // Show letterhead for demands and letters by default
@@ -643,6 +672,7 @@ app.post("/approve", async (c) => {
       showLetterhead: shouldShowLetterhead,
       showPageNumbers: showPageNumbers ?? documentType !== "memo",
       templateStyles,
+      styleProfile: resolvedStyleProfile,
     };
 
     // 5. Ensure output directory exists

@@ -1,6 +1,6 @@
 import { readFile } from "fs/promises";
 import { resolve, sep } from "path";
-import { PDFDocument, PDFFont, PDFPage, StandardFonts, rgb } from "pdf-lib";
+import { PDFDocument, PDFFont, PDFPage, StandardFonts, degrees, rgb } from "pdf-lib";
 import { runPdftotext } from "./pdftotext";
 
 type SortBy = "none" | "date" | "title" | "path";
@@ -233,10 +233,17 @@ export async function buildEvidencePacket(
   let exhibitPageNumber = pageStampStart;
   for (const processed of processedDocs) {
     const sourcePdf = await PDFDocument.load(processed.pdfBytes);
-    const copiedPages = await pdf.copyPages(sourcePdf, sourcePdf.getPageIndices());
-    for (const page of copiedPages) {
-      pdf.addPage(page);
-      stampExhibitPageNumber(page, regularFont, `${pageStampPrefix}${exhibitPageNumber}`);
+    const embeddedPages = await pdf.embedPdf(sourcePdf, sourcePdf.getPageIndices());
+    for (let i = 0; i < embeddedPages.length; i++) {
+      const sourcePage = sourcePdf.getPage(i);
+      const { width, height } = sourcePage.getSize();
+      const sourceRotation = sourcePage.getRotation().angle;
+      const newPage = pdf.addPage([width, height]);
+      newPage.drawPage(embeddedPages[i], { x: 0, y: 0, width, height });
+      if (sourceRotation !== 0) {
+        newPage.setRotation(degrees(sourceRotation));
+      }
+      stampExhibitPageNumber(newPage, regularFont, `${pageStampPrefix}${exhibitPageNumber}`, sourceRotation);
       exhibitPageNumber += 1;
     }
   }
@@ -1022,16 +1029,54 @@ function formatTocDocumentLabel(entry: EvidencePacketTocEntry): string {
   return `${title} - ${date}`;
 }
 
-function stampExhibitPageNumber(page: PDFPage, font: PDFFont, label: string): void {
+function stampExhibitPageNumber(page: PDFPage, font: PDFFont, label: string, pageRotation = 0): void {
   const size = 11;
-  const { width } = page.getSize();
+  const { width, height } = page.getSize();
   const textWidth = font.widthOfTextAtSize(label, size);
+  const margin = 18;
+
+  // Normalize to 0, 90, 180, or 270.
+  const rotation = ((pageRotation % 360) + 360) % 360;
+
+  // For rotated pages the viewer applies /Rotate after rendering the content
+  // stream, so the stamp coordinates must be in the *unrotated* coordinate
+  // space at a position that maps to the displayed bottom-center.
+  let x: number;
+  let y: number;
+  let textRotate = degrees(0);
+
+  switch (rotation) {
+    case 90:
+      // Displayed bottom = unrotated right edge
+      x = width - margin;
+      y = (height - textWidth) / 2;
+      textRotate = degrees(90);
+      break;
+    case 180:
+      // Displayed bottom = unrotated top edge
+      x = (width + textWidth) / 2;
+      y = height - margin;
+      textRotate = degrees(180);
+      break;
+    case 270:
+      // Displayed bottom = unrotated left edge
+      x = margin;
+      y = (height + textWidth) / 2;
+      textRotate = degrees(-90);
+      break;
+    default:
+      x = (width - textWidth) / 2;
+      y = margin;
+      break;
+  }
+
   page.drawText(label, {
-    x: (width - textWidth) / 2,
-    y: 18,
+    x,
+    y,
     size,
     font,
     color: rgb(0, 0, 0),
+    rotate: textRotate,
   });
 }
 
