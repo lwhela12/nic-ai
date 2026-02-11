@@ -12,6 +12,7 @@ import { join, dirname, relative as pathRelative } from "path";
 import { execSync } from "child_process";
 import { loadSectionsByIds } from "../routes/knowledge";
 import { extractPdfText } from "./pdftotext";
+import { buildCaseMap, buildCaseMapPromptView } from "./case-map";
 
 // Lazy client creation - API key is set by auth middleware before requests
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -41,6 +42,8 @@ export interface DocGenResult {
   error?: string;
 }
 
+const INDEX_SLICE_MAX_CHARS = 12000;
+
 // Tool definitions for the document agent
 const DOC_TOOLS: Anthropic.Tool[] = [
   {
@@ -55,6 +58,24 @@ const DOC_TOOLS: Anthropic.Tool[] = [
         }
       },
       required: ["path"]
+    }
+  },
+  {
+    name: "read_index_slice",
+    description: "Read a bounded slice of .pi_tool/document_index.json for large cases. Use this for deeper detail when case map/index preview is not enough.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        offset: {
+          type: "number",
+          description: "Character offset into .pi_tool/document_index.json (0-based)."
+        },
+        length: {
+          type: "number",
+          description: "Number of characters to read (max 12000)."
+        }
+      },
+      required: ["offset"]
     }
   },
   {
@@ -147,6 +168,51 @@ async function loadCaseIndex(caseFolder: string): Promise<Record<string, any>> {
   } catch {
     return {};
   }
+}
+
+/**
+ * Build a bounded prompt view of case context for document generation.
+ * Uses case_map first, then includes a compact index preview.
+ */
+async function buildCasePromptContext(
+  caseFolder: string,
+  caseIndex: Record<string, any>
+): Promise<string> {
+  let caseMapData: Record<string, any>;
+  try {
+    const caseMapPath = join(caseFolder, ".pi_tool", "case_map.json");
+    const content = await readFile(caseMapPath, "utf-8");
+    caseMapData = JSON.parse(content);
+  } catch {
+    caseMapData = buildCaseMap(caseIndex);
+  }
+
+  const mapView = buildCaseMapPromptView(caseMapData as any, 50000);
+  const mapBlock = `CASE MAP:\n${mapView.text}${mapView.truncated ? "\n[NOTE: case_map truncated; use read_index_slice for deeper details.]" : ""}`;
+
+  const preview = { ...caseIndex };
+  if (preview.folders) {
+    for (const [folderName, folderData] of Object.entries(preview.folders) as [string, any][]) {
+      const files = Array.isArray(folderData) ? folderData : folderData?.files;
+      if (!Array.isArray(files)) continue;
+      preview.folders[folderName] = {
+        files: files.slice(0, 140).map((file: any) => ({
+          filename: file.filename,
+          type: file.type,
+          date: file.date,
+          key_info: typeof file.key_info === "string" ? file.key_info.slice(0, 220) : file.key_info,
+        })),
+        truncated: files.length > 140,
+      };
+    }
+  }
+
+  let previewJson = JSON.stringify(preview, null, 2);
+  if (previewJson.length > 22000) {
+    previewJson = `${previewJson.slice(0, 22000)}\n...\n[NOTE: Index preview truncated; use read_index_slice for exact details.]`;
+  }
+
+  return `${mapBlock}\n\nCASE INDEX PREVIEW:\n${previewJson}`;
 }
 
 /**
@@ -290,6 +356,31 @@ async function executeTool(
 
         const content = await readFile(filePath, "utf-8");
         return { result: content.slice(0, 20000) };
+      }
+
+      case "read_index_slice": {
+        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const content = await readFile(indexPath, "utf-8");
+
+        const offsetRaw = Number(toolInput.offset);
+        const lengthRaw = toolInput.length === undefined ? INDEX_SLICE_MAX_CHARS : Number(toolInput.length);
+        const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? Math.floor(offsetRaw) : 0;
+        const length = Number.isFinite(lengthRaw) && lengthRaw > 0
+          ? Math.min(Math.floor(lengthRaw), INDEX_SLICE_MAX_CHARS)
+          : INDEX_SLICE_MAX_CHARS;
+        const end = Math.min(content.length, offset + length);
+        const slice = content.slice(offset, end);
+
+        return {
+          result: JSON.stringify({
+            total_chars: content.length,
+            offset,
+            end,
+            has_more: end < content.length,
+            next_offset: end < content.length ? end : null,
+            slice,
+          }),
+        };
       }
 
       case "glob": {
@@ -515,13 +606,14 @@ ${templates}
 
 ## INSTRUCTIONS
 
-1. First, review the case index to understand the case
-2. If you need more detail on specific documents, use read_file to review them
-3. Select the most appropriate template for this document
-4. Read the template to understand its structure and requirements
-5. Draft the document following the template structure
-6. Fill in all placeholders with actual case data
-7. Use write_draft to save the final document
+1. First, review the case map/index preview to understand the case
+2. If you need deeper detail from document_index.json, use read_index_slice in chunks
+3. If you need more detail on specific documents, use read_file to review them
+4. Select the most appropriate template for this document
+5. Read the template to understand its structure and requirements
+6. Draft the document following the template structure
+7. Fill in all placeholders with actual case data
+8. Use write_draft to save the final document
 
 ## DOCUMENT-SPECIFIC REQUIREMENTS
 
@@ -538,6 +630,7 @@ IMPORTANT:
 ## AVAILABLE TOOLS
 
 - read_file: Read any file in the case folder (handles PDFs automatically)
+- read_index_slice: Read document_index.json in bounded chunks for very large cases
 - glob: Find files matching a pattern (e.g., 'Medical/*.pdf')
 - grep: Search for text across files
 - list_folder: List directory contents
@@ -565,17 +658,18 @@ export async function* generateDocument(
     loadAllTemplates(firmRoot),
     loadFirmConfig(firmRoot)
   ]);
+  const caseContext = await buildCasePromptContext(caseFolder, caseIndex);
 
   const systemPrompt = buildSystemPrompt(docType, knowledge, templates, firmConfig);
 
   // Build initial user message with case context
-  const userMessage = `CASE INDEX:
-${JSON.stringify(caseIndex, null, 2)}
+  const userMessage = `CASE CONTEXT:
+${caseContext}
 
 USER REQUEST:
 ${userPrompt}
 
-Please generate the requested document. Start by reviewing the case information above, then select and read the appropriate template, and finally draft and save the document.`;
+Please generate the requested document. Start by reviewing the case context above, then select and read the appropriate template, and finally draft and save the document.`;
 
   const messages: Anthropic.MessageParam[] = [
     { role: "user", content: userMessage }

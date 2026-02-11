@@ -673,10 +673,16 @@ app.post("/chat-v2", async (c) => {
   }));
 
   return streamSSE(c, async (stream) => {
+    let keepalive: ReturnType<typeof setInterval> | null = null;
     try {
       let fullResponse = "";
       const authEmail = c.get("authEmail");
       const lockOwner = typeof authEmail === "string" && authEmail ? `user:${authEmail.toLowerCase()}` : undefined;
+      keepalive = setInterval(() => {
+        stream.writeSSE({
+          data: JSON.stringify({ type: "heartbeat", ts: Date.now() }),
+        }).catch(() => {});
+      }, 15000);
 
       for await (const event of directChat(caseFolder, message, chatHistory, {
         lockOwner,
@@ -727,6 +733,8 @@ app.post("/chat-v2", async (c) => {
               success: true,
               usage: event.usage,
               filePath: event.filePath,
+              incomplete: event.incomplete,
+              reason: event.reason,
             }),
           });
         }
@@ -739,6 +747,8 @@ app.post("/chat-v2", async (c) => {
           error: error instanceof Error ? error.message : String(error),
         }),
       });
+    } finally {
+      if (keepalive) clearInterval(keepalive);
     }
   });
 });

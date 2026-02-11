@@ -149,6 +149,28 @@ const TOOLS: Anthropic.Tool[] = [
     }
   },
   {
+    name: "update_case_summary",
+    description: "Update the canonical case summary fields in document_index.json. Prefer this over update_index when editing narrative summary or phase.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        case_summary: {
+          type: "string",
+          description: "The narrative summary text to save to summary.case_summary."
+        },
+        case_phase: {
+          type: "string",
+          description: "Optional current phase to save to case_phase."
+        },
+        note: {
+          type: "string",
+          description: "Optional audit note for why the summary was updated."
+        }
+      },
+      required: ["case_summary"]
+    }
+  },
+  {
     name: "generate_document",
     description: "Delegate to a specialized agent to draft a formal document. Use this when the user asks you to write, draft, create, or generate a document like a demand letter, case memo, settlement calculation, formal letter, or a hearing Decision & Order. The agent has access to templates and will create a complete, professional document.",
     input_schema: {
@@ -1378,6 +1400,41 @@ async function executeTool(
         return `Updated ${toolInput.field_path} from "${oldValue}" to "${toolInput.value}"`;
       }
 
+      case "update_case_summary": {
+        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexContent = await readFile(indexPath, "utf-8");
+        const index = JSON.parse(indexContent);
+
+        if (!index.summary || typeof index.summary !== "object") {
+          index.summary = {};
+        }
+
+        const previousSummary = typeof index.summary.case_summary === "string"
+          ? index.summary.case_summary
+          : "";
+
+        index.summary.case_summary = String(toolInput.case_summary || "").trim();
+
+        if (typeof toolInput.case_phase === "string" && toolInput.case_phase.trim()) {
+          index.case_phase = toolInput.case_phase.trim();
+        }
+
+        if (!Array.isArray(index.case_notes)) {
+          index.case_notes = [];
+        }
+        index.case_notes.push({
+          id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          content: toolInput.note || "Updated case summary via chat",
+          field_updated: "summary.case_summary",
+          previous_value: previousSummary,
+          source: "chat_summary_update",
+          createdAt: new Date().toISOString(),
+        });
+
+        await saveIndexAndMap(caseFolder, indexPath, index);
+        return `Updated summary.case_summary (${index.summary.case_summary.length} chars)${index.case_phase ? ` and case_phase=${index.case_phase}` : ""}`;
+      }
+
       case "update_file_entry": {
         const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
@@ -1820,37 +1877,22 @@ async function buildContext(caseFolder: string): Promise<string> {
     const manifest = JSON.parse(await readFile(knowledgePath, "utf-8"));
     parts.push(`\n## PRACTICE KNOWLEDGE\nArea: ${manifest.practiceArea} (${manifest.jurisdiction})`);
 
-    // Load key knowledge sections (abbreviated for general context) and include
-    // packet/hearing rules verbatim so the agent can apply them without reformatting.
+    // Load full knowledge sections for maximum legal context fidelity.
     if (manifest.sections) {
-      const knowledgeSummary: string[] = [];
-      const packetRuleSections: string[] = [];
+      const knowledgeSections: string[] = [];
       for (const section of manifest.sections) {
         try {
           const sectionFilename = normalizeSectionFilename(section);
           if (!sectionFilename) continue;
           const sectionPath = join(firmRoot, ".pi_tool", "knowledge", sectionFilename);
           const content = await readFile(sectionPath, "utf-8");
-          const sectionLabel = `${section.id || ""} ${section.title || ""}`.toLowerCase();
-          const contentSnippet = content.slice(0, 4000).toLowerCase();
-          const isPacketRules =
-            /evidence|hearing|packet|exhibit|document index/.test(sectionLabel) ||
-            /evidence packet|hearing packet|document index|claimant index|exhibit order|h\.?o\.|hearing officer/.test(contentSnippet);
-
-          if (isPacketRules) {
-            packetRuleSections.push(`### ${section.title}\n${content}`);
-          } else if (knowledgeSummary.length < 5) {
-            knowledgeSummary.push(`### ${section.title}\n${content.slice(0, 500)}${content.length > 500 ? '...' : ''}`);
-          }
+          knowledgeSections.push(`### ${section.title}\n${content}`);
         } catch {
           // Skip unreadable sections
         }
       }
-      if (knowledgeSummary.length > 0) {
-        parts.push(knowledgeSummary.join("\n\n"));
-      }
-      if (packetRuleSections.length > 0) {
-        parts.push(`\n## EVIDENCE PACKET RULES (VERBATIM)\n${packetRuleSections.join("\n\n---\n\n")}`);
+      if (knowledgeSections.length > 0) {
+        parts.push(`\n## PRACTICE KNOWLEDGE (FULL)\n${knowledgeSections.join("\n\n---\n\n")}`);
       }
     }
   } catch {
@@ -1900,6 +1942,7 @@ const BASE_SYSTEM_PROMPT = `You are a helpful legal assistant for a Nevada injur
    For very large indexes, use read_index_slice to page through .pi_tool/document_index.json in chunks.
 
 3. **Update Case Data**: Use update_index when the user provides corrections or new information about top-level case fields (e.g., client name, DOB, case phase, policy limits).
+   Use update_case_summary when updating the narrative case summary.
 
 4. **Re-Extract File Data**: Use update_file_entry when the user asks you to re-read a document and update its entry in the index. This updates a specific file within a folder — its key_info, type, date, extracted_data, and issues.
 
@@ -1949,6 +1992,16 @@ Use this tool when the user asks you to re-read a document and update the index 
 - Include key_info (a comprehensive summary), type, date, and extracted_data
 - The folder and filename must match EXACTLY what's in the index (case-sensitive)
 - Set issues to null if the re-extraction was successful
+
+## WHEN TO USE update_case_summary
+
+Use this tool when the user asks to create, revise, or replace the case summary narrative.
+
+Canonical write locations:
+- summary.case_summary for narrative summary text
+- case_phase for current lifecycle phase (optional)
+
+Prefer this tool over update_index for case summary updates so the write target is explicit and consistent.
 
 7. **Create Document Panel Views**: When the user asks to show a specific subset of documents in the panel (for example medical records, provider-specific notes, hearing notices, chronological sets), use create_document_view with explicit paths from the index.
 
@@ -2054,7 +2107,7 @@ export async function* directChat(
   message: string,
   history: ChatMessage[] = [],
   options?: { lockOwner?: string; lockDisplayName?: string }
-): AsyncGenerator<{ type: string; content?: string; tool?: string; done?: boolean; usage?: any; filePath?: string; view?: AgentDocumentView }> {
+): AsyncGenerator<{ type: string; content?: string; tool?: string; done?: boolean; usage?: any; filePath?: string; view?: AgentDocumentView; incomplete?: boolean; reason?: string }> {
 
   // Build context and include it in the system prompt
   const context = await buildContext(caseFolder);
@@ -2090,9 +2143,10 @@ export async function* directChat(
   }
 
   // Agentic loop - supports multiple rounds of tool calls
-  const MAX_TOOL_ITERATIONS = 8;
+  const MAX_TOOL_ITERATIONS = 16;
   let iterations = 0;
   let generatedFilePath: string | undefined;
+  let hitIterationLimit = false;
 
   try {
     while (iterations < MAX_TOOL_ITERATIONS) {
@@ -2279,7 +2333,21 @@ export async function* directChat(
     });
     }
 
-    yield { type: "done", done: true, filePath: generatedFilePath };
+    if (iterations >= MAX_TOOL_ITERATIONS) {
+      hitIterationLimit = true;
+      yield {
+        type: "status",
+        content: `Stopped after ${MAX_TOOL_ITERATIONS} tool steps to prevent runaway execution. Ask me to continue and I'll resume from here.`,
+      };
+    }
+
+    yield {
+      type: "done",
+      done: true,
+      filePath: generatedFilePath,
+      incomplete: hitIterationLimit,
+      reason: hitIterationLimit ? "max_tool_iterations" : undefined,
+    };
   } finally {
     if (lockResult.acquired) {
       await releaseCaseLock(caseFolder, lockOwner);
