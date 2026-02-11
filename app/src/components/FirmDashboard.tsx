@@ -250,6 +250,10 @@ const ClipboardDocumentListIcon = () => (
   </svg>
 )
 
+// Module-level cache — survives component unmount/remount so the dashboard
+// appears instantly when navigating back from a case view.
+let firmDataCache: { root: string; data: FirmData; fetchedAt: number } | null = null
+
 export default function FirmDashboard({
   apiUrl, firmRoot, practiceArea, onSelectCase, onChangeFirmRoot, onChangePracticeAreaForFolder, userEmail, onLogout,
   todos, onDrawerOpen, onTodosUpdated,
@@ -266,8 +270,15 @@ export default function FirmDashboard({
 }: Props) {
   const isWC = practiceArea === 'Workers\' Compensation'
   const firmCasesVersionRef = useRef(firmCasesVersion)
-  const [firmData, setFirmData] = useState<FirmData | null>(null)
-  const [loading, setLoading] = useState(true)
+  const hasCachedData = firmDataCache?.root === firmRoot
+  const [firmData, setFirmDataState] = useState<FirmData | null>(
+    hasCachedData ? firmDataCache!.data : null
+  )
+  const setFirmData = useCallback((data: FirmData) => {
+    setFirmDataState(data)
+    firmDataCache = { root: firmRoot, data, fetchedAt: Date.now() }
+  }, [firmRoot])
+  const [loading, setLoading] = useState(!hasCachedData)
   const [error, setError] = useState<string | null>(null)
   const [sortField, setSortField] = useState<SortField>('sol')
   const [filterPhase, setFilterPhase] = useState<string>('all')
@@ -416,7 +427,10 @@ export default function FirmDashboard({
   }
 
   const loadCases = useCallback(async () => {
-    setLoading(true)
+    // Only show loading spinner if we have no data to display yet
+    if (!firmDataCache || firmDataCache.root !== firmRoot) {
+      setLoading(true)
+    }
     setError(null)
     try {
       const res = await fetch(`${apiUrl}/api/firm/cases?root=${encodeURIComponent(firmRoot)}`)
@@ -428,7 +442,7 @@ export default function FirmDashboard({
     } finally {
       setLoading(false)
     }
-  }, [apiUrl, firmRoot, isWC])
+  }, [apiUrl, firmRoot, isWC, setFirmData])
 
   const loadTeamMembers = useCallback(async () => {
     try {
