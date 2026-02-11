@@ -280,13 +280,13 @@ export default function ContactCard({
   const parsePolicyLimits = (): { '3P'?: PolicyLimitDetail; '1P'?: PolicyLimitDetail } => {
     if (!policyLimits) return {}
 
-    let limits = policyLimits
+    let limits: PolicyLimits | string = policyLimits
     if (typeof limits === 'string') {
       if (limits.startsWith('{')) {
         try {
-          limits = JSON.parse(limits)
+          limits = JSON.parse(limits) as PolicyLimits
         } catch {
-          return { '3P': { carrier: 'Unknown', bodily_injury: limits } }
+          return { '3P': { carrier: 'Unknown', bodily_injury: limits as string } }
         }
       } else {
         return { '3P': { carrier: 'Unknown', bodily_injury: limits } }

@@ -20,7 +20,7 @@ export default function UserNotes({ isOpen, onClose, caseFolder, apiUrl }: Props
   const [editorText, setEditorText] = useState('')
   const [showEditor, setShowEditor] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
-  const [isDirty, setIsDirty] = useState(false)
+  const [, setIsDirty] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const fetchNotes = useCallback(async () => {
