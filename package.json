@@ -1,6 +1,6 @@
 {
   "name": "claude-pi",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Personal Injury Case Management powered by Claude",
   "type": "module",
   "main": "dist-electron/main.js",

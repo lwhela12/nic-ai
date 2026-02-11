@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import type { PacketDocument, PacketFrontMatter, PacketPiiResult, PacketState } from '../types/packet'
 
 interface Props {

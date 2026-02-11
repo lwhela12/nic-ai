@@ -244,7 +244,8 @@ function deriveContactFromFiles(folders: Record<string, DocumentFolder>): {
   const addresses: Record<string, { obj: Record<string, string>; count: number }> = {}
 
   for (const folder of Object.values(folders)) {
-    for (const file of folder.files) {
+    for (const file of getFolderFiles(folder)) {
+      if (typeof file === 'string') continue
       const ed = file.extracted_data as Record<string, unknown> | undefined
       if (!ed) continue
 
