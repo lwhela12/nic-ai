@@ -110,6 +110,20 @@ const TOOLS: Anthropic.Tool[] = [
     }
   },
   {
+    name: "rebuild_case_map",
+    description: "Rebuild .pi_tool/case_map.json from existing .pi_tool/document_index.json without re-running extraction.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        note: {
+          type: "string",
+          description: "Optional note explaining why the case map is being rebuilt."
+        }
+      },
+      required: []
+    }
+  },
+  {
     name: "write_file",
     description: "Write content to a file in the case folder. Use for creating documents, memos, or updating files.",
     input_schema: {
@@ -1162,6 +1176,35 @@ async function executeTool(
         });
       }
 
+      case "rebuild_case_map": {
+        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const content = await readFile(indexPath, "utf-8");
+        const index = JSON.parse(content);
+        const mapPath = join(caseFolder, ".pi_tool", "case_map.json");
+        const caseMap = buildCaseMap(index);
+        await writeFile(mapPath, JSON.stringify(caseMap, null, 2));
+
+        if (!Array.isArray(index.case_notes)) {
+          index.case_notes = [];
+        }
+        index.case_notes.push({
+          id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          content: toolInput.note || "Rebuilt case_map.json from existing document_index.json",
+          field_updated: ".pi_tool/case_map.json",
+          source: "case_map_rebuild",
+          createdAt: new Date().toISOString(),
+        });
+        await saveIndexAndMap(caseFolder, indexPath, index);
+
+        return JSON.stringify({
+          success: true,
+          case_map_path: ".pi_tool/case_map.json",
+          total_documents: caseMap.overview.total_documents,
+          total_facts: caseMap.overview.total_facts,
+          conflict_count: caseMap.overview.conflict_count,
+        });
+      }
+
       case "write_file": {
         const filePath = join(caseFolder, toolInput.path);
         if (!filePath.startsWith(caseFolder)) {
@@ -1941,6 +1984,8 @@ const BASE_SYSTEM_PROMPT = `You are a helpful legal assistant for a Nevada injur
 2. **Read Files**: Use read_file for quick text lookups — reading case_map/index files, checking a text/JSON file, or grabbing a snippet. For PDFs this uses basic text extraction only.
    For very large indexes, use read_index_slice to page through .pi_tool/document_index.json in chunks.
 
+2b. **Rebuild Case Map**: Use rebuild_case_map to regenerate .pi_tool/case_map.json from the current document_index.json when map data is missing or stale. This does NOT re-run document extraction.
+
 3. **Update Case Data**: Use update_index when the user provides corrections or new information about top-level case fields (e.g., client name, DOB, case phase, policy limits).
    Use update_case_summary when updating the narrative case summary.
 
@@ -1976,6 +2021,10 @@ Use read_file instead for:
 - Reading case map (.pi_tool/case_map.json) or small index files
 - Quick lookups on text or JSON files
 - Files you already know are simple text
+
+Use rebuild_case_map when:
+- A legacy case has no .pi_tool/case_map.json
+- The case map appears stale after major index changes
 
 ## WHEN TO USE update_file_entry
 
