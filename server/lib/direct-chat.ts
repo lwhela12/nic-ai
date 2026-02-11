@@ -25,6 +25,7 @@ import {
 import { loadFirmInfo } from "./export";
 import { applyResolvedFieldToSummary } from "./index-summary-sync";
 import { extractPdfText } from "./pdftotext";
+import { buildCaseMap, buildCaseMapPromptView } from "./case-map";
 
 // Client creation - recreated when API key changes
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -71,6 +72,9 @@ interface AgentDocumentView {
   invalidPaths?: string[];
 }
 
+const CASE_CONTEXT_MAX_CHARS = 80000;
+const INDEX_SLICE_MAX_CHARS = 12000;
+
 // Tool definitions
 const TOOLS: Anthropic.Tool[] = [
   {
@@ -85,6 +89,24 @@ const TOOLS: Anthropic.Tool[] = [
         }
       },
       required: ["path"]
+    }
+  },
+  {
+    name: "read_index_slice",
+    description: "Read a bounded slice of .pi_tool/document_index.json for very large cases. Use this when you need more detail than the case map provides.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        offset: {
+          type: "number",
+          description: "Character offset into .pi_tool/document_index.json (0-based)."
+        },
+        length: {
+          type: "number",
+          description: "Number of characters to read (max 12000)."
+        }
+      },
+      required: ["offset"]
     }
   },
   {
@@ -1051,6 +1073,17 @@ async function buildPacketFromInputs(
   };
 }
 
+async function saveIndexAndMap(
+  caseFolder: string,
+  indexPath: string,
+  index: Record<string, any>
+): Promise<void> {
+  await writeFile(indexPath, JSON.stringify(index, null, 2));
+  const caseMapPath = join(caseFolder, ".pi_tool", "case_map.json");
+  const caseMap = buildCaseMap(index);
+  await writeFile(caseMapPath, JSON.stringify(caseMap, null, 2));
+}
+
 // Execute a tool and return result
 async function executeTool(
   toolName: string,
@@ -1082,6 +1115,29 @@ async function executeTool(
 
         const content = await readFile(filePath, "utf-8");
         return content.slice(0, 15000); // Limit output to avoid context overflow
+      }
+
+      case "read_index_slice": {
+        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const content = await readFile(indexPath, "utf-8");
+
+        const offsetRaw = Number(toolInput.offset);
+        const lengthRaw = toolInput.length === undefined ? INDEX_SLICE_MAX_CHARS : Number(toolInput.length);
+        const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? Math.floor(offsetRaw) : 0;
+        const length = Number.isFinite(lengthRaw) && lengthRaw > 0
+          ? Math.min(Math.floor(lengthRaw), INDEX_SLICE_MAX_CHARS)
+          : INDEX_SLICE_MAX_CHARS;
+        const end = Math.min(content.length, offset + length);
+        const slice = content.slice(offset, end);
+
+        return JSON.stringify({
+          total_chars: content.length,
+          offset,
+          end,
+          has_more: end < content.length,
+          next_offset: end < content.length ? end : null,
+          slice,
+        });
       }
 
       case "write_file": {
@@ -1318,7 +1374,7 @@ async function executeTool(
           note: toolInput.note || "Updated via chat"
         });
 
-        await writeFile(indexPath, JSON.stringify(index, null, 2));
+        await saveIndexAndMap(caseFolder, indexPath, index);
         return `Updated ${toolInput.field_path} from "${oldValue}" to "${toolInput.value}"`;
       }
 
@@ -1374,7 +1430,7 @@ async function executeTool(
           createdAt: new Date().toISOString()
         });
 
-        await writeFile(indexPath, JSON.stringify(index, null, 2));
+        await saveIndexAndMap(caseFolder, indexPath, index);
         return `Successfully updated ${updatedFields.join(", ")} for ${toolInput.folder}/${toolInput.filename}`;
       }
 
@@ -1540,7 +1596,7 @@ async function executeTool(
         index.errata = errata;
         index.case_notes = caseNotes;
 
-        await writeFile(indexPath, JSON.stringify(index, null, 2));
+        await saveIndexAndMap(caseFolder, indexPath, index);
 
         return JSON.stringify({
           success: resolved.length > 0,
@@ -1674,7 +1730,7 @@ async function executeTool(
         summaryUpdated = applyResolvedFieldToSummary(index, resolvedField, resolved_value) || summaryUpdated;
 
         // Write updated index
-        await writeFile(indexPath, JSON.stringify(index, null, 2));
+        await saveIndexAndMap(caseFolder, indexPath, index);
 
         return JSON.stringify({
           success: true,
@@ -1716,27 +1772,44 @@ async function buildContext(caseFolder: string): Promise<string> {
     const indexContent = await readFile(indexPath, "utf-8");
     const indexData = JSON.parse(indexContent);
 
-    // Trim index to manageable size
-    const trimmed = { ...indexData };
+    let caseMapData: Record<string, any>;
+    try {
+      const caseMapPath = join(caseFolder, ".pi_tool", "case_map.json");
+      const caseMapContent = await readFile(caseMapPath, "utf-8");
+      caseMapData = JSON.parse(caseMapContent);
+    } catch {
+      caseMapData = buildCaseMap(indexData);
+    }
 
-    // Remove verbose extracted_data from folders, keep key_info
+    const caseMapView = buildCaseMapPromptView(caseMapData as any, 55000);
+    const mapNote = caseMapView.truncated
+      ? "\n[NOTE: case_map shown in truncated view; use read_index_slice for more detail.]"
+      : "";
+    parts.push(`\n## CASE MAP\n${caseMapView.text}${mapNote}`);
+
+    // Include an index preview for direct field lookups while keeping prompt bounded.
+    const trimmed = { ...indexData };
     if (trimmed.folders) {
-      for (const folderData of Object.values(trimmed.folders) as any[]) {
+      for (const [folderName, folderData] of Object.entries(trimmed.folders) as [string, any][]) {
         const files = Array.isArray(folderData) ? folderData : folderData?.files;
-        if (Array.isArray(files)) {
-          for (const file of files) {
-            delete file.extracted_data;
-            delete file.extracted_text;
-            delete file.full_text;
-            if (file.key_info && file.key_info.length > 300) {
-              file.key_info = file.key_info.slice(0, 300) + "...";
-            }
-          }
-        }
+        if (!Array.isArray(files)) continue;
+        trimmed.folders[folderName] = {
+          files: files.slice(0, 120).map((file: any) => ({
+            filename: file.filename,
+            type: file.type,
+            date: file.date,
+            key_info: typeof file.key_info === "string" ? file.key_info.slice(0, 220) : file.key_info,
+          })),
+          truncated: files.length > 120,
+        };
       }
     }
 
-    parts.push(`\n## CASE INDEX\n${JSON.stringify(trimmed, null, 2)}`);
+    let indexPreview = JSON.stringify(trimmed, null, 2);
+    if (indexPreview.length > 22000) {
+      indexPreview = `${indexPreview.slice(0, 22000)}\n...\n[NOTE: Index preview truncated. Use read_index_slice for more.]`;
+    }
+    parts.push(`\n## CASE INDEX PREVIEW\n${indexPreview}`);
   } catch {
     parts.push("\n## CASE INDEX\nNo case index found. Case may need to be indexed first.");
   }
@@ -1800,7 +1873,11 @@ async function buildContext(caseFolder: string): Promise<string> {
 
   parts.push(`\n## WORKING DIRECTORY\n${caseFolder}`);
 
-  return parts.join("\n");
+  let context = parts.join("\n");
+  if (context.length > CASE_CONTEXT_MAX_CHARS) {
+    context = `${context.slice(0, CASE_CONTEXT_MAX_CHARS)}\n...\n[NOTE: Context truncated to stay within prompt budget. Use read_index_slice for deep index access.]`;
+  }
+  return context;
 }
 
 // Document type descriptions for user feedback
@@ -1819,7 +1896,8 @@ const BASE_SYSTEM_PROMPT = `You are a helpful legal assistant for a Nevada injur
 
 1. **Answer Questions**: Use the case index and your knowledge to answer questions about cases, injuries, treatments, and PI law.
 
-2. **Read Files**: Use read_file for quick text lookups — reading the index, checking a text/JSON file, or grabbing a snippet. For PDFs this uses basic text extraction only.
+2. **Read Files**: Use read_file for quick text lookups — reading case_map/index files, checking a text/JSON file, or grabbing a snippet. For PDFs this uses basic text extraction only.
+   For very large indexes, use read_index_slice to page through .pi_tool/document_index.json in chunks.
 
 3. **Update Case Data**: Use update_index when the user provides corrections or new information about top-level case fields (e.g., client name, DOB, case phase, policy limits).
 
@@ -1852,7 +1930,7 @@ Use read_document when the user asks about a specific document's contents, espec
 - "Can you read the police report?"
 
 Use read_file instead for:
-- Reading the document index (.pi_tool/document_index.json)
+- Reading case map (.pi_tool/case_map.json) or small index files
 - Quick lookups on text or JSON files
 - Files you already know are simple text
 

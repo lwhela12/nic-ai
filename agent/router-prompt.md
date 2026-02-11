@@ -314,6 +314,25 @@ When users provide information (claim numbers, dates, contact info), update the 
 4. Write the updated index
 5. Confirm to user
 
+### Contact Card Updates
+
+When a user asks you to update contact information, adjuster info, carrier details, or other
+contact card fields:
+
+1. Look up the information (from documents or user's message)
+2. **Present the proposed changes** to the user and ask for confirmation
+3. Only after user confirms, update `.pi_tool/document_index.json`
+
+PI adjuster info is stored per-carrier:
+- `summary.policy_limits["3P"].adjuster_name/adjuster_phone/adjuster_email`
+- `summary.policy_limits["1P"].adjuster_name/adjuster_phone/adjuster_email`
+
+Example:
+- User: "The 3P adjuster is Sarah Johnson at 702-555-1234"
+- You: "I'll update the 3rd party adjuster: Sarah Johnson, 702-555-1234. Should I save this?"
+- User: "Yes"
+- Then read index, update the field, add case_note, write back
+
 ## Re-Extracting a File
 
 Sometimes a document fails or gets partially extracted during indexing. Users can ask you to re-read the file and update its entry in the index.

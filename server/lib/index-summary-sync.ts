@@ -105,6 +105,24 @@ export function applyResolvedFieldToSummary(index: any, field: string, resolvedV
     return true;
   }
 
+  // PI adjuster fields (stored inside policy_limits)
+  if (f === "adjuster_name_1p" || f === "adjuster_phone_1p" || f === "adjuster_email_1p") {
+    const policyLimits = ensureObject(index.summary, "policy_limits");
+    const party = ensureObject(policyLimits, "1P");
+    if (!party.carrier) party.carrier = "Unknown";
+    const adjField = f.replace("_1p", ""); // adjuster_name, adjuster_phone, adjuster_email
+    party[adjField] = value;
+    return true;
+  }
+  if (f === "adjuster_name_3p" || f === "adjuster_phone_3p" || f === "adjuster_email_3p") {
+    const policyLimits = ensureObject(index.summary, "policy_limits");
+    const party = ensureObject(policyLimits, "3P");
+    if (!party.carrier) party.carrier = "Unknown";
+    const adjField = f.replace("_3p", ""); // adjuster_name, adjuster_phone, adjuster_email
+    party[adjField] = value;
+    return true;
+  }
+
   if (f === "policy_limits_1p" || f === "policy_limits_3p") {
     const party = f.endsWith("_1p") ? "1P" : "3P";
     const policyLimits = ensureObject(index.summary, "policy_limits");

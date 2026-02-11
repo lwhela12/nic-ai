@@ -65,6 +65,9 @@ export interface PolicyLimitDetail {
   medical_payments?: string;
   um_uim?: string;
   property_damage?: string;
+  adjuster_name?: string;
+  adjuster_phone?: string;
+  adjuster_email?: string;
 }
 
 // Final summary structure
@@ -396,6 +399,9 @@ function parsePolicyLimitObject(value: string): {
   medical_payments?: string;
   um_uim?: string;
   property_damage?: string;
+  adjuster_name?: string;
+  adjuster_phone?: string;
+  adjuster_email?: string;
 } | null {
   if (!value || value === "UNCERTAIN") return null;
 
@@ -403,13 +409,17 @@ function parsePolicyLimitObject(value: string): {
   try {
     const parsed = JSON.parse(value);
     if (typeof parsed === "object" && parsed !== null) {
-      return {
+      const result: ReturnType<typeof parsePolicyLimitObject> = {
         carrier: typeof parsed.carrier === "string" ? parsed.carrier : undefined,
         bodily_injury: typeof parsed.bodily_injury === "string" ? parsed.bodily_injury : undefined,
         medical_payments: typeof parsed.medical_payments === "string" ? parsed.medical_payments : undefined,
         um_uim: typeof parsed.um_uim === "string" ? parsed.um_uim : undefined,
         property_damage: typeof parsed.property_damage === "string" ? parsed.property_damage : undefined,
       };
+      if (typeof parsed.adjuster_name === "string") result!.adjuster_name = parsed.adjuster_name;
+      if (typeof parsed.adjuster_phone === "string") result!.adjuster_phone = parsed.adjuster_phone;
+      if (typeof parsed.adjuster_email === "string") result!.adjuster_email = parsed.adjuster_email;
+      return result;
     }
   } catch {
     // Not JSON - treat as simple limits string
@@ -433,6 +443,9 @@ function buildPolicyLimits(hypergraph: Record<string, HypergraphField>): Record<
   medical_payments?: string;
   um_uim?: string;
   property_damage?: string;
+  adjuster_name?: string;
+  adjuster_phone?: string;
+  adjuster_email?: string;
 }> {
   const limits: Record<string, {
     carrier: string;
@@ -440,6 +453,9 @@ function buildPolicyLimits(hypergraph: Record<string, HypergraphField>): Record<
     medical_payments?: string;
     um_uim?: string;
     property_damage?: string;
+    adjuster_name?: string;
+    adjuster_phone?: string;
+    adjuster_email?: string;
   }> = {};
 
   // Try new structured fields first
@@ -468,6 +484,37 @@ function buildPolicyLimits(hypergraph: Record<string, HypergraphField>): Record<
       if (parsed) {
         limits["3P"] = { carrier: parsed.carrier || "Unknown", ...parsed };
       }
+    }
+  }
+
+  // Merge adjuster info from hypergraph into policy limits
+  if (limits["1P"]) {
+    const adj1pName = mostLikelyFieldValue(hypergraph["adjuster_name_1p"]);
+    const adj1pPhone = mostLikelyFieldValue(hypergraph["adjuster_phone_1p"]);
+    const adj1pEmail = mostLikelyFieldValue(hypergraph["adjuster_email_1p"]);
+    if (adj1pName) limits["1P"].adjuster_name = adj1pName;
+    if (adj1pPhone) limits["1P"].adjuster_phone = adj1pPhone;
+    if (adj1pEmail) limits["1P"].adjuster_email = adj1pEmail;
+  }
+  if (limits["3P"]) {
+    const adj3pName = mostLikelyFieldValue(hypergraph["adjuster_name_3p"]);
+    const adj3pPhone = mostLikelyFieldValue(hypergraph["adjuster_phone_3p"]);
+    const adj3pEmail = mostLikelyFieldValue(hypergraph["adjuster_email_3p"]);
+    if (adj3pName) limits["3P"].adjuster_name = adj3pName;
+    if (adj3pPhone) limits["3P"].adjuster_phone = adj3pPhone;
+    if (adj3pEmail) limits["3P"].adjuster_email = adj3pEmail;
+    // Fallback: top-level adjuster fields default to 3P if not already set
+    if (!limits["3P"].adjuster_name) {
+      const topName = mostLikelyFieldValue(hypergraph["adjuster_name"]);
+      if (topName) limits["3P"].adjuster_name = topName;
+    }
+    if (!limits["3P"].adjuster_phone) {
+      const topPhone = mostLikelyFieldValue(hypergraph["adjuster_phone"]);
+      if (topPhone) limits["3P"].adjuster_phone = topPhone;
+    }
+    if (!limits["3P"].adjuster_email) {
+      const topEmail = mostLikelyFieldValue(hypergraph["adjuster_email"]);
+      if (topEmail) limits["3P"].adjuster_email = topEmail;
     }
   }
 

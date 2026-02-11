@@ -894,6 +894,132 @@ app.post("/resolve", async (c) => {
   }
 });
 
+// Update contact card fields in the document index
+app.patch("/contact-card", async (c) => {
+  const body = await c.req.json();
+  const caseFolder = typeof body?.caseFolder === "string" ? body.caseFolder : "";
+  const updates = body?.updates && typeof body.updates === "object" ? body.updates : null;
+
+  if (!caseFolder) {
+    return c.json({ error: "caseFolder is required" }, 400);
+  }
+  if (!updates) {
+    return c.json({ error: "updates object is required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+
+  try {
+    const content = await readFile(indexPath, "utf-8");
+    const index = JSON.parse(content);
+
+    if (!index.summary || typeof index.summary !== "object") {
+      return c.json({ error: "Index has no summary section" }, 400);
+    }
+
+    const changedFields: string[] = [];
+    const previousValues: Record<string, unknown> = {};
+
+    // Helper to deep-merge an object section
+    const mergeSection = (target: any, source: any, prefix: string) => {
+      for (const [key, val] of Object.entries(source)) {
+        if (val === undefined) continue;
+        if (val !== null && typeof val === "object" && !Array.isArray(val) && target[key] && typeof target[key] === "object") {
+          mergeSection(target[key], val, `${prefix}.${key}`);
+        } else {
+          previousValues[`${prefix}.${key}`] = target[key];
+          target[key] = val;
+          changedFields.push(`${prefix}.${key}`);
+        }
+      }
+    };
+
+    // Apply top-level summary fields
+    if (typeof updates.client === "string") {
+      previousValues["client"] = index.summary.client;
+      index.summary.client = updates.client;
+      changedFields.push("client");
+      // Also update case_name
+      const parts = updates.client.trim().split(/\s+/);
+      if (parts.length === 1) {
+        index.case_name = parts[0].toUpperCase();
+      } else {
+        const last = parts[parts.length - 1].toUpperCase();
+        const first = parts.slice(0, -1).join(" ");
+        index.case_name = `${last}, ${first}`;
+      }
+    }
+
+    if (typeof updates.dob === "string") {
+      previousValues["dob"] = index.summary.dob;
+      index.summary.dob = updates.dob;
+      changedFields.push("dob");
+    }
+
+    // Contact section
+    if (updates.contact && typeof updates.contact === "object") {
+      if (!index.summary.contact) index.summary.contact = {};
+      mergeSection(index.summary.contact, updates.contact, "contact");
+    }
+
+    // Policy limits section (PI)
+    if (updates.policy_limits && typeof updates.policy_limits === "object") {
+      if (!index.summary.policy_limits) index.summary.policy_limits = {};
+      for (const [party, partyUpdates] of Object.entries(updates.policy_limits)) {
+        if (!partyUpdates || typeof partyUpdates !== "object") continue;
+        if (!index.summary.policy_limits[party]) {
+          index.summary.policy_limits[party] = { carrier: "Unknown" };
+        }
+        mergeSection(index.summary.policy_limits[party], partyUpdates, `policy_limits.${party}`);
+      }
+    }
+
+    // Health insurance section
+    if (updates.health_insurance && typeof updates.health_insurance === "object") {
+      if (!index.summary.health_insurance) index.summary.health_insurance = {};
+      mergeSection(index.summary.health_insurance, updates.health_insurance, "health_insurance");
+    }
+
+    // Claim numbers section
+    if (updates.claim_numbers && typeof updates.claim_numbers === "object") {
+      if (!index.summary.claim_numbers) index.summary.claim_numbers = {};
+      mergeSection(index.summary.claim_numbers, updates.claim_numbers, "claim_numbers");
+    }
+
+    // Add audit case_note
+    if (!Array.isArray(index.case_notes)) {
+      index.case_notes = [];
+    }
+    index.case_notes.push({
+      id: `note-${Date.now()}`,
+      content: `Contact card updated: ${changedFields.join(", ")}`,
+      field_updated: changedFields.join(", "),
+      previous_value: previousValues,
+      source: "manual",
+      createdAt: new Date().toISOString(),
+    });
+
+    await writeFile(indexPath, JSON.stringify(index, null, 2));
+
+    return c.json({
+      success: true,
+      changedFields,
+      summary: index.summary,
+    });
+  } catch (error) {
+    if ((error as any)?.code === "ENOENT") {
+      return c.json({ error: "Document index not found. Run /init-case first." }, 404);
+    }
+    console.error("Failed to update contact card:", error);
+    return c.json({ error: "Could not update contact card" }, 500);
+  }
+});
+
 // Get needs_review items with resolved file paths
 app.get("/needs-review", async (c) => {
   const caseFolder = c.req.query("case");

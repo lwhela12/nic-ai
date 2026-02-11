@@ -72,6 +72,9 @@ export const PolicyLimitDetailSchema = z.object({
   medical_payments: z.string().optional(),
   um_uim: z.string().optional(),
   property_damage: z.string().optional(),
+  adjuster_name: z.string().optional(),
+  adjuster_phone: z.string().optional(),
+  adjuster_email: z.string().optional(),
 });
 
 // =============================================================================
@@ -502,6 +505,9 @@ export const FILE_EXTRACTION_TOOL_SCHEMA = {
                 description: "UM/UIM limits like $250,000/$500,000",
               },
               property_damage: { type: "string" as const },
+              adjuster_name: { type: "string" as const, description: "1P claims adjuster name" },
+              adjuster_phone: { type: "string" as const, description: "1P claims adjuster phone" },
+              adjuster_email: { type: "string" as const, description: "1P claims adjuster email" },
             },
           },
 
@@ -522,6 +528,9 @@ export const FILE_EXTRACTION_TOOL_SCHEMA = {
                 type: "string" as const,
                 description: "Name of at-fault driver or policyholder",
               },
+              adjuster_name: { type: "string" as const, description: "3P claims adjuster name" },
+              adjuster_phone: { type: "string" as const, description: "3P claims adjuster phone" },
+              adjuster_email: { type: "string" as const, description: "3P claims adjuster email" },
             },
           },
 
@@ -785,7 +794,7 @@ export function normalizePolicyLimits(
       };
     } else if (typeof partyValue === "object" && partyValue !== null) {
       const obj = partyValue as Record<string, unknown>;
-      result[normalizedParty] = {
+      const detail: PolicyLimitDetail = {
         carrier:
           typeof obj.carrier === "string" ? obj.carrier : "Unknown",
         bodily_injury:
@@ -813,6 +822,16 @@ export function normalizePolicyLimits(
               ? obj.pd
               : undefined,
       };
+      if (typeof obj.adjuster_name === "string" && obj.adjuster_name.trim()) {
+        detail.adjuster_name = obj.adjuster_name.trim();
+      }
+      if (typeof obj.adjuster_phone === "string" && obj.adjuster_phone.trim()) {
+        detail.adjuster_phone = obj.adjuster_phone.trim();
+      }
+      if (typeof obj.adjuster_email === "string" && obj.adjuster_email.trim()) {
+        detail.adjuster_email = obj.adjuster_email.trim();
+      }
+      result[normalizedParty] = detail;
     }
   }
 

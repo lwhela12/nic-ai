@@ -8,6 +8,7 @@ import FolderPicker from './components/FolderPicker'
 import FirmDashboard from './components/FirmDashboard'
 import Login from './components/Login'
 import TodoDrawer from './components/TodoDrawer'
+import UserNotes from './components/UserNotes'
 import ContactCard from './components/ContactCard'
 import PacketCreation from './components/PacketCreation'
 import type { PacketDocument, PacketFrontMatter, PacketState } from './types/packet'
@@ -385,6 +386,12 @@ const UserCircleIcon = () => (
   </svg>
 )
 
+const NotepadIcon = () => (
+  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+  </svg>
+)
+
 
 function App() {
   const [authState, setAuthState] = useState<AuthState | null>(null)
@@ -732,6 +739,7 @@ function App() {
 
   // Contact card state
   const [isContactCardOpen, setIsContactCardOpen] = useState(false)
+  const [isNotesOpen, setIsNotesOpen] = useState(false)
   const contactButtonRef = useRef<HTMLButtonElement>(null)
   const derivedContact = useMemo(() => {
     if (documentIndex?.summary?.contact) return documentIndex.summary.contact
@@ -1885,8 +1893,20 @@ function App() {
                 disabilityStatus={documentIndex?.summary?.disability_status}
                 jobTitle={documentIndex?.summary?.job_title}
                 bodyParts={documentIndex?.summary?.body_parts}
+                caseFolder={caseFolder}
+                onIndexUpdated={reloadDocumentIndex}
               />
             </div>
+            {/* Notes button */}
+            <button
+              onClick={() => setIsNotesOpen(true)}
+              className="flex items-center gap-2 text-sm text-brand-200 hover:text-white
+                         transition-colors px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10"
+              title="Case Notes"
+            >
+              <NotepadIcon />
+              <span>Notes</span>
+            </button>
             {/* Tasks button */}
             <button
               onClick={() => setIsDrawerOpen(true)}
@@ -2080,6 +2100,16 @@ function App() {
         isGenerating={isGeneratingTasks}
         hasAttemptedGenerate={hasAttemptedGenerate}
       />
+
+      {/* User Notes modal */}
+      {caseFolder && (
+        <UserNotes
+          isOpen={isNotesOpen}
+          onClose={() => setIsNotesOpen(false)}
+          caseFolder={caseFolder}
+          apiUrl={API_URL}
+        />
+      )}
 
       {/* Knowledge init modal — shown when firm root has no knowledge base */}
       {showKnowledgeInit && <KnowledgeInitModal />}

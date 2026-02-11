@@ -16,6 +16,7 @@ import { extractTextFromFile } from "../lib/extract";
 import { generateCaseSummary } from "../lib/case-summary";
 import { mergeToIndex, diffIndexes, type HypergraphResult, type IndexDiff } from "../lib/merge-index";
 import { directFirmChat, type FirmChatScope } from "../lib/firm-chat";
+import { buildCaseMap } from "../lib/case-map";
 import {
   normalizeIndex,
   validateIndex,
@@ -102,6 +103,12 @@ function getClient(): Anthropic {
 }
 
 const app = new Hono();
+
+async function writeCaseMap(caseFolder: string, index: Record<string, any>): Promise<void> {
+  const caseMapPath = join(caseFolder, ".pi_tool", "case_map.json");
+  const caseMap = buildCaseMap(index);
+  await writeFile(caseMapPath, JSON.stringify(caseMap, null, 2));
+}
 
 // Practice guide loading now handled by knowledge.ts
 
@@ -2010,6 +2017,7 @@ Analyze the case and use the case_synthesis tool to return your synthesis.`
     }
 
     await writeFile(indexPath, JSON.stringify(merged, null, 2));
+    await writeCaseMap(caseFolder, merged);
     console.log(`[Sonnet] Wrote merged index to ${indexPath}`);
 
   } catch (err) {
@@ -2655,6 +2663,7 @@ async function indexCase(
 
     // Write final normalized index
     await writeFile(indexPath, JSON.stringify(normalizedIndex, null, 2));
+    await writeCaseMap(caseFolder, normalizedIndex);
     console.log(`[Index] Wrote normalized document_index.json`);
     console.log(`[Diff] ${indexDiff.summary}`);
 
@@ -2766,6 +2775,7 @@ async function indexCase(
 
         parentIndex.related_cases = relatedCases;
         await writeFile(parentIndexPath, JSON.stringify(parentIndex, null, 2));
+        await writeCaseMap(options.parentCase.path, parentIndex);
         console.log(`[Index] Updated parent index with related_cases`);
       } catch (parentErr) {
         // Parent index may not exist yet - that's ok
@@ -2781,6 +2791,12 @@ async function indexCase(
     if (previousIndexContent !== null) {
       try {
         await writeFile(indexPath, previousIndexContent);
+        try {
+          const restored = JSON.parse(previousIndexContent);
+          await writeCaseMap(caseFolder, restored);
+        } catch {
+          // best effort only
+        }
         console.warn(`[Index] Restored previous document_index.json after failure`);
       } catch (restoreError) {
         console.error("[Index] Failed to restore previous index:", restoreError);
@@ -3191,6 +3207,13 @@ FIELDS TO TRACK:
 13. total_medical - Total medical specials
 14. health_insurance - Look for health_insurance object with carrier, group_no, member_no
     - Output as JSON object: {"carrier": "X", "group_no": "Y", "member_no": "Z"}
+15. adjuster_name_3p - Third party (at-fault carrier) adjuster name. Look in insurance_3p.adjuster_name
+16. adjuster_phone_3p - Third party adjuster phone. Look in insurance_3p.adjuster_phone
+17. adjuster_email_3p - Third party adjuster email. Look in insurance_3p.adjuster_email
+18. adjuster_name_1p - First party (client's carrier) adjuster name. Look in insurance_1p.adjuster_name
+19. adjuster_phone_1p - First party adjuster phone. Look in insurance_1p.adjuster_phone
+20. adjuster_email_1p - First party adjuster email. Look in insurance_1p.adjuster_email
+    - NOTE: If adjuster_name/phone/email appear at top level (not inside insurance_1p/3p), treat them as 3P adjuster info
 
 ANALYSIS RULES:
 1. Normalize values for comparison:
@@ -3365,17 +3388,7 @@ async function generateHypergraph(
 ): Promise<HypergraphResult> {
   console.log(`\n========== GENERATING HYPERGRAPH (${practiceArea || 'PI'}) ==========`);
 
-  let result: HypergraphResult = {
-    hypergraph: {},
-    conflicts: [],
-    summary: {
-      total_fields_analyzed: 0,
-      fields_with_conflicts: 0,
-      confidence_score: 0,
-    },
-  };
-
-  let usage: UsageStats = {
+  const usage: UsageStats = {
     inputTokens: 0,
     inputTokensNew: 0,
     inputTokensCacheWrite: 0,
@@ -3385,87 +3398,294 @@ async function generateHypergraph(
     model: 'haiku'
   };
 
-  const indexJson = JSON.stringify(documentIndex, null, 2);
+  const HYPERGRAPH_CHUNK_MAX_CHARS = 55000;
 
-  console.log(`[Hypergraph] Input JSON length: ${indexJson.length} chars`);
-  console.log(`[Hypergraph] Input preview (first 1500 chars):\n${indexJson.slice(0, 1500)}`);
-  console.log(`[Hypergraph] Folders in index: ${Object.keys(documentIndex.folders || {}).join(', ')}`);
-  console.log(`[Hypergraph] Total files: ${Object.values(documentIndex.folders || {}).reduce((sum: number, f: any) => sum + (f.files?.length || 0), 0)}`);
+  const compactScalar = (value: unknown): unknown => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "string") {
+      const compact = value.trim().replace(/\s+/g, " ");
+      return compact.length > 280 ? `${compact.slice(0, 280)}...` : compact;
+    }
+    if (typeof value === "number" || typeof value === "boolean") return value;
+    return null;
+  };
 
-  for await (const msg of query({
-    prompt: `<document_index>
-${indexJson}
+  const compactValue = (value: unknown, depth = 0): unknown => {
+    if (depth > 4) return compactScalar(value);
+    const scalar = compactScalar(value);
+    if (scalar !== null) return scalar;
+
+    if (Array.isArray(value)) {
+      return value.slice(0, 25).map((entry) => compactValue(entry, depth + 1));
+    }
+
+    if (value && typeof value === "object") {
+      const result: Record<string, unknown> = {};
+      let keyCount = 0;
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        if (keyCount >= 40) break;
+        const lowered = key.toLowerCase();
+        if (
+          lowered.includes("text") ||
+          lowered.includes("content") ||
+          lowered.includes("ocr") ||
+          lowered.includes("raw")
+        ) {
+          continue;
+        }
+        result[key] = compactValue(child, depth + 1);
+        keyCount++;
+      }
+      return result;
+    }
+
+    return null;
+  };
+
+  const compactFolders: Record<string, { files: any[] }> = {};
+  for (const [folderName, folderData] of Object.entries(documentIndex.folders || {}) as [string, any][]) {
+    const files = Array.isArray(folderData) ? folderData : folderData?.files;
+    if (!Array.isArray(files)) continue;
+
+    compactFolders[folderName] = {
+      files: files.map((file: any) => {
+        const compact: Record<string, unknown> = {
+          filename: file?.filename,
+          type: file?.type,
+          date: file?.date,
+          key_info: typeof file?.key_info === "string" ? file.key_info.slice(0, 320) : file?.key_info,
+          has_handwritten_data: file?.has_handwritten_data,
+          handwritten_fields: Array.isArray(file?.handwritten_fields)
+            ? file.handwritten_fields.slice(0, 12)
+            : [],
+          issues: typeof file?.issues === "string" ? file.issues.slice(0, 220) : file?.issues,
+        };
+        if (file?.extracted_data) {
+          compact.extracted_data = compactValue(file.extracted_data);
+        }
+        return compact;
+      }),
+    };
+  }
+
+  const buildChunkPayload = (foldersSubset: Record<string, { files: any[] }>) => ({
+    case_name: documentIndex.case_name,
+    case_phase: documentIndex.case_phase,
+    practice_area: documentIndex.practice_area,
+    folders: foldersSubset,
+  });
+
+  const chunkPayloads: Array<{ id: number; payload: Record<string, any> }> = [];
+  let currentFolders: Record<string, { files: any[] }> = {};
+
+  const currentLength = (candidate: Record<string, { files: any[] }>) =>
+    JSON.stringify(buildChunkPayload(candidate)).length;
+
+  const pushCurrentChunk = () => {
+    if (Object.keys(currentFolders).length === 0) return;
+    chunkPayloads.push({
+      id: chunkPayloads.length + 1,
+      payload: buildChunkPayload(currentFolders),
+    });
+    currentFolders = {};
+  };
+
+  for (const [folderName, folderData] of Object.entries(compactFolders)) {
+    const folderOnly = { [folderName]: folderData };
+    const mergedCandidate = { ...currentFolders, ...folderOnly };
+
+    if (currentLength(mergedCandidate) <= HYPERGRAPH_CHUNK_MAX_CHARS) {
+      currentFolders = mergedCandidate;
+      continue;
+    }
+
+    pushCurrentChunk();
+
+    // If a folder alone is too large, split by file batches.
+    if (currentLength(folderOnly) > HYPERGRAPH_CHUNK_MAX_CHARS) {
+      let runningFiles: any[] = [];
+      for (const file of folderData.files) {
+        const testFolders = { [folderName]: { files: [...runningFiles, file] } };
+        if (currentLength(testFolders) > HYPERGRAPH_CHUNK_MAX_CHARS && runningFiles.length > 0) {
+          chunkPayloads.push({
+            id: chunkPayloads.length + 1,
+            payload: buildChunkPayload({ [folderName]: { files: runningFiles } }),
+          });
+          runningFiles = [file];
+        } else {
+          runningFiles.push(file);
+        }
+      }
+      if (runningFiles.length > 0) {
+        chunkPayloads.push({
+          id: chunkPayloads.length + 1,
+          payload: buildChunkPayload({ [folderName]: { files: runningFiles } }),
+        });
+      }
+      continue;
+    }
+
+    currentFolders = folderOnly;
+  }
+  pushCurrentChunk();
+
+  const chunkCount = Math.max(1, chunkPayloads.length);
+  console.log(`[Hypergraph] Running ${chunkCount} chunk(s) with max ~${HYPERGRAPH_CHUNK_MAX_CHARS} chars per chunk`);
+
+  const chunkResults: HypergraphResult[] = [];
+
+  for (const chunk of chunkPayloads) {
+    const chunkJson = JSON.stringify(chunk.payload, null, 2);
+    console.log(`[Hypergraph] Chunk ${chunk.id}/${chunkCount} input length: ${chunkJson.length} chars`);
+
+    let chunkResult: HypergraphResult = {
+      hypergraph: {},
+      conflicts: [],
+      summary: {
+        total_fields_analyzed: 0,
+        fields_with_conflicts: 0,
+        confidence_score: 0,
+      },
+    };
+
+    for await (const msg of query({
+      prompt: `<document_index chunk="${chunk.id}/${chunkCount}">
+${chunkJson}
 </document_index>
 
-Return ONLY the JSON hypergraph. No explanation, no planning - just the JSON object.`,
-    options: {
-      cwd: caseFolder,
-      systemPrompt: getHypergraphPrompt(practiceArea),
-      model: "haiku",
-      allowedTools: [],
-      permissionMode: "acceptEdits",
-      maxTurns: 4,
-      persistSession: false, // Prevent race condition when running concurrent extractions
-      ...getSDKCliOptions(),
-    },
-  })) {
-    console.log(`[Hypergraph] Message type: ${msg.type}`);
-
-    if (msg.type === "assistant") {
-      for (const block of msg.message.content) {
-        if (block.type === "text") {
-          console.log(`[Hypergraph] Raw output (first 2000 chars):\n${block.text.slice(0, 2000)}`);
-          console.log(`[Hypergraph] Output length: ${block.text.length} chars`);
-
+Return ONLY the JSON hypergraph for this chunk. No explanation, no planning - just the JSON object.`,
+      options: {
+        cwd: caseFolder,
+        systemPrompt: getHypergraphPrompt(practiceArea),
+        model: "haiku",
+        allowedTools: [],
+        permissionMode: "acceptEdits",
+        maxTurns: 4,
+        persistSession: false,
+        ...getSDKCliOptions(),
+      },
+    })) {
+      if (msg.type === "assistant") {
+        for (const block of msg.message.content) {
+          if (block.type !== "text") continue;
           try {
             const jsonMatch = block.text.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-              console.log(`[Hypergraph] JSON match found, length: ${jsonMatch[0].length} chars`);
-              const parsed = JSON.parse(jsonMatch[0]);
-              console.log(`[Hypergraph] Parsed keys: ${Object.keys(parsed).join(', ')}`);
-              console.log(`[Hypergraph] hypergraph keys: ${Object.keys(parsed.hypergraph || {}).join(', ') || '(empty)'}`);
-              console.log(`[Hypergraph] conflicts count: ${(parsed.conflicts || []).length}`);
-
-              result = {
-                hypergraph: parsed.hypergraph || {},
-                conflicts: parsed.conflicts || [],
-                summary: parsed.summary || {
-                  total_fields_analyzed: 0,
-                  fields_with_conflicts: 0,
-                  confidence_score: 0,
-                },
-              };
-            } else {
-              console.log(`[Hypergraph] No JSON match found in output`);
-            }
+            if (!jsonMatch) continue;
+            const parsed = JSON.parse(jsonMatch[0]);
+            chunkResult = {
+              hypergraph: parsed.hypergraph || {},
+              conflicts: parsed.conflicts || [],
+              summary: parsed.summary || {
+                total_fields_analyzed: 0,
+                fields_with_conflicts: 0,
+                confidence_score: 0,
+              },
+            };
           } catch (e) {
-            console.error("[Hypergraph] Failed to parse JSON:", e);
-            console.error("[Hypergraph] Raw text that failed:", block.text.slice(0, 500));
+            console.error(`[Hypergraph] Failed to parse chunk ${chunk.id} JSON:`, e);
+            console.error("[Hypergraph] Raw chunk output:", block.text.slice(0, 500));
           }
         }
       }
+
+      if (msg.type === "result" && (msg as any).usage) {
+        const finalUsage = (msg as any).usage;
+        usage.inputTokensNew += finalUsage.input_tokens || 0;
+        usage.inputTokensCacheWrite += finalUsage.cache_creation_input_tokens || 0;
+        usage.inputTokensCacheRead += finalUsage.cache_read_input_tokens || 0;
+        usage.outputTokens += finalUsage.output_tokens || 0;
+        usage.apiCalls += 1;
+      }
     }
 
-    // Capture final usage from result - includes cache token breakdown
-    if (msg.type === "result" && (msg as any).usage) {
-      const finalUsage = (msg as any).usage;
-      usage.inputTokensNew = finalUsage.input_tokens || 0;
-      usage.inputTokensCacheWrite = finalUsage.cache_creation_input_tokens || 0;
-      usage.inputTokensCacheRead = finalUsage.cache_read_input_tokens || 0;
-      usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
-      usage.outputTokens = finalUsage.output_tokens || 0;
-      usage.apiCalls = 1;
+    chunkResults.push(chunkResult);
+  }
+
+  usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
+
+  const mergedHypergraph: HypergraphResult["hypergraph"] = {};
+  const conflictMap = new Map<string, HypergraphResult["conflicts"][number]>();
+
+  for (const chunkResult of chunkResults) {
+    for (const [field, node] of Object.entries(chunkResult.hypergraph || {})) {
+      const existing = mergedHypergraph[field] || {
+        values: [],
+        consensus: "",
+        confidence: 0,
+        has_conflict: false,
+      };
+
+      const valueMap = new Map<string, { value: string; sources: Set<string> }>();
+      for (const prior of existing.values) {
+        valueMap.set(String(prior.value), {
+          value: String(prior.value),
+          sources: new Set(prior.sources || []),
+        });
+      }
+      for (const incoming of node.values || []) {
+        const key = String(incoming.value);
+        const item = valueMap.get(key) || { value: key, sources: new Set<string>() };
+        for (const source of incoming.sources || []) item.sources.add(source);
+        valueMap.set(key, item);
+      }
+
+      const mergedValues = Array.from(valueMap.values()).map((item) => ({
+        value: item.value,
+        sources: Array.from(item.sources),
+        count: item.sources.size,
+      }));
+      mergedValues.sort((a, b) => b.count - a.count);
+      const consensus = mergedValues[0]?.value || "";
+      const totalMentions = mergedValues.reduce((sum, item) => sum + item.count, 0);
+
+      mergedHypergraph[field] = {
+        values: mergedValues,
+        consensus,
+        confidence: totalMentions > 0 ? (mergedValues[0]?.count || 0) / totalMentions : 0,
+        has_conflict: mergedValues.length > 1,
+      };
+    }
+
+    for (const conflict of chunkResult.conflicts || []) {
+      const key = `${conflict.field}|${conflict.consensus_value}|${conflict.outlier_value}`;
+      if (!conflictMap.has(key)) {
+        conflictMap.set(key, conflict);
+      } else {
+        const existing = conflictMap.get(key)!;
+        existing.consensus_sources = Array.from(
+          new Set([...(existing.consensus_sources || []), ...(conflict.consensus_sources || [])])
+        );
+        existing.outlier_sources = Array.from(
+          new Set([...(existing.outlier_sources || []), ...(conflict.outlier_sources || [])])
+        );
+        if (!existing.likely_reason && conflict.likely_reason) {
+          existing.likely_reason = conflict.likely_reason;
+        }
+      }
     }
   }
 
-  result.usage = usage;
+  const fields = Object.keys(mergedHypergraph);
+  const fieldsWithConflicts = fields.filter((field) => mergedHypergraph[field].has_conflict).length;
+  const avgConfidence = fields.length > 0
+    ? fields.reduce((sum, field) => sum + (mergedHypergraph[field].confidence || 0), 0) / fields.length
+    : 0;
 
-  // Calculate cache hit percentage
+  const result: HypergraphResult = {
+    hypergraph: mergedHypergraph,
+    conflicts: Array.from(conflictMap.values()),
+    summary: {
+      total_fields_analyzed: fields.length,
+      fields_with_conflicts: fieldsWithConflicts,
+      confidence_score: avgConfidence,
+    },
+    usage,
+  };
+
   const cacheHitPercent = usage.inputTokens > 0
     ? ((usage.inputTokensCacheRead / usage.inputTokens) * 100).toFixed(1)
-    : '0';
+    : "0";
 
-  // Log results
   console.log(`Hypergraph generated:`);
   console.log(`  Fields analyzed: ${result.summary.total_fields_analyzed}`);
   console.log(`  Conflicts found: ${result.summary.fields_with_conflicts}`);
@@ -4116,6 +4336,7 @@ app.put("/case/assign", async (c) => {
     // Normalize and save
     const normalized = normalizeIndex(index);
     await writeFile(indexPath, JSON.stringify(normalized, null, 2));
+    await writeCaseMap(casePath, normalized);
 
     return c.json({ success: true, assignments: normalized.assignments });
   } catch (error) {
@@ -4160,6 +4381,7 @@ app.delete("/case/unassign", async (c) => {
     // Normalize and save
     const normalized = normalizeIndex(index);
     await writeFile(indexPath, JSON.stringify(normalized, null, 2));
+    await writeCaseMap(casePath, normalized);
 
     return c.json({ success: true, assignments: normalized.assignments });
   } catch (error) {
