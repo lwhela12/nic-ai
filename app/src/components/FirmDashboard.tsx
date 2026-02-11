@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, type SetStateAction, type Dispatch } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type SetStateAction, type Dispatch } from 'react'
 import FirmChat from './FirmChat'
 import KnowledgeEditor from './KnowledgeEditor'
 import KnowledgeChat from './KnowledgeChat'
@@ -265,6 +265,7 @@ export default function FirmDashboard({
   onBatchComplete,
 }: Props) {
   const isWC = practiceArea === 'Workers\' Compensation'
+  const firmCasesVersionRef = useRef(firmCasesVersion)
   const [firmData, setFirmData] = useState<FirmData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -484,11 +485,11 @@ export default function FirmDashboard({
     loadTeamMembers()
   }, [loadCases, loadTeamMembers])
 
-  // Reload cases when a case finishes indexing
+  // Reload cases when a case finishes indexing (skip initial mount — loadCases already runs above)
   useEffect(() => {
-    if (firmCasesVersion && firmCasesVersion > 0) {
-      loadCases()
-    }
+    if (firmCasesVersion === firmCasesVersionRef.current) return
+    firmCasesVersionRef.current = firmCasesVersion
+    loadCases()
   }, [firmCasesVersion]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {

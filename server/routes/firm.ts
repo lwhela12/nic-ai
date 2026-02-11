@@ -663,18 +663,16 @@ async function discoverAndBuildSubcases(
   practiceArea?: string
 ): Promise<CaseSummary[]> {
   const subcasePaths = await discoverSubcases(parentPath);
-  const subcases: CaseSummary[] = [];
 
-  for (const subcasePath of subcasePaths) {
-    const subcaseName = subcasePath.split('/').pop() || subcasePath;
-    const summary = await buildCaseSummary(subcasePath, subcaseName, {
-      subcaseInfo: { parentPath, parentName },
-      practiceArea,
-    });
-    subcases.push(summary);
-  }
-
-  return subcases;
+  return Promise.all(
+    subcasePaths.map(subcasePath => {
+      const subcaseName = subcasePath.split('/').pop() || subcasePath;
+      return buildCaseSummary(subcasePath, subcaseName, {
+        subcaseInfo: { parentPath, parentName },
+        practiceArea,
+      });
+    })
+  );
 }
 
 /**
@@ -747,54 +745,48 @@ app.get("/cases", async (c) => {
 
   try {
     const entries = await readdir(root, { withFileTypes: true });
-    const cases: CaseSummary[] = [];
 
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name === ".pi_tool") continue;
-      // Skip dot-prefixed folders at root level (they shouldn't be cases)
-      if (entry.name.startsWith('.')) continue;
+    // Process all case directories in parallel for speed
+    const casePromises = entries
+      .filter(entry => entry.isDirectory() && entry.name !== ".pi_tool" && !entry.name.startsWith('.'))
+      .map(async (entry) => {
+        const casePath = join(root, entry.name);
+        const results: CaseSummary[] = [];
 
-      const casePath = join(root, entry.name);
+        // For WC practice area, check for DOI subfolders
+        if (isWC) {
+          const doiDetection = await detectDOISubfolders(casePath);
 
-      // For WC practice area, check for DOI subfolders
-      if (isWC) {
-        const doiDetection = await detectDOISubfolders(casePath);
-
-        if (doiDetection.isContainer) {
-          // This is a client container with DOI subfolders
-          // Add container as a grouping header (not a case)
-          const containerSummary = buildContainerSummary(
-            casePath,
-            entry.name,
-            doiDetection.doiCases
-          );
-          cases.push(containerSummary);
-
-          // Add each DOI subfolder as a separate case
-          for (const doiCase of doiDetection.doiCases) {
-            const doiSummary = await buildDOICaseSummary(
-              doiCase,
+          if (doiDetection.isContainer) {
+            const containerSummary = buildContainerSummary(
               casePath,
               entry.name,
-              doiDetection.doiCases,
-              practiceArea
+              doiDetection.doiCases
             );
-            cases.push(doiSummary);
+            results.push(containerSummary);
+
+            // Process DOI subfolder summaries in parallel
+            const doiSummaries = await Promise.all(
+              doiDetection.doiCases.map(doiCase =>
+                buildDOICaseSummary(doiCase, casePath, entry.name, doiDetection.doiCases, practiceArea)
+              )
+            );
+            results.push(...doiSummaries);
+            return results;
           }
-
-          // Skip regular subcase discovery for containers
-          continue;
         }
-      }
 
-      // Regular case (non-container) - existing logic
-      const caseSummary = await buildCaseSummary(casePath, entry.name, { practiceArea });
-      cases.push(caseSummary);
+        // Regular case (non-container)
+        const [caseSummary, subcases] = await Promise.all([
+          buildCaseSummary(casePath, entry.name, { practiceArea }),
+          discoverAndBuildSubcases(casePath, entry.name, practiceArea),
+        ]);
+        results.push(caseSummary, ...subcases);
+        return results;
+      });
 
-      // Discover and add subcases (linked family members)
-      const subcases = await discoverAndBuildSubcases(casePath, entry.name, practiceArea);
-      cases.push(...subcases);
-    }
+    const caseArrays = await Promise.all(casePromises);
+    const cases = caseArrays.flat();
 
     // Sort cases with special handling for containers and DOI cases
     // Containers and their DOI cases should stay together
@@ -3149,24 +3141,22 @@ async function checkNeedsReindex(casePath: string, indexedAt: number): Promise<b
   async function checkDir(dir: string): Promise<boolean> {
     try {
       const entries = await readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.name === ".pi_tool") continue;
-        if (entry.name.startsWith(".")) continue;
-        const fullPath = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          if (await checkDir(fullPath)) return true;
-        } else {
-          const stats = await stat(fullPath);
-          if (stats.mtimeMs > indexedAt) {
-            console.log(`[Reindex] Triggered by: ${fullPath} (file: ${stats.mtimeMs}, index: ${indexedAt}, delta: ${stats.mtimeMs - indexedAt}ms)`);
-            return true;
-          }
-        }
-      }
+      const results = await Promise.all(
+        entries
+          .filter(entry => entry.name !== ".pi_tool" && !entry.name.startsWith("."))
+          .map(async (entry) => {
+            const fullPath = join(dir, entry.name);
+            if (entry.isDirectory()) {
+              return checkDir(fullPath);
+            }
+            const stats = await stat(fullPath);
+            return stats.mtimeMs > indexedAt;
+          })
+      );
+      return results.some(r => r);
     } catch {
-      // Ignore errors
+      return false;
     }
-    return false;
   }
   const needsReindex = await checkDir(casePath);
   reindexCheckCache.set(cacheKey, { value: needsReindex, checkedAt: now });

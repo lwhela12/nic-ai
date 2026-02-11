@@ -26,6 +26,7 @@ import { loadFirmInfo } from "./export";
 import { applyResolvedFieldToSummary } from "./index-summary-sync";
 import { extractPdfText } from "./pdftotext";
 import { buildCaseMap, buildCaseMapPromptView } from "./case-map";
+import { generateHypergraph } from "../routes/firm";
 
 // Client creation - recreated when API key changes
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -118,6 +119,24 @@ const TOOLS: Anthropic.Tool[] = [
         note: {
           type: "string",
           description: "Optional note explaining why the case map is being rebuilt."
+        }
+      },
+      required: []
+    }
+  },
+  {
+    name: "rerun_hypergraph",
+    description: "Re-run hypergraph analysis from existing document_index.json (no extraction). Writes .pi_tool/hypergraph_analysis.json and can refresh needs_review.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        apply_to_index: {
+          type: "boolean",
+          description: "If true (default), update needs_review in document_index.json using the new conflicts."
+        },
+        note: {
+          type: "string",
+          description: "Optional note explaining why hypergraph was re-run."
         }
       },
       required: []
@@ -434,6 +453,8 @@ const WRITE_TOOLS = new Set([
   "write_file",
   "update_index",
   "update_file_entry",
+  "rebuild_case_map",
+  "rerun_hypergraph",
   "generate_document",
   "build_evidence_packet",
   "batch_resolve_conflicts",
@@ -1202,6 +1223,61 @@ async function executeTool(
           total_documents: caseMap.overview.total_documents,
           total_facts: caseMap.overview.total_facts,
           conflict_count: caseMap.overview.conflict_count,
+        });
+      }
+
+      case "rerun_hypergraph": {
+        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexContent = await readFile(indexPath, "utf-8");
+        const index = JSON.parse(indexContent);
+        const practiceArea = typeof index.practice_area === "string" ? index.practice_area : undefined;
+        const applyToIndex = toolInput.apply_to_index !== false;
+
+        const hypergraphResult = await generateHypergraph(caseFolder, index, practiceArea);
+        const hypergraphPath = join(caseFolder, ".pi_tool", "hypergraph_analysis.json");
+        await writeFile(hypergraphPath, JSON.stringify(hypergraphResult, null, 2));
+
+        if (applyToIndex) {
+          const needsReview = (hypergraphResult.conflicts || []).map((conflict: any) => {
+            const values = Array.from(new Set([
+              String(conflict.consensus_value ?? ""),
+              String(conflict.outlier_value ?? ""),
+            ])).filter((v) => v.length > 0);
+            const sources = Array.from(new Set([
+              ...(Array.isArray(conflict.consensus_sources) ? conflict.consensus_sources : []),
+              ...(Array.isArray(conflict.outlier_sources) ? conflict.outlier_sources : []),
+            ])).map((s) => String(s));
+            return {
+              field: String(conflict.field || "unknown"),
+              conflicting_values: values,
+              sources,
+              reason: typeof conflict.likely_reason === "string" && conflict.likely_reason.trim()
+                ? conflict.likely_reason.trim()
+                : "Detected by hypergraph re-analysis",
+            };
+          });
+
+          index.needs_review = needsReview;
+          if (!Array.isArray(index.case_notes)) {
+            index.case_notes = [];
+          }
+          index.case_notes.push({
+            id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            content: toolInput.note || "Re-ran hypergraph and refreshed needs_review from existing index",
+            field_updated: "needs_review",
+            source: "hypergraph_rebuild",
+            createdAt: new Date().toISOString(),
+          });
+          await saveIndexAndMap(caseFolder, indexPath, index);
+        }
+
+        return JSON.stringify({
+          success: true,
+          hypergraph_path: ".pi_tool/hypergraph_analysis.json",
+          conflicts_found: hypergraphResult.conflicts?.length || 0,
+          fields_analyzed: hypergraphResult.summary?.total_fields_analyzed || 0,
+          index_updated: applyToIndex,
+          needs_review_count: applyToIndex && Array.isArray(index.needs_review) ? index.needs_review.length : undefined,
         });
       }
 
@@ -1985,6 +2061,7 @@ const BASE_SYSTEM_PROMPT = `You are a helpful legal assistant for a Nevada injur
    For very large indexes, use read_index_slice to page through .pi_tool/document_index.json in chunks.
 
 2b. **Rebuild Case Map**: Use rebuild_case_map to regenerate .pi_tool/case_map.json from the current document_index.json when map data is missing or stale. This does NOT re-run document extraction.
+2c. **Re-run Hypergraph**: Use rerun_hypergraph to rebuild .pi_tool/hypergraph_analysis.json from the current index and refresh conflict detection without re-extraction.
 
 3. **Update Case Data**: Use update_index when the user provides corrections or new information about top-level case fields (e.g., client name, DOB, case phase, policy limits).
    Use update_case_summary when updating the narrative case summary.
@@ -2025,6 +2102,10 @@ Use read_file instead for:
 Use rebuild_case_map when:
 - A legacy case has no .pi_tool/case_map.json
 - The case map appears stale after major index changes
+
+Use rerun_hypergraph when:
+- A legacy case never completed hypergraph/conflict reconciliation
+- needs_review appears missing or stale after an indexing failure
 
 ## WHEN TO USE update_file_entry
 
