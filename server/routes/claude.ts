@@ -17,6 +17,7 @@ import { directChat, type ChatMessage as DirectChatMessage } from "../lib/direct
 import { requireCaseAccess } from "../lib/team-access";
 import { acquireCaseLock, releaseCaseLock } from "../lib/case-lock";
 import { applyResolvedFieldToSummary } from "../lib/index-summary-sync";
+import { writeIndexDerivedFiles } from "../lib/meta-index";
 import { normalizePracticeArea, resolveFirmPracticeArea } from "../lib/practice-area";
 import { formatDateMMDDYYYY } from "../lib/date-format";
 
@@ -1454,6 +1455,7 @@ app.post("/errata-correct", async (c) => {
     applyResolvedFieldToSummary(index, field, correctedValue);
 
     await writeFile(indexPath, JSON.stringify(index, null, 2));
+    await writeIndexDerivedFiles(caseFolder, index);
     return c.json({ success: true });
   } catch (error) {
     console.error("Errata correction error:", error);

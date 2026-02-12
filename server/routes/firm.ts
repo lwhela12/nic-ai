@@ -17,6 +17,7 @@ import { generateCaseSummary } from "../lib/case-summary";
 import { mergeToIndex, diffIndexes, type HypergraphResult, type IndexDiff } from "../lib/merge-index";
 import { directFirmChat, type FirmChatScope } from "../lib/firm-chat";
 import { buildCaseMap } from "../lib/case-map";
+import { writeIndexDerivedFiles } from "../lib/meta-index";
 import {
   normalizeIndex,
   validateIndex,
@@ -27,6 +28,7 @@ import { practiceAreaRegistry, PRACTICE_AREAS } from "../practice-areas";
 import { normalizePracticeArea, resolveFirmPracticeArea } from "../lib/practice-area";
 import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
 import { formatDateYYYYMMDD, parseFlexibleDate } from "../lib/date-format";
+import { buildDocumentId } from "../lib/document-id";
 
 // ============================================================================
 // Usage Reporting
@@ -2424,6 +2426,7 @@ async function indexCase(
     // Step 3: Build preliminary index for hypergraph analysis
     // For incremental mode, start with existing folders and merge new extractions
     const folders: Record<string, { files: Array<{
+      doc_id?: string;
       filename: string;
       type: string;
       key_info: string;
@@ -2449,6 +2452,7 @@ async function indexCase(
       }
 
       const fileEntry: {
+        doc_id?: string;
         filename: string;
         type: string;
         key_info: string;
@@ -2458,6 +2462,7 @@ async function indexCase(
         handwritten_fields: string[];
         extracted_data?: Record<string, any>;
       } = {
+        doc_id: buildDocumentId(extraction.folder, extraction.filename),
         filename: extraction.filename,
         type: extraction.type,
         key_info: extraction.key_info,
@@ -2653,10 +2658,10 @@ async function indexCase(
     // Compute diff between old and new index
     const indexDiff = diffIndexes(previousIndex, normalizedIndex);
 
-    // Write final normalized index
+    // Write final normalized index + all derived files
     await writeFile(indexPath, JSON.stringify(normalizedIndex, null, 2));
-    await writeCaseMap(caseFolder, normalizedIndex);
-    console.log(`[Index] Wrote normalized document_index.json`);
+    await writeIndexDerivedFiles(caseFolder, normalizedIndex);
+    console.log(`[Index] Wrote normalized document_index.json + meta_index.json + per-folder indexes`);
     console.log(`[Diff] ${indexDiff.summary}`);
 
     // ========== SONNET SYNTHESIS (COMMENTED OUT - replaced by parallel Haiku + programmatic merge) ==========
@@ -4326,7 +4331,7 @@ app.put("/case/assign", async (c) => {
     // Normalize and save
     const normalized = normalizeIndex(index);
     await writeFile(indexPath, JSON.stringify(normalized, null, 2));
-    await writeCaseMap(casePath, normalized);
+    await writeIndexDerivedFiles(casePath, normalized);
 
     return c.json({ success: true, assignments: normalized.assignments });
   } catch (error) {
@@ -4371,7 +4376,7 @@ app.delete("/case/unassign", async (c) => {
     // Normalize and save
     const normalized = normalizeIndex(index);
     await writeFile(indexPath, JSON.stringify(normalized, null, 2));
-    await writeCaseMap(casePath, normalized);
+    await writeIndexDerivedFiles(casePath, normalized);
 
     return c.json({ success: true, assignments: normalized.assignments });
   } catch (error) {

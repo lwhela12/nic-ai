@@ -103,6 +103,98 @@ function normalizeRelativePath(path: string): string {
     .trim();
 }
 
+function normalizeComparablePath(path: string): string {
+  return normalizeRelativePath(path)
+    .replace(/\s+/g, " ")
+    .replace(/\s+\./g, ".")
+    .toLowerCase();
+}
+
+function joinRelativePath(folderName: string, fileName: string): string {
+  const folder = normalizeRelativePath(folderName);
+  const file = normalizeRelativePath(fileName);
+  if (!file) return "";
+  if (!folder || folder === "." || folder.toLowerCase() === "root") return file;
+  return `${folder}/${file}`;
+}
+
+function buildIndexedPathMaps(indexData: any): {
+  byPath: Map<string, string>;
+  byBasename: Map<string, string>;
+  ambiguousBasenames: Set<string>;
+} {
+  const byPath = new Map<string, string>();
+  const byBasename = new Map<string, string>();
+  const ambiguousBasenames = new Set<string>();
+
+  const folders = indexData?.folders;
+  if (!folders || typeof folders !== "object") {
+    return { byPath, byBasename, ambiguousBasenames };
+  }
+
+  const add = (path: string) => {
+    const canonicalPath = normalizeRelativePath(path);
+    const key = normalizeComparablePath(canonicalPath);
+    if (!canonicalPath || !key) return;
+    if (!byPath.has(key)) {
+      byPath.set(key, canonicalPath);
+    }
+    const basename = normalizeComparablePath(canonicalPath.split("/").pop() || canonicalPath);
+    if (!basename) return;
+    if (!byBasename.has(basename)) {
+      byBasename.set(basename, canonicalPath);
+    } else if (byBasename.get(basename) !== canonicalPath) {
+      ambiguousBasenames.add(basename);
+    }
+  };
+
+  for (const [folderName, folderData] of Object.entries(folders)) {
+    let files: any[] = [];
+    if (Array.isArray(folderData)) {
+      files = folderData;
+    } else if (folderData && typeof folderData === "object") {
+      const folderObj = folderData as any;
+      if (Array.isArray(folderObj.files)) files = folderObj.files;
+      else if (Array.isArray(folderObj.documents)) files = folderObj.documents;
+    }
+
+    for (const file of files) {
+      if (typeof file === "string") {
+        add(joinRelativePath(folderName, file));
+        continue;
+      }
+      if (!file || typeof file !== "object") continue;
+      const entryPath = typeof file.path === "string" ? normalizeRelativePath(file.path) : "";
+      const entryFile = typeof file.filename === "string" ? file.filename : typeof file.file === "string" ? file.file : "";
+      const canonicalPath =
+        entryPath && entryPath.includes("/")
+          ? entryPath
+          : joinRelativePath(folderName, entryPath || entryFile);
+      if (!canonicalPath) continue;
+      add(canonicalPath);
+    }
+  }
+
+  return { byPath, byBasename, ambiguousBasenames };
+}
+
+function canonicalizeDocumentPath(
+  requestedPath: string,
+  maps: { byPath: Map<string, string>; byBasename: Map<string, string>; ambiguousBasenames: Set<string> }
+): string | null {
+  const normalized = normalizeRelativePath(requestedPath);
+  const byPathKey = normalizeComparablePath(normalized);
+  const direct = maps.byPath.get(byPathKey);
+  if (direct) return direct;
+
+  const basename = normalizeComparablePath(normalized.split("/").pop() || normalized);
+  if (basename && !maps.ambiguousBasenames.has(basename)) {
+    return maps.byBasename.get(basename) || null;
+  }
+
+  return null;
+}
+
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
   if (value < 0) return 0;
@@ -1334,6 +1426,9 @@ app.post("/generate-packet", async (c) => {
   if (!caseFolder || !documents || !frontMatter) {
     return c.json({ error: "caseFolder, documents, and frontMatter required" }, 400);
   }
+  if (!Array.isArray(documents)) {
+    return c.json({ error: "documents must be an array" }, 400);
+  }
 
   const access = await requireCaseAccess(c, caseFolder);
   if (!access.ok) {
@@ -1341,6 +1436,41 @@ app.post("/generate-packet", async (c) => {
   }
 
   try {
+    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexContent = await readFile(indexPath, "utf-8");
+    const indexData = JSON.parse(indexContent);
+    const maps = buildIndexedPathMaps(indexData);
+
+    const unresolvedPaths: string[] = [];
+    const canonicalDocuments = (documents as any[])
+      .map((d: any) => {
+        const requestedPath = typeof d?.path === "string" ? d.path : "";
+        const canonicalPath = canonicalizeDocumentPath(requestedPath, maps);
+        if (!canonicalPath) {
+          if (requestedPath.trim()) unresolvedPaths.push(requestedPath);
+          return null;
+        }
+        return {
+          path: canonicalPath,
+          title: d?.title || "",
+          date: d?.date || undefined,
+          docType: d?.docType || d?.type || undefined,
+          include: d?.include !== false,
+        };
+      })
+      .filter((d): d is { path: string; title: string; date?: string; docType?: string; include: boolean } => Boolean(d));
+
+    if (unresolvedPaths.length > 0) {
+      return c.json({
+        error: "Some selected documents could not be resolved from the current index. Refresh the packet selections and try again.",
+        invalidPaths: unresolvedPaths,
+      }, 400);
+    }
+
+    if (canonicalDocuments.length === 0) {
+      return c.json({ error: "None of the selected documents matched indexed files" }, 400);
+    }
+
     const caption: EvidencePacketCaption = {
       claimantName: frontMatter.claimantName || "",
       claimNumber: frontMatter.claimNumber,
@@ -1358,13 +1488,7 @@ app.post("/generate-packet", async (c) => {
 
     const result = await buildEvidencePacket({
       caseFolder,
-      documents: documents.map((d: any) => ({
-        path: d.path,
-        title: d.title || "",
-        date: d.date || undefined,
-        docType: d.docType || d.type || undefined,
-        include: d.include !== false,
-      })),
+      documents: canonicalDocuments,
       caption,
       redaction: redactionMode
         ? { enabled: true, mode: redactionMode }
@@ -1388,7 +1512,7 @@ app.post("/generate-packet", async (c) => {
       const draftId = `packet-${Date.now()}`;
       await writeFile(
         join(draftsDir, `${draftId}.json`),
-        JSON.stringify({ documents, frontMatter, generatedAt: new Date().toISOString(), outputPath: outputRelPath }, null, 2),
+        JSON.stringify({ documents: canonicalDocuments, frontMatter, generatedAt: new Date().toISOString(), outputPath: outputRelPath }, null, 2),
         "utf-8"
       );
     } catch { /* ignore draft save errors */ }
@@ -1419,9 +1543,15 @@ app.post("/batch-scan-pii", async (c) => {
   }
 
   try {
+    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexContent = await readFile(indexPath, "utf-8");
+    const indexData = JSON.parse(indexContent);
+    const maps = buildIndexedPathMaps(indexData);
+
     const results = await Promise.all(
       paths.map(async (relativePath: string) => {
-        const normalized = normalizeRelativePath(relativePath);
+        const requestedPath = normalizeRelativePath(relativePath);
+        const normalized = canonicalizeDocumentPath(requestedPath, maps) || requestedPath;
         if (!normalized.toLowerCase().endsWith(".pdf")) {
           return { path: normalized, findings: [], approved: true };
         }

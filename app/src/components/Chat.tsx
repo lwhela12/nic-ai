@@ -4,7 +4,8 @@ import remarkGfm from 'remark-gfm'
 
 interface EvidencePacketPlanData {
   documents: Array<{
-    path: string
+    docId?: string
+    path?: string
     title?: string
   }>
   frontMatter: Partial<{
@@ -623,18 +624,29 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
       let assistantMessage = ''
       let toolsUsed: string[] = []
       const decoder = new TextDecoder()
+      let buffer = ''
 
       while (true) {
         const { done, value } = await reader.read()
-        if (done) break
-
-        const chunk = decoder.decode(value)
-        const lines = chunk.split('\n')
+        buffer += done
+          ? decoder.decode()
+          : decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        if (done && buffer) {
+          lines.push(buffer)
+          buffer = ''
+        }
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
+          const trimmed = line.trim()
+          if (trimmed.startsWith('data:')) {
             try {
-              const data = JSON.parse(line.slice(6))
+              const dataStr = trimmed.startsWith('data: ')
+                ? trimmed.slice(6)
+                : trimmed.slice(5).trim()
+              if (!dataStr) continue
+              const data = JSON.parse(dataStr)
 
               // Note: chat-v2 doesn't use sessions, so no 'init' event
               if (data.type === 'init' && data.sessionId) {
@@ -687,10 +699,13 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                 const caption = data.plan.caption || {}
                 const service = data.plan.service || {}
                 onEvidencePacketPlanned({
-                  documents: proposed.map((d: { path: string; title?: string }) => ({
-                    path: d.path,
-                    title: d.title,
-                  })),
+                  documents: proposed
+                    .map((d: { docId?: string; doc_id?: string; path?: string; title?: string }) => ({
+                      docId: (d.docId || d.doc_id || '').trim() || undefined,
+                      path: (d.path || '').trim() || undefined,
+                      title: d.title,
+                    }))
+                    .filter((d: { docId?: string; path?: string }) => Boolean(d.docId || d.path)),
                   frontMatter: {
                     ...caption,
                     hearingNumber: caption.hearingNumber,
@@ -794,6 +809,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
             }
           }
         }
+        if (done) break
       }
 
       if (assistantMessage.includes('<div') || assistantMessage.includes('<table')) {

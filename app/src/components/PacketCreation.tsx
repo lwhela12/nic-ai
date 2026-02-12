@@ -15,6 +15,19 @@ interface Props {
 
 type Tab = 'documents' | 'frontmatter' | 'pii'
 
+function packetDisplayTitle(title: string | undefined, fallback: string): string {
+  const normalized = String(title || '').trim()
+  if (!normalized) return fallback
+  const lower = normalized.toLowerCase()
+  if (lower === 'selected document' || lower === 'selected doc' || lower === 'document') {
+    return fallback
+  }
+  if (/^doc_[a-f0-9]{8}$/i.test(lower)) {
+    return fallback
+  }
+  return normalized
+}
+
 // Icons
 const GripIcon = () => (
   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -359,7 +372,16 @@ export default function PacketCreation({
         }
       } else {
         const data = await res.json().catch(() => ({ error: 'Generation failed' }))
-        setGenerateError(data.error || 'Generation failed')
+        const invalidPaths = Array.isArray(data?.invalidPaths)
+          ? data.invalidPaths.filter((v: unknown): v is string => typeof v === 'string' && v.trim().length > 0)
+          : []
+        if (invalidPaths.length > 0) {
+          const preview = invalidPaths.slice(0, 3).join(', ')
+          const suffix = invalidPaths.length > 3 ? ` (+${invalidPaths.length - 3} more)` : ''
+          setGenerateError(`${data.error || 'Generation failed'} Missing: ${preview}${suffix}`)
+        } else {
+          setGenerateError(data.error || 'Generation failed')
+        }
       }
     } catch (err) {
       setGenerateError(err instanceof Error ? err.message : 'Generation failed')
@@ -559,7 +581,7 @@ function DocumentsTab({
               onClick={() => onShowFile(doc.path)}
               className="flex-1 text-left min-w-0"
             >
-              <p className="text-sm text-brand-800 truncate">{doc.title || doc.fileName}</p>
+              <p className="text-sm text-brand-800 truncate">{packetDisplayTitle(doc.title, doc.fileName)}</p>
               <div className="flex items-center gap-2 mt-0.5">
                 {doc.date ? (
                   <span className="text-[11px] text-brand-500">{doc.date}</span>
@@ -874,7 +896,7 @@ function PiiScanTab({
                     onClick={() => onShowFile(result.path)}
                     className="flex-1 text-left min-w-0"
                   >
-                    <p className="text-sm text-brand-700 truncate">{doc?.title || result.path.split('/').pop()}</p>
+                    <p className="text-sm text-brand-700 truncate">{packetDisplayTitle(doc?.title, result.path.split('/').pop() || result.path)}</p>
                     <div className="flex items-center gap-2 mt-0.5">
                       {result.findings.length === 0 ? (
                         <span className="text-[11px] text-emerald-600">No PII detected</span>
