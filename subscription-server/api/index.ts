@@ -307,6 +307,9 @@ const ADMIN_HTML = `<!DOCTYPE html>
       }
     }
     async function assignKeyToUser(keyId, userId) {
+      if (!keyId) {
+        return;
+      }
       try {
         await apiCall('/v1/admin/api-keys/' + keyId + '/assign', { method: 'PATCH', body: JSON.stringify({ userId: userId || null }) });
         setState({ showAssignKey: null });
@@ -314,6 +317,41 @@ const ADMIN_HTML = `<!DOCTYPE html>
       } catch (err) {
         setState({ error: err.message });
       }
+    }
+    function getAssignedKeyByProvider(user, provider) {
+      const keys = (user && user.assignedKeys) || [];
+      return keys.find((k) => (k.provider || 'anthropic') === provider) || null;
+    }
+    async function saveUserKeyAssignments() {
+      if (!state.selectedUser) {
+        return;
+      }
+      const anthropicSelect = document.getElementById("userAnthropicKeySelect");
+      const groqSelect = document.getElementById("userGroqKeySelect");
+      const nextAnthropicKey = anthropicSelect && anthropicSelect.value ? parseInt(anthropicSelect.value, 10) : null;
+      const nextGroqKey = groqSelect && groqSelect.value ? parseInt(groqSelect.value, 10) : null;
+      const currentAnthropicKey = getAssignedKeyByProvider(state.selectedUser, "anthropic");
+      const currentGroqKey = getAssignedKeyByProvider(state.selectedUser, "groq");
+
+      if ((currentAnthropicKey?.id || null) !== nextAnthropicKey) {
+        if (currentAnthropicKey?.id) {
+          await assignKeyToUser(currentAnthropicKey.id, null);
+        }
+        if (nextAnthropicKey) {
+          await assignKeyToUser(nextAnthropicKey, state.selectedUser.id);
+        }
+      }
+
+      if ((currentGroqKey?.id || null) !== nextGroqKey) {
+        if (currentGroqKey?.id) {
+          await assignKeyToUser(currentGroqKey.id, null);
+        }
+        if (nextGroqKey) {
+          await assignKeyToUser(nextGroqKey, state.selectedUser.id);
+        }
+      }
+
+      await viewUser(state.selectedUser.id);
     }
     async function viewUser(userId) {
       try {
@@ -463,7 +501,16 @@ const ADMIN_HTML = `<!DOCTYPE html>
       const usageHtml = !state.usage ? '<div class="text-brand-500">Loading usage data...</div>' : '<div class="space-y-6"><div class="grid grid-cols-2 md:grid-cols-4 gap-4"><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + formatTokens(state.usage.summary.last7Days.totalTokens) + '</div><div class="text-brand-500">Tokens (7 days)</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.usage.summary.last7Days.requestCount + '</div><div class="text-brand-500">Requests (7 days)</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + formatTokens(state.usage.summary.last30Days.totalTokens) + '</div><div class="text-brand-500">Tokens (30 days)</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.usage.summary.last30Days.requestCount + '</div><div class="text-brand-500">Requests (30 days)</div></div></div><div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><h3 class="px-4 py-3 font-medium text-brand-700 bg-surface-50 border-b border-surface-200">Usage by User (30 days)</h3><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">User</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Tokens</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Requests</th></tr></thead><tbody>' + (state.usage.byUser || []).filter(u => u.totalTokens > 0).map(u => '<tr class="border-b border-surface-200 last:border-0"><td class="px-4 py-3 text-brand-900">' + u.email + '</td><td class="px-4 py-3 text-brand-500">' + formatTokens(u.totalTokens) + '</td><td class="px-4 py-3 text-brand-500">' + u.requestCount + '</td></tr>').join('') + '</tbody></table></div><div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><h3 class="px-4 py-3 font-medium text-brand-700 bg-surface-50 border-b border-surface-200">Recent Activity</h3><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">User</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Type</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Tokens</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Time</th></tr></thead><tbody>' + (state.usage.recentLogs || []).slice(0, 20).map(l => '<tr class="border-b border-surface-200 last:border-0"><td class="px-4 py-3 text-brand-900">' + l.email + '</td><td class="px-4 py-3 text-brand-500">' + (l.requestType || 'unknown') + '</td><td class="px-4 py-3 text-brand-500">' + formatTokens(l.tokensUsed) + '</td><td class="px-4 py-3 text-brand-500 text-sm">' + formatDateTime(l.loggedAt) + '</td></tr>').join('') + '</tbody></table></div></div>';
       const addKeyModalHtml = state.showAddKey ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">Add API Key</h2><div class="space-y-4"><div><label class="block text-sm font-medium text-brand-700 mb-1">Name (optional)</label><input type="text" id="newKeyName" value="' + state.newKeyName + '" placeholder="e.g., Production Key 1" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Provider</label><select id="newKeyProvider" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="anthropic"' + (state.newKeyProvider === 'anthropic' ? ' selected' : '') + '>Anthropic</option><option value="groq"' + (state.newKeyProvider === 'groq' ? ' selected' : '') + '>Groq</option></select></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Provider API Key</label><input type="password" id="newKeyValue" value="' + state.newKeyValue + '" placeholder="sk-..." class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAddKey:false,newKeyName:\\'\\',newKeyValue:\\'\\',newKeyProvider:\\'anthropic\\'})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="addKey()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Add Key</button></div></div></div>' : '';
       const addUserModalHtml = state.showAddUser ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-2">Create Root Invite</h2><p class="text-sm text-brand-500 mb-4">Create signup eligibility by email for a root account. Team members are invited later by that root user.</p><div class="space-y-4"><div><label class="block text-sm font-medium text-brand-700 mb-1">Email</label><input type="email" id="newUserEmail" value="' + state.newUserEmail + '" placeholder="owner@firm.com" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div class="grid grid-cols-2 gap-3"><div><label class="block text-sm font-medium text-brand-700 mb-1">Trial Days</label><input type="number" min="0" id="newUserTrialDays" value="' + state.newUserTrialDays + '" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Max Licenses</label><input type="number" min="1" id="newUserMaxLicenses" value="' + state.newUserMaxLicenses + '" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAddUser:false,newUserEmail:\\'\\',newUserTrialDays:14,newUserMaxLicenses:10})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="createUserAdmin()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Create Invite</button></div></div></div>' : '';
-      const userModalHtml = state.showUserModal && state.selectedUser ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-lg p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">' + state.selectedUser.email + '</h2><div class="space-y-4"><div class="grid grid-cols-2 gap-4"><div><div class="text-sm text-brand-500">Status</div><div class="font-medium">' + state.selectedUser.subscriptionStatus + '</div></div><div><div class="text-sm text-brand-500">Created</div><div class="font-medium">' + formatDate(state.selectedUser.createdAt) + '</div></div><div><div class="text-sm text-brand-500">Expires</div><div class="font-medium">' + formatDate(state.selectedUser.trialEndsAt || state.selectedUser.currentPeriodEnd) + '</div></div><div><div class="text-sm text-brand-500">Assigned Key</div><div class="font-medium">' + (state.selectedUser.assignedKey ? state.selectedUser.assignedKey.name : 'Pool') + '</div></div></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Usage (Last 30 Days)</div><div class="grid grid-cols-2 gap-4"><div class="bg-surface-50 rounded-lg p-3"><div class="text-xl font-semibold text-brand-900">' + formatTokens(state.selectedUser.usage?.last30Days?.totalTokens || 0) + '</div><div class="text-sm text-brand-500">Tokens</div></div><div class="bg-surface-50 rounded-lg p-3"><div class="text-xl font-semibold text-brand-900">' + (state.selectedUser.usage?.last30Days?.requestCount || 0) + '</div><div class="text-sm text-brand-500">Requests</div></div></div></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Assign API Key</div><select id="userKeySelect" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="">Use Pool (Rotation)</option>' + state.apiKeys.filter(k => k.isActive).map(k => '<option value="' + k.id + '" ' + (state.selectedUser.assignedKey?.id === k.id ? 'selected' : '') + '>' + (k.name || 'Unnamed') + ' [' + (k.provider || 'anthropic') + ']' + (k.assignedUserEmail && k.assignedToUserId !== state.selectedUser.id ? ' (assigned to ' + k.assignedUserEmail + ')' : '') + '</option>').join('') + '</select></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Actions</div><div class="flex gap-2 flex-wrap"><button onclick="extendTrial(' + state.selectedUser.id + ', 7)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+7 Days</button><button onclick="extendTrial(' + state.selectedUser.id + ', 14)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+14 Days</button><button onclick="extendTrial(' + state.selectedUser.id + ', 30)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+30 Days</button><button onclick="updateUserSubscription(' + state.selectedUser.id + ', {status: \\'active\\'})" class="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-sm hover:bg-blue-100">Set Active</button><button onclick="updateUserSubscription(' + state.selectedUser.id + ', {status: \\'expired\\'})" class="px-3 py-1.5 bg-red-50 text-red-700 rounded-lg text-sm hover:bg-red-100">Expire</button></div></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showUserModal:false,selectedUser:null})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Close</button><button onclick="(function(){ var sel = document.getElementById(\\'userKeySelect\\'); assignKeyToUser(state.selectedUser.assignedKey?.id || null, null); var keyId = sel.value ? parseInt(sel.value) : null; if(keyId) assignKeyToUser(keyId, state.selectedUser.id); else if(state.selectedUser.assignedKey) assignKeyToUser(state.selectedUser.assignedKey.id, null); viewUser(state.selectedUser.id); })()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Save Key Assignment</button></div></div></div>' : '';
+      const selectedAnthropicKey = state.selectedUser ? getAssignedKeyByProvider(state.selectedUser, "anthropic") : null;
+      const selectedGroqKey = state.selectedUser ? getAssignedKeyByProvider(state.selectedUser, "groq") : null;
+      const selectedUserId = state.selectedUser ? state.selectedUser.id : null;
+      const anthropicKeyOptions = state.apiKeys
+        .filter((k) => k.isActive && (k.provider || "anthropic") === "anthropic")
+        .map((k) => '<option value="' + k.id + '" ' + ((selectedAnthropicKey && selectedAnthropicKey.id === k.id) ? 'selected' : '') + '>' + (k.name || "Unnamed") + (selectedUserId !== null && k.assignedUserEmail && k.assignedToUserId !== selectedUserId ? " (assigned to " + k.assignedUserEmail + ")" : "") + "</option>");
+      const groqKeyOptions = state.apiKeys
+        .filter((k) => k.isActive && (k.provider || "anthropic") === "groq")
+        .map((k) => '<option value="' + k.id + '" ' + ((selectedGroqKey && selectedGroqKey.id === k.id) ? 'selected' : '') + '>' + (k.name || "Unnamed") + (selectedUserId !== null && k.assignedUserEmail && k.assignedToUserId !== selectedUserId ? " (assigned to " + k.assignedUserEmail + ")" : "") + "</option>");
+      const userModalHtml = state.showUserModal && state.selectedUser ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-lg p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">' + state.selectedUser.email + '</h2><div class="space-y-4"><div class="grid grid-cols-2 gap-4"><div><div class="text-sm text-brand-500">Status</div><div class="font-medium">' + state.selectedUser.subscriptionStatus + '</div></div><div><div class="text-sm text-brand-500">Created</div><div class="font-medium">' + formatDate(state.selectedUser.createdAt) + '</div></div><div><div class="text-sm text-brand-500">Expires</div><div class="font-medium">' + formatDate(state.selectedUser.trialEndsAt || state.selectedUser.currentPeriodEnd) + '</div></div><div><div class="text-sm text-brand-500">Anthropic Key</div><div class="font-medium">' + (selectedAnthropicKey ? selectedAnthropicKey.name : "Pool") + '</div></div><div><div class="text-sm text-brand-500">Groq Key</div><div class="font-medium">' + (selectedGroqKey ? selectedGroqKey.name : "Pool") + '</div></div></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Usage (Last 30 Days)</div><div class="grid grid-cols-2 gap-4"><div class="bg-surface-50 rounded-lg p-3"><div class="text-xl font-semibold text-brand-900">' + formatTokens(state.selectedUser.usage?.last30Days?.totalTokens || 0) + '</div><div class="text-sm text-brand-500">Tokens</div></div><div class="bg-surface-50 rounded-lg p-3"><div class="text-xl font-semibold text-brand-900">' + (state.selectedUser.usage?.last30Days?.requestCount || 0) + '</div><div class="text-sm text-brand-500">Requests</div></div></div></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Assign Anthropic API Key</div><select id="userAnthropicKeySelect" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="">Use Pool (Rotation)</option>' + anthropicKeyOptions.join('') + '</select></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Assign Groq API Key</div><select id="userGroqKeySelect" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="">Use Pool (Rotation)</option>' + groqKeyOptions.join('') + '</select></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Actions</div><div class="flex gap-2 flex-wrap"><button onclick="extendTrial(' + state.selectedUser.id + ', 7)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+7 Days</button><button onclick="extendTrial(' + state.selectedUser.id + ', 14)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+14 Days</button><button onclick="extendTrial(' + state.selectedUser.id + ', 30)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+30 Days</button><button onclick="updateUserSubscription(' + state.selectedUser.id + ', {status: \\'active\\'})" class="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-sm hover:bg-blue-100">Set Active</button><button onclick="updateUserSubscription(' + state.selectedUser.id + ', {status: \\'expired\\'})" class="px-3 py-1.5 bg-red-50 text-red-700 rounded-lg text-sm hover:bg-red-100">Expire</button></div></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showUserModal:false,selectedUser:null})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Close</button><button onclick="saveUserKeyAssignments()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Save Key Assignment</button></div></div></div>' : '';
       const assignKeyModalHtml = state.showAssignKey ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">Assign Key to User</h2><div class="space-y-4"><select id="assignUserSelect" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="">Unassigned (Pool)</option>' + state.users.map(u => '<option value="' + u.id + '">' + u.email + '</option>').join('') + '</select></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAssignKey:null})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="(function(){ var sel = document.getElementById(\\'assignUserSelect\\'); assignKeyToUser(state.showAssignKey, sel.value ? parseInt(sel.value) : null); })()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Assign</button></div></div></div>' : '';
       app.innerHTML = '<div class="max-w-6xl mx-auto p-6"><div class="flex justify-between items-center mb-8"><h1 class="text-2xl font-semibold text-brand-900">Claude PI Admin</h1><button onclick="logout()" class="text-brand-500 hover:text-brand-700">Sign Out</button></div>' + (state.error ? '<div class="bg-red-50 text-red-700 px-4 py-3 rounded-lg mb-4">' + state.error + ' <button onclick="setState({error:null})" class="ml-2 underline">Dismiss</button></div>' : '') + '<div class="flex gap-2 mb-6"><button onclick="setState({tab:\\'stats\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'stats' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Stats</button><button onclick="setState({tab:\\'users\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'users' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Users</button><button onclick="setState({tab:\\'keys\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'keys' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">API Keys</button><button onclick="setState({tab:\\'usage\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'usage' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Usage</button></div>' + (state.tab === 'stats' ? statsHtml : '') + (state.tab === 'users' ? usersHtml : '') + (state.tab === 'keys' ? keysHtml : '') + (state.tab === 'usage' ? usageHtml : '') + '<div class="mt-8 pt-6 border-t border-surface-200"><button onclick="runMaintenance()" ' + (state.loading ? 'disabled' : '') + ' class="px-4 py-2 bg-accent-600 text-white rounded-lg hover:bg-accent-500 disabled:opacity-50">' + (state.loading ? 'Running...' : 'Run Maintenance') + '</button><span class="ml-3 text-sm text-brand-500">Cleans expired tokens & resets daily usage counters</span></div></div>' + addKeyModalHtml + addUserModalHtml + userModalHtml + assignKeyModalHtml;
     }
@@ -1625,7 +1672,7 @@ app.patch("/v1/admin/api-keys/:id/assign", adminAuth, async (c) => {
   return c.json({ success: true });
 });
 
-// Get single user with assigned key info
+// Get single user with assigned API keys
 app.get("/v1/admin/users/:id", adminAuth, async (c) => {
   await ensureDatabase();
   const id = parseInt(c.req.param("id"));
@@ -1634,12 +1681,10 @@ app.get("/v1/admin/users/:id", adminAuth, async (c) => {
     SELECT u.id, u.email, u.created_at, u.owner_user_id, u.max_licenses,
            owner.email as owner_email,
            s_owner.status as subscription_status, s_owner.trial_ends_at, s_owner.current_period_end,
-           s_owner.stripe_customer_id, s_owner.stripe_subscription_id,
-           k.id as assigned_key_id, k.key_name as assigned_key_name
+           s_owner.stripe_customer_id, s_owner.stripe_subscription_id
     FROM users u
     LEFT JOIN users owner ON u.owner_user_id = owner.id
     LEFT JOIN subscriptions s_owner ON COALESCE(u.owner_user_id, u.id) = s_owner.user_id
-    LEFT JOIN api_key_pool k ON k.assigned_to_user_id = u.id AND k.is_active = TRUE
     WHERE u.id = ${id}
   `;
 
@@ -1658,6 +1703,26 @@ app.get("/v1/admin/users/:id", adminAuth, async (c) => {
   `;
   const usageStats = usageRows[0] || { total_tokens: 0, request_count: 0 };
 
+  const { rows: assignedRows } = await sql`
+    SELECT id, key_name, provider
+    FROM api_key_pool
+    WHERE assigned_to_user_id = ${id} AND is_active = TRUE
+    ORDER BY provider, id
+  `;
+
+  const assignedKeys = assignedRows
+    .map((k: any) => ({
+      id: k.id,
+      name: k.key_name,
+      provider: k.provider || 'anthropic',
+    }))
+    .reduce((acc: any[], key: any) => {
+      if (!acc.some((item: any) => item.provider === key.provider)) {
+        acc.push(key);
+      }
+      return acc;
+    }, []);
+
   return c.json({
     id: u.id,
     email: u.email,
@@ -1670,10 +1735,7 @@ app.get("/v1/admin/users/:id", adminAuth, async (c) => {
     trialEndsAt: u.trial_ends_at,
     currentPeriodEnd: u.current_period_end,
     stripeCustomerId: u.stripe_customer_id,
-    assignedKey: u.assigned_key_id ? {
-      id: u.assigned_key_id,
-      name: u.assigned_key_name,
-    } : null,
+    assignedKeys,
     usage: {
       last30Days: {
         totalTokens: Number(usageStats.total_tokens),
@@ -1891,12 +1953,10 @@ app.get("/v1/admin/users", adminAuth, async (c) => {
     SELECT u.id, u.email, u.created_at, u.owner_user_id, u.max_licenses,
            owner.email as owner_email,
            s_owner.status as subscription_status, s_owner.trial_ends_at, s_owner.current_period_end,
-           s_owner.stripe_customer_id, s_owner.stripe_subscription_id,
-           k.id as assigned_key_id, k.key_name as assigned_key_name
+           s_owner.stripe_customer_id, s_owner.stripe_subscription_id
     FROM users u
     LEFT JOIN users owner ON u.owner_user_id = owner.id
     LEFT JOIN subscriptions s_owner ON COALESCE(u.owner_user_id, u.id) = s_owner.user_id
-    LEFT JOIN api_key_pool k ON k.assigned_to_user_id = u.id AND k.is_active = TRUE
     ORDER BY u.created_at DESC
   `;
 
@@ -1913,8 +1973,6 @@ app.get("/v1/admin/users", adminAuth, async (c) => {
       trialEndsAt: u.trial_ends_at,
       currentPeriodEnd: u.current_period_end,
       stripeCustomerId: u.stripe_customer_id,
-      assignedKeyId: u.assigned_key_id,
-      assignedKeyName: u.assigned_key_name,
     })),
   });
 });
