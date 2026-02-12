@@ -29,6 +29,7 @@ interface Config {
   authToken?: string;
   email?: string;
   anthropicApiKey?: string;
+  groqApiKey?: string;
   lastValidated?: string;
   subscriptionStatus?: string;
   expiresAt?: string;
@@ -84,7 +85,7 @@ function isWithinGracePeriod(config: Config): boolean {
  */
 async function validateSubscription(
   authToken: string
-): Promise<{ anthropicApiKey: string; subscriptionStatus: string; expiresAt: string } | null> {
+): Promise<{ anthropicApiKey: string | null; groqApiKey: string | null; subscriptionStatus: string; expiresAt: string } | null> {
   const url = `${SUBSCRIPTION_SERVER}/v1/auth/validate`;
 
   try {
@@ -143,6 +144,11 @@ export async function authMiddleware(c: Context, next: Next) {
         process.env.ANTHROPIC_API_KEY = config.anthropicApiKey;
       }
     }
+    if (!process.env.GROQ_API_KEY) {
+      if (config?.groqApiKey) {
+        process.env.GROQ_API_KEY = config.groqApiKey;
+      }
+    }
     return next();
   }
 
@@ -191,6 +197,7 @@ export async function authMiddleware(c: Context, next: Next) {
       cachedConfig = {
         ...config,
         anthropicApiKey: validation.anthropicApiKey,
+        groqApiKey: validation.groqApiKey,
         lastValidated: new Date().toISOString(),
         subscriptionStatus: validation.subscriptionStatus,
         expiresAt: validation.expiresAt,
@@ -198,7 +205,12 @@ export async function authMiddleware(c: Context, next: Next) {
 
       // Note: We don't write to file here - that's handled by the CLI
       // Just update the env so the API key is available
-      process.env.ANTHROPIC_API_KEY = validation.anthropicApiKey;
+      if (validation.anthropicApiKey) {
+        process.env.ANTHROPIC_API_KEY = validation.anthropicApiKey;
+      }
+      if (validation.groqApiKey) {
+        process.env.GROQ_API_KEY = validation.groqApiKey;
+      }
     } else {
       // Sub-users require fresh root-backed validation to continue.
       if (isSubUser) {
@@ -231,9 +243,14 @@ export async function authMiddleware(c: Context, next: Next) {
   if (config.anthropicApiKey && !process.env.ANTHROPIC_API_KEY) {
     process.env.ANTHROPIC_API_KEY = config.anthropicApiKey;
   }
+  if (config.groqApiKey && !process.env.GROQ_API_KEY) {
+    process.env.GROQ_API_KEY = config.groqApiKey;
+  }
 
   // Final check - if no API key is available, fail the request
-  if (!process.env.ANTHROPIC_API_KEY) {
+  const hasAnthropicApiKey = !!process.env.ANTHROPIC_API_KEY || !!config.anthropicApiKey;
+  const hasGroqApiKey = !!process.env.GROQ_API_KEY || !!config.groqApiKey;
+  if (!hasAnthropicApiKey || !hasGroqApiKey) {
     return c.json(
       {
         error: "reauth_required",

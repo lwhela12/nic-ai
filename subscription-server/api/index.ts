@@ -177,6 +177,7 @@ const ADMIN_HTML = `<!DOCTYPE html>
       showAddKey: false,
       newKeyName: '',
       newKeyValue: '',
+      newKeyProvider: 'anthropic',
       showUserModal: null,
       selectedUser: null,
       expandedRootIds: [],
@@ -288,8 +289,18 @@ const ADMIN_HTML = `<!DOCTYPE html>
       if (!state.newKeyValue) return;
       setState({ loading: true });
       try {
-        await apiCall('/v1/admin/api-keys', { method: 'POST', body: JSON.stringify({ key: state.newKeyValue, name: state.newKeyName || 'Unnamed' }) });
-        setState({ showAddKey: false, newKeyName: '', newKeyValue: '', loading: false });
+        await apiCall('/v1/admin/api-keys', { method: 'POST', body: JSON.stringify({
+          key: state.newKeyValue,
+          name: state.newKeyName || 'Unnamed',
+          provider: state.newKeyProvider || 'anthropic',
+        }) });
+        setState({
+          showAddKey: false,
+          newKeyName: '',
+          newKeyValue: '',
+          newKeyProvider: 'anthropic',
+          loading: false,
+        });
         loadData();
       } catch (err) {
         setState({ error: err.message, loading: false });
@@ -448,11 +459,11 @@ const ADMIN_HTML = `<!DOCTYPE html>
       }).join('');
       const usersTableHtml = !state.rootUsers.length ? '<div class="text-brand-500">No root users yet</div>' : '<div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Root User</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Status</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Licenses</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Sub Users</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Pending Invites</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Actions</th></tr></thead><tbody>' + rootRowsHtml + '</tbody></table></div>';
       const usersHtml = usersHeaderHtml + usersTableHtml;
-      const keysHtml = '<div class="mb-4"><button onclick="setState({showAddKey:true})" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">+ Add API Key</button></div>' + (state.apiKeys.length ? '<div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Name</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Status</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Assigned To</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Daily Usage</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Actions</th></tr></thead><tbody>' + state.apiKeys.map(k => '<tr class="border-b border-surface-200 last:border-0 ' + (k.isActive ? (k.assignedUserEmail ? 'bg-green-50/30' : 'bg-amber-50/30') : 'bg-red-50/30') + '"><td class="px-4 py-3 text-brand-900">' + (k.name || 'Unnamed') + '</td><td class="px-4 py-3"><span class="inline-flex px-2 py-1 text-xs font-medium rounded-md ' + (k.isActive ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700') + '">' + (k.isActive ? 'Active' : 'Disabled') + '</span></td><td class="px-4 py-3">' + (k.assignedUserEmail ? '<span class="text-green-600">' + k.assignedUserEmail + '</span>' : '<span class="text-brand-400">Unassigned</span>') + '</td><td class="px-4 py-3 text-brand-500">' + formatTokens(k.dailyUsageTokens || 0) + '</td><td class="px-4 py-3 space-x-2"><button onclick="setState({showAssignKey:' + k.id + '})" class="text-sm text-blue-600 hover:text-blue-500">Assign</button><button onclick="toggleKeyActive(' + k.id + ', ' + k.isActive + ')" class="text-sm text-accent-600 hover:text-accent-500">' + (k.isActive ? 'Disable' : 'Enable') + '</button><button onclick="deleteKey(' + k.id + ')" class="text-sm text-red-600 hover:text-red-500">Delete</button></td></tr>').join('') + '</tbody></table></div>' : '<div class="text-brand-500">No API keys in pool</div>');
+      const keysHtml = '<div class="mb-4"><button onclick="setState({showAddKey:true})" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">+ Add API Key</button></div>' + (state.apiKeys.length ? '<div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Name</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Provider</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Status</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Assigned To</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Daily Usage</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Actions</th></tr></thead><tbody>' + state.apiKeys.map(k => '<tr class="border-b border-surface-200 last:border-0 ' + (k.isActive ? (k.assignedUserEmail ? 'bg-green-50/30' : 'bg-amber-50/30') : 'bg-red-50/30') + '"><td class="px-4 py-3 text-brand-900">' + (k.name || 'Unnamed') + '</td><td class="px-4 py-3 text-brand-500">' + (k.provider || 'anthropic') + '</td><td class="px-4 py-3"><span class="inline-flex px-2 py-1 text-xs font-medium rounded-md ' + (k.isActive ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700') + '">' + (k.isActive ? 'Active' : 'Disabled') + '</span></td><td class="px-4 py-3">' + (k.assignedUserEmail ? '<span class="text-green-600">' + k.assignedUserEmail + '</span>' : '<span class="text-brand-400">Unassigned</span>') + '</td><td class="px-4 py-3 text-brand-500">' + formatTokens(k.dailyUsageTokens || 0) + '</td><td class="px-4 py-3 space-x-2"><button onclick="setState({showAssignKey:' + k.id + '})" class="text-sm text-blue-600 hover:text-blue-500">Assign</button><button onclick="toggleKeyActive(' + k.id + ', ' + k.isActive + ')" class="text-sm text-accent-600 hover:text-accent-500">' + (k.isActive ? 'Disable' : 'Enable') + '</button><button onclick="deleteKey(' + k.id + ')" class="text-sm text-red-600 hover:text-red-500">Delete</button></td></tr>').join('') + '</tbody></table></div>' : '<div class="text-brand-500">No API keys in pool</div>');
       const usageHtml = !state.usage ? '<div class="text-brand-500">Loading usage data...</div>' : '<div class="space-y-6"><div class="grid grid-cols-2 md:grid-cols-4 gap-4"><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + formatTokens(state.usage.summary.last7Days.totalTokens) + '</div><div class="text-brand-500">Tokens (7 days)</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.usage.summary.last7Days.requestCount + '</div><div class="text-brand-500">Requests (7 days)</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + formatTokens(state.usage.summary.last30Days.totalTokens) + '</div><div class="text-brand-500">Tokens (30 days)</div></div><div class="bg-white rounded-xl p-6 shadow-sm border border-surface-200"><div class="text-3xl font-semibold text-brand-900">' + state.usage.summary.last30Days.requestCount + '</div><div class="text-brand-500">Requests (30 days)</div></div></div><div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><h3 class="px-4 py-3 font-medium text-brand-700 bg-surface-50 border-b border-surface-200">Usage by User (30 days)</h3><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">User</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Tokens</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Requests</th></tr></thead><tbody>' + (state.usage.byUser || []).filter(u => u.totalTokens > 0).map(u => '<tr class="border-b border-surface-200 last:border-0"><td class="px-4 py-3 text-brand-900">' + u.email + '</td><td class="px-4 py-3 text-brand-500">' + formatTokens(u.totalTokens) + '</td><td class="px-4 py-3 text-brand-500">' + u.requestCount + '</td></tr>').join('') + '</tbody></table></div><div class="bg-white rounded-xl shadow-sm border border-surface-200 overflow-hidden"><h3 class="px-4 py-3 font-medium text-brand-700 bg-surface-50 border-b border-surface-200">Recent Activity</h3><table class="w-full"><thead class="bg-surface-50 border-b border-surface-200"><tr><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">User</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Type</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Tokens</th><th class="text-left px-4 py-3 text-sm font-medium text-brand-700">Time</th></tr></thead><tbody>' + (state.usage.recentLogs || []).slice(0, 20).map(l => '<tr class="border-b border-surface-200 last:border-0"><td class="px-4 py-3 text-brand-900">' + l.email + '</td><td class="px-4 py-3 text-brand-500">' + (l.requestType || 'unknown') + '</td><td class="px-4 py-3 text-brand-500">' + formatTokens(l.tokensUsed) + '</td><td class="px-4 py-3 text-brand-500 text-sm">' + formatDateTime(l.loggedAt) + '</td></tr>').join('') + '</tbody></table></div></div>';
-      const addKeyModalHtml = state.showAddKey ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">Add API Key</h2><div class="space-y-4"><div><label class="block text-sm font-medium text-brand-700 mb-1">Name (optional)</label><input type="text" id="newKeyName" value="' + state.newKeyName + '" placeholder="e.g., Production Key 1" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Anthropic API Key</label><input type="password" id="newKeyValue" value="' + state.newKeyValue + '" placeholder="sk-ant-api03-..." class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAddKey:false,newKeyName:\\'\\',newKeyValue:\\'\\'})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="addKey()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Add Key</button></div></div></div>' : '';
+      const addKeyModalHtml = state.showAddKey ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">Add API Key</h2><div class="space-y-4"><div><label class="block text-sm font-medium text-brand-700 mb-1">Name (optional)</label><input type="text" id="newKeyName" value="' + state.newKeyName + '" placeholder="e.g., Production Key 1" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Provider</label><select id="newKeyProvider" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="anthropic"' + (state.newKeyProvider === 'anthropic' ? ' selected' : '') + '>Anthropic</option><option value="groq"' + (state.newKeyProvider === 'groq' ? ' selected' : '') + '>Groq</option></select></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Provider API Key</label><input type="password" id="newKeyValue" value="' + state.newKeyValue + '" placeholder="sk-..." class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAddKey:false,newKeyName:\\'\\',newKeyValue:\\'\\',newKeyProvider:\\'anthropic\\'})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="addKey()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Add Key</button></div></div></div>' : '';
       const addUserModalHtml = state.showAddUser ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-2">Create Root Invite</h2><p class="text-sm text-brand-500 mb-4">Create signup eligibility by email for a root account. Team members are invited later by that root user.</p><div class="space-y-4"><div><label class="block text-sm font-medium text-brand-700 mb-1">Email</label><input type="email" id="newUserEmail" value="' + state.newUserEmail + '" placeholder="owner@firm.com" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div class="grid grid-cols-2 gap-3"><div><label class="block text-sm font-medium text-brand-700 mb-1">Trial Days</label><input type="number" min="0" id="newUserTrialDays" value="' + state.newUserTrialDays + '" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div><div><label class="block text-sm font-medium text-brand-700 mb-1">Max Licenses</label><input type="number" min="1" id="newUserMaxLicenses" value="' + state.newUserMaxLicenses + '" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" /></div></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAddUser:false,newUserEmail:\\'\\',newUserTrialDays:14,newUserMaxLicenses:10})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="createUserAdmin()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Create Invite</button></div></div></div>' : '';
-      const userModalHtml = state.showUserModal && state.selectedUser ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-lg p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">' + state.selectedUser.email + '</h2><div class="space-y-4"><div class="grid grid-cols-2 gap-4"><div><div class="text-sm text-brand-500">Status</div><div class="font-medium">' + state.selectedUser.subscriptionStatus + '</div></div><div><div class="text-sm text-brand-500">Created</div><div class="font-medium">' + formatDate(state.selectedUser.createdAt) + '</div></div><div><div class="text-sm text-brand-500">Expires</div><div class="font-medium">' + formatDate(state.selectedUser.trialEndsAt || state.selectedUser.currentPeriodEnd) + '</div></div><div><div class="text-sm text-brand-500">Assigned Key</div><div class="font-medium">' + (state.selectedUser.assignedKey ? state.selectedUser.assignedKey.name : 'Pool') + '</div></div></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Usage (Last 30 Days)</div><div class="grid grid-cols-2 gap-4"><div class="bg-surface-50 rounded-lg p-3"><div class="text-xl font-semibold text-brand-900">' + formatTokens(state.selectedUser.usage?.last30Days?.totalTokens || 0) + '</div><div class="text-sm text-brand-500">Tokens</div></div><div class="bg-surface-50 rounded-lg p-3"><div class="text-xl font-semibold text-brand-900">' + (state.selectedUser.usage?.last30Days?.requestCount || 0) + '</div><div class="text-sm text-brand-500">Requests</div></div></div></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Assign API Key</div><select id="userKeySelect" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="">Use Pool (Rotation)</option>' + state.apiKeys.filter(k => k.isActive).map(k => '<option value="' + k.id + '" ' + (state.selectedUser.assignedKey?.id === k.id ? 'selected' : '') + '>' + (k.name || 'Unnamed') + (k.assignedUserEmail && k.assignedToUserId !== state.selectedUser.id ? ' (assigned to ' + k.assignedUserEmail + ')' : '') + '</option>').join('') + '</select></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Actions</div><div class="flex gap-2 flex-wrap"><button onclick="extendTrial(' + state.selectedUser.id + ', 7)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+7 Days</button><button onclick="extendTrial(' + state.selectedUser.id + ', 14)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+14 Days</button><button onclick="extendTrial(' + state.selectedUser.id + ', 30)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+30 Days</button><button onclick="updateUserSubscription(' + state.selectedUser.id + ', {status: \\'active\\'})" class="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-sm hover:bg-blue-100">Set Active</button><button onclick="updateUserSubscription(' + state.selectedUser.id + ', {status: \\'expired\\'})" class="px-3 py-1.5 bg-red-50 text-red-700 rounded-lg text-sm hover:bg-red-100">Expire</button></div></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showUserModal:false,selectedUser:null})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Close</button><button onclick="(function(){ var sel = document.getElementById(\\'userKeySelect\\'); assignKeyToUser(state.selectedUser.assignedKey?.id || null, null); var keyId = sel.value ? parseInt(sel.value) : null; if(keyId) assignKeyToUser(keyId, state.selectedUser.id); else if(state.selectedUser.assignedKey) assignKeyToUser(state.selectedUser.assignedKey.id, null); viewUser(state.selectedUser.id); })()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Save Key Assignment</button></div></div></div>' : '';
+      const userModalHtml = state.showUserModal && state.selectedUser ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-lg p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">' + state.selectedUser.email + '</h2><div class="space-y-4"><div class="grid grid-cols-2 gap-4"><div><div class="text-sm text-brand-500">Status</div><div class="font-medium">' + state.selectedUser.subscriptionStatus + '</div></div><div><div class="text-sm text-brand-500">Created</div><div class="font-medium">' + formatDate(state.selectedUser.createdAt) + '</div></div><div><div class="text-sm text-brand-500">Expires</div><div class="font-medium">' + formatDate(state.selectedUser.trialEndsAt || state.selectedUser.currentPeriodEnd) + '</div></div><div><div class="text-sm text-brand-500">Assigned Key</div><div class="font-medium">' + (state.selectedUser.assignedKey ? state.selectedUser.assignedKey.name : 'Pool') + '</div></div></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Usage (Last 30 Days)</div><div class="grid grid-cols-2 gap-4"><div class="bg-surface-50 rounded-lg p-3"><div class="text-xl font-semibold text-brand-900">' + formatTokens(state.selectedUser.usage?.last30Days?.totalTokens || 0) + '</div><div class="text-sm text-brand-500">Tokens</div></div><div class="bg-surface-50 rounded-lg p-3"><div class="text-xl font-semibold text-brand-900">' + (state.selectedUser.usage?.last30Days?.requestCount || 0) + '</div><div class="text-sm text-brand-500">Requests</div></div></div></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Assign API Key</div><select id="userKeySelect" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="">Use Pool (Rotation)</option>' + state.apiKeys.filter(k => k.isActive).map(k => '<option value="' + k.id + '" ' + (state.selectedUser.assignedKey?.id === k.id ? 'selected' : '') + '>' + (k.name || 'Unnamed') + ' [' + (k.provider || 'anthropic') + ']' + (k.assignedUserEmail && k.assignedToUserId !== state.selectedUser.id ? ' (assigned to ' + k.assignedUserEmail + ')' : '') + '</option>').join('') + '</select></div><div class="border-t border-surface-200 pt-4"><div class="text-sm text-brand-500 mb-2">Actions</div><div class="flex gap-2 flex-wrap"><button onclick="extendTrial(' + state.selectedUser.id + ', 7)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+7 Days</button><button onclick="extendTrial(' + state.selectedUser.id + ', 14)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+14 Days</button><button onclick="extendTrial(' + state.selectedUser.id + ', 30)" class="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg text-sm hover:bg-green-100">+30 Days</button><button onclick="updateUserSubscription(' + state.selectedUser.id + ', {status: \\'active\\'})" class="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-sm hover:bg-blue-100">Set Active</button><button onclick="updateUserSubscription(' + state.selectedUser.id + ', {status: \\'expired\\'})" class="px-3 py-1.5 bg-red-50 text-red-700 rounded-lg text-sm hover:bg-red-100">Expire</button></div></div></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showUserModal:false,selectedUser:null})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Close</button><button onclick="(function(){ var sel = document.getElementById(\\'userKeySelect\\'); assignKeyToUser(state.selectedUser.assignedKey?.id || null, null); var keyId = sel.value ? parseInt(sel.value) : null; if(keyId) assignKeyToUser(keyId, state.selectedUser.id); else if(state.selectedUser.assignedKey) assignKeyToUser(state.selectedUser.assignedKey.id, null); viewUser(state.selectedUser.id); })()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Save Key Assignment</button></div></div></div>' : '';
       const assignKeyModalHtml = state.showAssignKey ? '<div class="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white rounded-2xl shadow-lg w-full max-w-md p-6"><h2 class="text-lg font-semibold text-brand-900 mb-4">Assign Key to User</h2><div class="space-y-4"><select id="assignUserSelect" class="w-full border border-surface-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500"><option value="">Unassigned (Pool)</option>' + state.users.map(u => '<option value="' + u.id + '">' + u.email + '</option>').join('') + '</select></div><div class="flex justify-end gap-2 mt-6"><button onclick="setState({showAssignKey:null})" class="px-4 py-2 text-brand-500 hover:text-brand-700">Cancel</button><button onclick="(function(){ var sel = document.getElementById(\\'assignUserSelect\\'); assignKeyToUser(state.showAssignKey, sel.value ? parseInt(sel.value) : null); })()" class="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800">Assign</button></div></div></div>' : '';
       app.innerHTML = '<div class="max-w-6xl mx-auto p-6"><div class="flex justify-between items-center mb-8"><h1 class="text-2xl font-semibold text-brand-900">Claude PI Admin</h1><button onclick="logout()" class="text-brand-500 hover:text-brand-700">Sign Out</button></div>' + (state.error ? '<div class="bg-red-50 text-red-700 px-4 py-3 rounded-lg mb-4">' + state.error + ' <button onclick="setState({error:null})" class="ml-2 underline">Dismiss</button></div>' : '') + '<div class="flex gap-2 mb-6"><button onclick="setState({tab:\\'stats\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'stats' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Stats</button><button onclick="setState({tab:\\'users\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'users' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Users</button><button onclick="setState({tab:\\'keys\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'keys' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">API Keys</button><button onclick="setState({tab:\\'usage\\'})" class="px-4 py-2 rounded-lg ' + (state.tab === 'usage' ? 'bg-brand-900 text-white' : 'bg-white text-brand-700 hover:bg-brand-100') + '">Usage</button></div>' + (state.tab === 'stats' ? statsHtml : '') + (state.tab === 'users' ? usersHtml : '') + (state.tab === 'keys' ? keysHtml : '') + (state.tab === 'usage' ? usageHtml : '') + '<div class="mt-8 pt-6 border-t border-surface-200"><button onclick="runMaintenance()" ' + (state.loading ? 'disabled' : '') + ' class="px-4 py-2 bg-accent-600 text-white rounded-lg hover:bg-accent-500 disabled:opacity-50">' + (state.loading ? 'Running...' : 'Run Maintenance') + '</button><span class="ml-3 text-sm text-brand-500">Cleans expired tokens & resets daily usage counters</span></div></div>' + addKeyModalHtml + addUserModalHtml + userModalHtml + assignKeyModalHtml;
     }
@@ -460,11 +471,16 @@ const ADMIN_HTML = `<!DOCTYPE html>
     const observer = new MutationObserver(() => {
       const nameInput = document.getElementById('newKeyName');
       const valueInput = document.getElementById('newKeyValue');
+      const providerSelect = document.getElementById('newKeyProvider');
       const userEmailInput = document.getElementById('newUserEmail');
       const userTrialDaysInput = document.getElementById('newUserTrialDays');
       const userMaxLicensesInput = document.getElementById('newUserMaxLicenses');
       if (nameInput && !nameInput.dataset.bound) { nameInput.dataset.bound = 'true'; nameInput.addEventListener('input', (e) => { state.newKeyName = e.target.value; }); }
       if (valueInput && !valueInput.dataset.bound) { valueInput.dataset.bound = 'true'; valueInput.addEventListener('input', (e) => { state.newKeyValue = e.target.value; }); }
+      if (providerSelect && !providerSelect.dataset.bound) {
+        providerSelect.dataset.bound = 'true';
+        providerSelect.addEventListener('change', (e) => { state.newKeyProvider = e.target.value; });
+      }
       if (userEmailInput && !userEmailInput.dataset.bound) { userEmailInput.dataset.bound = 'true'; userEmailInput.addEventListener('input', (e) => { state.newUserEmail = e.target.value; }); }
       if (userTrialDaysInput && !userTrialDaysInput.dataset.bound) { userTrialDaysInput.dataset.bound = 'true'; userTrialDaysInput.addEventListener('input', (e) => { state.newUserTrialDays = Number(e.target.value || 0); }); }
       if (userMaxLicensesInput && !userMaxLicensesInput.dataset.bound) { userMaxLicensesInput.dataset.bound = 'true'; userMaxLicensesInput.addEventListener('input', (e) => { state.newUserMaxLicenses = Number(e.target.value || 0); }); }
@@ -517,6 +533,7 @@ interface ApiKey {
   key_name: string | null;
   is_active: boolean;
   assigned_to_user_id: number | null;
+  provider: string;
   daily_usage_tokens: number;
   last_usage_reset: string;
   created_at: string;
@@ -536,7 +553,7 @@ interface SignupInvite {
 // Database Schema & Init
 // ============================================================================
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 async function initDatabase(): Promise<void> {
   await sql`
@@ -585,6 +602,7 @@ async function initDatabase(): Promise<void> {
       id SERIAL PRIMARY KEY,
       key_encrypted TEXT NOT NULL,
       key_name TEXT,
+      provider TEXT NOT NULL DEFAULT 'anthropic',
       is_active BOOLEAN DEFAULT TRUE,
       assigned_to_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
       daily_usage_tokens INTEGER DEFAULT 0,
@@ -592,6 +610,9 @@ async function initDatabase(): Promise<void> {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `;
+  await sql`ALTER TABLE api_key_pool ADD COLUMN IF NOT EXISTS provider TEXT`;
+  await sql`UPDATE api_key_pool SET provider = 'anthropic' WHERE provider IS NULL`;
+  await sql`ALTER TABLE api_key_pool ALTER COLUMN provider SET DEFAULT 'anthropic'`;
 
   await sql`
     CREATE TABLE IF NOT EXISTS daily_validations (
@@ -638,6 +659,12 @@ async function initDatabase(): Promise<void> {
   const { rows } = await sql`SELECT version FROM schema_version LIMIT 1`;
   if (rows.length === 0) {
     await sql`INSERT INTO schema_version (version) VALUES (${SCHEMA_VERSION})`;
+  } else if (Number(rows[0].version || 0) < SCHEMA_VERSION) {
+    await sql`ALTER TABLE api_key_pool ADD COLUMN IF NOT EXISTS provider TEXT`;
+    await sql`UPDATE api_key_pool SET provider = 'anthropic' WHERE provider IS NULL`;
+    await sql`ALTER TABLE api_key_pool ALTER COLUMN provider SET DEFAULT 'anthropic'`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_api_key_pool_provider ON api_key_pool(provider)`;
+    await sql`UPDATE schema_version SET version = ${SCHEMA_VERSION}`;
   }
 
   await sql`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`;
@@ -646,6 +673,7 @@ async function initDatabase(): Promise<void> {
   await sql`CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe_customer ON subscriptions(stripe_customer_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_api_key_pool_active ON api_key_pool(is_active)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_api_key_pool_provider ON api_key_pool(provider)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_daily_validations_user ON daily_validations(user_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_usage_logs_user ON usage_logs(user_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_signup_invites_email ON signup_invites(email)`;
@@ -838,11 +866,19 @@ async function deleteUserTokens(userId: number): Promise<number> {
   return result.rowCount ?? 0;
 }
 
-async function addApiKey(encryptedKey: string, keyName?: string): Promise<ApiKey | null> {
+function normalizeProvider(provider?: string): string {
+  if ((provider || "").trim().toLowerCase() === "groq") {
+    return "groq";
+  }
+  return "anthropic";
+}
+
+async function addApiKey(encryptedKey: string, keyName?: string, provider: string = "anthropic"): Promise<ApiKey | null> {
+  const normalizedProvider = normalizeProvider(provider);
   try {
     const { rows } = await sql`
-      INSERT INTO api_key_pool (key_encrypted, key_name)
-      VALUES (${encryptedKey}, ${keyName || null})
+      INSERT INTO api_key_pool (key_encrypted, key_name, provider)
+      VALUES (${encryptedKey}, ${keyName || null}, ${normalizedProvider})
       RETURNING *
     `;
     return rows[0] as ApiKey || null;
@@ -851,22 +887,25 @@ async function addApiKey(encryptedKey: string, keyName?: string): Promise<ApiKey
   }
 }
 
-async function getAvailableApiKey(): Promise<ApiKey | null> {
+async function getAvailableApiKey(provider: string = "anthropic"): Promise<ApiKey | null> {
+  const normalizedProvider = normalizeProvider(provider);
   const { rows } = await sql`
     SELECT * FROM api_key_pool
-    WHERE is_active = TRUE
+    WHERE is_active = TRUE AND provider = ${normalizedProvider}
     ORDER BY assigned_to_user_id IS NULL DESC, daily_usage_tokens ASC
     LIMIT 1
   `;
   return rows[0] as ApiKey || null;
 }
 
-async function getApiKeyForUser(userId: number): Promise<ApiKey | null> {
+async function getApiKeyForUser(userId: number, provider: string = "anthropic"): Promise<ApiKey | null> {
+  const normalizedProvider = normalizeProvider(provider);
   const { rows } = await sql`
-    SELECT * FROM api_key_pool WHERE assigned_to_user_id = ${userId} AND is_active = TRUE
+    SELECT * FROM api_key_pool
+    WHERE assigned_to_user_id = ${userId} AND is_active = TRUE AND provider = ${normalizedProvider}
   `;
   if (rows[0]) return rows[0] as ApiKey;
-  return getAvailableApiKey();
+  return getAvailableApiKey(normalizedProvider);
 }
 
 async function resetDailyUsage(): Promise<number> {
@@ -1073,14 +1112,17 @@ app.post("/v1/auth/signup", async (c) => {
   await createAuthToken(user.id, tokenHash, 30);
   await claimSignupInvite(email);
 
-  const apiKey = await getApiKeyForUser(user.id);
-  const decryptedKey = apiKey ? decryptApiKey(apiKey.key_encrypted) : null;
+  const anthropicApiKey = await getApiKeyForUser(user.id, "anthropic");
+  const anthropicDecrypted = anthropicApiKey ? decryptApiKey(anthropicApiKey.key_encrypted) : null;
+  const groqApiKey = await getApiKeyForUser(user.id, "groq");
+  const groqDecrypted = groqApiKey ? decryptApiKey(groqApiKey.key_encrypted) : null;
 
   const ownerUser = ownerUserId ? await getUserById(ownerUserId) : null;
   return c.json({
     authToken: token,
     email: user.email,
-    anthropicApiKey: decryptedKey,
+    anthropicApiKey: anthropicDecrypted,
+    groqApiKey: groqDecrypted,
     subscriptionStatus: ownerUserId ? ((await getSubscriptionByUserId(ownerUserId))?.status || subscription.status) : subscription.status,
     expiresAt: ownerUserId ? getSubscriptionExpiry((await getSubscriptionByUserId(ownerUserId)) || subscription) : getSubscriptionExpiry(subscription),
     accountType: ownerUserId ? "sub_user" : "root",
@@ -1125,8 +1167,10 @@ app.post("/v1/auth/login", async (c) => {
   const tokenHash = hashToken(token);
   await createAuthToken(user.id, tokenHash, 30);
 
-  const apiKey = await getApiKeyForUser(user.id);
-  const decryptedKey = apiKey ? decryptApiKey(apiKey.key_encrypted) : null;
+  const anthropicApiKey = await getApiKeyForUser(user.id, "anthropic");
+  const anthropicDecrypted = anthropicApiKey ? decryptApiKey(anthropicApiKey.key_encrypted) : null;
+  const groqApiKey = await getApiKeyForUser(user.id, "groq");
+  const groqDecrypted = groqApiKey ? decryptApiKey(groqApiKey.key_encrypted) : null;
 
   await logValidation(
     user.id,
@@ -1138,7 +1182,8 @@ app.post("/v1/auth/login", async (c) => {
   return c.json({
     authToken: token,
     email: user.email,
-    anthropicApiKey: decryptedKey,
+    anthropicApiKey: anthropicDecrypted,
+    groqApiKey: groqDecrypted,
     subscriptionStatus: subscription.status,
     expiresAt: getSubscriptionExpiry(subscription),
     accountType: user.owner_user_id ? "sub_user" : "root",
@@ -1181,8 +1226,10 @@ app.post("/v1/auth/validate", async (c) => {
     }, 403);
   }
 
-  const apiKey = await getApiKeyForUser(authToken.user_id);
-  const decryptedKey = apiKey ? decryptApiKey(apiKey.key_encrypted) : null;
+  const anthropicApiKey = await getApiKeyForUser(authToken.user_id, "anthropic");
+  const anthropicDecrypted = anthropicApiKey ? decryptApiKey(anthropicApiKey.key_encrypted) : null;
+  const groqApiKey = await getApiKeyForUser(authToken.user_id, "groq");
+  const groqDecrypted = groqApiKey ? decryptApiKey(groqApiKey.key_encrypted) : null;
 
   await logValidation(
     authToken.user_id,
@@ -1192,7 +1239,8 @@ app.post("/v1/auth/validate", async (c) => {
   );
 
   return c.json({
-    anthropicApiKey: decryptedKey,
+    anthropicApiKey: anthropicDecrypted,
+    groqApiKey: groqDecrypted,
     subscriptionStatus: subscription.status,
     expiresAt: getSubscriptionExpiry(subscription),
     accountType: authedUser.owner_user_id ? "sub_user" : "root",
@@ -1472,14 +1520,15 @@ async function adminAuth(c: any, next: any) {
 app.post("/v1/admin/api-keys", adminAuth, async (c) => {
   await ensureDatabase();
   const body = await c.req.json();
-  const { key, name } = body;
+  const { key, name, provider } = body;
 
   if (!key) {
     return c.json({ error: "API key is required" }, 400);
   }
 
+  const normalizedProvider = normalizeProvider(provider);
   const encryptedKey = encryptApiKey(key);
-  const apiKey = await addApiKey(encryptedKey, name);
+  const apiKey = await addApiKey(encryptedKey, name, normalizedProvider);
 
   if (!apiKey) {
     return c.json({ error: "Failed to add API key" }, 500);
@@ -1488,6 +1537,7 @@ app.post("/v1/admin/api-keys", adminAuth, async (c) => {
   return c.json({
     id: apiKey.id,
     name: apiKey.key_name,
+    provider: apiKey.provider || "anthropic",
     isActive: apiKey.is_active,
     createdAt: apiKey.created_at,
   });
@@ -1497,7 +1547,7 @@ app.get("/v1/admin/api-keys", adminAuth, async (c) => {
   await ensureDatabase();
   const { rows } = await sql`
     SELECT k.id, k.key_name, k.is_active, k.assigned_to_user_id, k.daily_usage_tokens,
-           k.last_usage_reset, k.created_at, u.email as assigned_user_email
+           k.provider, k.last_usage_reset, k.created_at, u.email as assigned_user_email
     FROM api_key_pool k
     LEFT JOIN users u ON k.assigned_to_user_id = u.id
     ORDER BY k.created_at DESC
@@ -1507,6 +1557,7 @@ app.get("/v1/admin/api-keys", adminAuth, async (c) => {
     keys: rows.map((k: any) => ({
       id: k.id,
       name: k.key_name,
+      provider: k.provider || "anthropic",
       isActive: k.is_active,
       assignedToUserId: k.assigned_to_user_id,
       assignedUserEmail: k.assigned_user_email,

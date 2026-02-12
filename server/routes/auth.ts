@@ -35,6 +35,7 @@ interface Config {
   authToken?: string;
   email?: string;
   anthropicApiKey?: string;
+  groqApiKey?: string;
   lastValidated?: string;
   subscriptionStatus?: string;
   expiresAt?: string;
@@ -129,7 +130,7 @@ function isWithinGracePeriod(config: Config): boolean {
  */
 async function validateSubscription(
   authToken: string
-): Promise<{ anthropicApiKey: string | null; subscriptionStatus: string; expiresAt: string } | null> {
+): Promise<{ anthropicApiKey: string | null; groqApiKey: string | null; subscriptionStatus: string; expiresAt: string } | null> {
   try {
     const response = await fetch(`${SUBSCRIPTION_SERVER}/v1/auth/validate`, {
       method: "POST",
@@ -223,6 +224,7 @@ auth.get("/status", async (c) => {
         ...effectiveConfig,
         anthropicApiKey:
           validation.anthropicApiKey ?? effectiveConfig.anthropicApiKey,
+        groqApiKey: validation.groqApiKey ?? effectiveConfig.groqApiKey,
         lastValidated: new Date().toISOString(),
         subscriptionStatus: validation.subscriptionStatus,
         expiresAt: validation.expiresAt,
@@ -232,6 +234,9 @@ auth.get("/status", async (c) => {
       saveConfig(effectiveConfig);
       if (validation.anthropicApiKey) {
         process.env.ANTHROPIC_API_KEY = validation.anthropicApiKey;
+      }
+      if (validation.groqApiKey) {
+        process.env.GROQ_API_KEY = validation.groqApiKey;
       }
     } else if (isSubUser || !isWithinGracePeriod(effectiveConfig)) {
       reauthRequired = true;
@@ -250,11 +255,17 @@ auth.get("/status", async (c) => {
   if (!process.env.ANTHROPIC_API_KEY && effectiveConfig.anthropicApiKey) {
     process.env.ANTHROPIC_API_KEY = effectiveConfig.anthropicApiKey;
   }
-  const hasApiKey =
+  if (!process.env.GROQ_API_KEY && effectiveConfig.groqApiKey) {
+    process.env.GROQ_API_KEY = effectiveConfig.groqApiKey;
+  }
+  const hasAnthropicApiKey =
     !!process.env.ANTHROPIC_API_KEY || !!effectiveConfig.anthropicApiKey;
+  const hasGroqApiKey =
+    !!process.env.GROQ_API_KEY || !!effectiveConfig.groqApiKey;
+  const hasRequiredApiKeys = hasAnthropicApiKey && hasGroqApiKey;
 
   // Keep status endpoint aligned with auth middleware behavior.
-  if (!hasApiKey && !reauthRequired && isSubscriptionActive) {
+  if (!hasRequiredApiKeys && !reauthRequired && isSubscriptionActive) {
     reauthRequired = true;
     authError = "reauth_required";
   }
@@ -324,6 +335,7 @@ auth.post("/login", async (c) => {
       authToken: "dev_token_" + Date.now(),
       email,
       anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
+      groqApiKey: process.env.GROQ_API_KEY || "",
       lastValidated: new Date().toISOString(),
       subscriptionStatus: "active",
       expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
@@ -376,6 +388,7 @@ auth.post("/login", async (c) => {
       authToken: data.authToken,
       email: data.email,
       anthropicApiKey: data.anthropicApiKey,
+      groqApiKey: data.groqApiKey,
       lastValidated: new Date().toISOString(),
       subscriptionStatus: data.subscriptionStatus,
       expiresAt: data.expiresAt,
@@ -389,6 +402,9 @@ auth.post("/login", async (c) => {
     // Set API key in env
     if (data.anthropicApiKey) {
       process.env.ANTHROPIC_API_KEY = data.anthropicApiKey;
+    }
+    if (data.groqApiKey) {
+      process.env.GROQ_API_KEY = data.groqApiKey;
     }
 
     return c.json({
@@ -428,6 +444,7 @@ auth.post("/signup", async (c) => {
       authToken: "dev_token_" + Date.now(),
       email,
       anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
+      groqApiKey: process.env.GROQ_API_KEY || "",
       lastValidated: new Date().toISOString(),
       subscriptionStatus: "trialing",
       expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
@@ -481,6 +498,7 @@ auth.post("/signup", async (c) => {
       authToken: data.authToken,
       email: data.email,
       anthropicApiKey: data.anthropicApiKey,
+      groqApiKey: data.groqApiKey,
       lastValidated: new Date().toISOString(),
       subscriptionStatus: data.subscriptionStatus,
       expiresAt: data.expiresAt,
@@ -494,6 +512,9 @@ auth.post("/signup", async (c) => {
     // Set API key in env
     if (data.anthropicApiKey) {
       process.env.ANTHROPIC_API_KEY = data.anthropicApiKey;
+    }
+    if (data.groqApiKey) {
+      process.env.GROQ_API_KEY = data.groqApiKey;
     }
 
     return c.json({
@@ -525,6 +546,7 @@ auth.post("/logout", async (c) => {
 
   // Clear env
   delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.GROQ_API_KEY;
 
   return c.json({ success: true });
 });

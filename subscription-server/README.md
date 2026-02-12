@@ -39,7 +39,7 @@ bun run dev
 |----------|--------|-------------|
 | `/v1/auth/signup` | POST | Create new account (14-day trial) |
 | `/v1/auth/login` | POST | Login and get auth token |
-| `/v1/auth/validate` | POST | Daily validation, returns fresh API key |
+| `/v1/auth/validate` | POST | Daily validation, returns fresh Anthropic and Groq keys |
 | `/v1/auth/logout` | POST | Invalidate auth tokens |
 
 ### Subscriptions
@@ -68,7 +68,7 @@ bun run dev
 - **users** - User accounts (email, password hash)
 - **subscriptions** - Subscription status and Stripe IDs
 - **auth_tokens** - Session tokens (30-day expiry)
-- **api_key_pool** - Anthropic API keys for distribution
+- **api_key_pool** - Anthropic and Groq API keys for distribution
 - **daily_validations** - Audit log of validation requests
 - **usage_logs** - Token consumption tracking
 
