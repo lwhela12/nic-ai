@@ -75,7 +75,7 @@ interface AgentDocumentView {
   invalidPaths?: string[];
 }
 
-const CASE_CONTEXT_MAX_CHARS = 120000;
+const CASE_CONTEXT_MAX_CHARS = 180000;
 const INDEX_SLICE_MAX_CHARS = 12000;
 
 // Tool definitions
