@@ -1,0 +1,610 @@
+/**
+ * Groq Extraction Functions
+ *
+ * Replaces all Anthropic API calls in the indexing pipeline with Groq models:
+ * - extractWithGptOss: Text-based PDF extraction (Path 1) via GPT-OSS 120B
+ * - extractWithVision: Scanned PDF extraction (Path 2) via Llama 4 Scout → Maverick fallback
+ * - generateHypergraphWithGptOss: Cross-document consistency analysis via GPT-OSS 120B
+ * - generateCaseSummaryWithGptOss: Case summary generation via GPT-OSS 120B
+ */
+
+import { getGroqClient } from "./groq-client";
+import { pdfToImages, getPdfPageCount, type PdfPageImage } from "./pdftoppm";
+import { FILE_EXTRACTION_TOOL_SCHEMA } from "./index-schema";
+
+// ============================================================================
+// Types
+// ============================================================================
+
+export interface GroqUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+interface ExtractionResult {
+  type: string;
+  key_info: string;
+  has_handwritten_data: boolean;
+  handwritten_fields: string[];
+  extracted_data: Record<string, unknown>;
+}
+
+// ============================================================================
+// Vision Models & Rate Limit Tracking
+// ============================================================================
+
+const VISION_SCOUT = "meta-llama/llama-4-scout-17b-16e-instruct";
+const VISION_MAVERICK = "meta-llama/llama-4-maverick-17b-128e-instruct";
+
+/** Conservative estimate of tokens per vision call (images are token-heavy) */
+const ESTIMATED_VISION_TOKENS = 20_000;
+
+/** Per-model rate limit state, updated from Groq response headers */
+const rateLimitState: Record<string, { remainingTokens: number; resetAt: number }> = {};
+
+function updateRateLimitState(model: string, headers: Headers): void {
+  const remaining = headers.get("x-ratelimit-remaining-tokens");
+  const resetMs = headers.get("x-ratelimit-reset-tokens");
+
+  if (remaining !== null) {
+    const resetAt = resetMs
+      ? Date.now() + parseResetDuration(resetMs)
+      : Date.now() + 60_000; // default 60s window
+
+    rateLimitState[model] = {
+      remainingTokens: parseInt(remaining, 10),
+      resetAt,
+    };
+  }
+}
+
+/** Parse Groq reset duration like "1m30s", "45s", "2m" into milliseconds */
+function parseResetDuration(value: string): number {
+  let ms = 0;
+  const minMatch = value.match(/(\d+)m/);
+  const secMatch = value.match(/(\d+(?:\.\d+)?)s/);
+  if (minMatch) ms += parseInt(minMatch[1], 10) * 60_000;
+  if (secMatch) ms += parseFloat(secMatch[1]) * 1_000;
+  return ms || 60_000;
+}
+
+function shouldUseFallback(model: string): boolean {
+  const state = rateLimitState[model];
+  if (!state) return false;
+
+  // If the reset window has passed, state is stale — don't fallback
+  if (Date.now() > state.resetAt) return false;
+
+  return state.remainingTokens < ESTIMATED_VISION_TOKENS;
+}
+
+// ============================================================================
+// Schema Helpers
+// ============================================================================
+
+/**
+ * Convert the FILE_EXTRACTION_TOOL_SCHEMA into a JSON description for embedding
+ * in the system prompt (GPT-OSS json_object mode doesn't support json_schema).
+ */
+function buildExtractionSchemaDescription(): string {
+  const props = FILE_EXTRACTION_TOOL_SCHEMA.input_schema.properties;
+  const lines: string[] = [
+    "You MUST return a JSON object with exactly these top-level fields:",
+    "",
+  ];
+
+  for (const [key, schema] of Object.entries(props)) {
+    const s = schema as any;
+    let desc = s.description || "";
+    if (s.enum) desc += ` (one of: ${s.enum.join(", ")})`;
+    if (s.type === "array") desc += " (array of strings)";
+    lines.push(`- "${key}" (${s.type}): ${desc}`);
+  }
+
+  lines.push("");
+  lines.push("The extracted_data object should contain any specific data points found in the document,");
+  lines.push("such as: client_name, dob, phone, email, address, dol, document_date,");
+  lines.push("document_date_confidence, document_date_reason, insurance_1p, insurance_3p,");
+  lines.push("health_insurance, provider_name, service_dates, charges, balance, diagnosis,");
+  lines.push("treatment_summary, settlement_amount, demand_amount, etc.");
+
+  return lines.join("\n");
+}
+
+/**
+ * Build a JSON Schema object for vision models (best-effort json_schema mode).
+ */
+function buildVisionJsonSchema(): Record<string, any> {
+  return {
+    name: "document_extraction",
+    strict: false,
+    schema: {
+      type: "object",
+      properties: {
+        type: { type: "string", description: "Document type classification" },
+        key_info: { type: "string", description: "2-3 sentence summary" },
+        has_handwritten_data: { type: "boolean" },
+        handwritten_fields: { type: "array", items: { type: "string" } },
+        extracted_data: {
+          type: "object",
+          description: "Structured data extracted from the document",
+        },
+      },
+      required: ["type", "key_info", "has_handwritten_data", "handwritten_fields", "extracted_data"],
+    },
+  };
+}
+
+// ============================================================================
+// Path 1: Text Extraction with GPT-OSS 120B
+// ============================================================================
+
+/**
+ * Extract structured data from pre-extracted document text using GPT-OSS 120B.
+ * Uses json_object response format with schema embedded in the system prompt.
+ */
+export async function extractWithGptOss(
+  text: string,
+  filename: string,
+  folder: string,
+  systemPrompt: string
+): Promise<{ result: ExtractionResult; usage: GroqUsage }> {
+  const groq = getGroqClient();
+
+  const schemaDesc = buildExtractionSchemaDescription();
+
+  const response = await groq.chat.completions.create({
+    model: "openai/gpt-oss-120b",
+    temperature: 0.1,
+    max_tokens: 4000,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `${systemPrompt}
+
+## OUTPUT FORMAT
+
+You must respond with a single JSON object. No markdown, no explanation, no text outside the JSON.
+
+${schemaDesc}`,
+      },
+      {
+        role: "user",
+        content: `Extract information from this document.
+
+FILENAME: ${filename}
+FOLDER: ${folder}
+
+DOCUMENT TEXT:
+${text}
+
+CRITICAL:
+- Include extracted_data.document_date for this specific document's own date.
+- If multiple dates appear, include extracted_data.document_date_confidence and extracted_data.document_date_reason.
+- Set has_handwritten_data to true only for substantive handwritten extracted values (exclude signature/initial-only markings).
+- Include handwritten_fields as non-signature extracted field names that are handwritten (use [] when none).
+
+Return the JSON extraction now.`,
+      },
+    ],
+  });
+
+  const content = response.choices[0]?.message?.content || "{}";
+  const parsed = JSON.parse(content);
+
+  return {
+    result: {
+      type: parsed.type || "other",
+      key_info: parsed.key_info || "",
+      has_handwritten_data: parsed.has_handwritten_data === true,
+      handwritten_fields: Array.isArray(parsed.handwritten_fields) ? parsed.handwritten_fields : [],
+      extracted_data: parsed.extracted_data || {},
+    },
+    usage: {
+      inputTokens: response.usage?.prompt_tokens || 0,
+      outputTokens: response.usage?.completion_tokens || 0,
+    },
+  };
+}
+
+// ============================================================================
+// Path 2: Vision Extraction with Scout → Maverick Fallback
+// ============================================================================
+
+/**
+ * Make a single vision API call with a specific model.
+ * Returns the parsed response and updates rate limit state from headers.
+ */
+async function callVisionModel(
+  modelId: string,
+  messages: any[],
+): Promise<{ content: string; usage: GroqUsage; model: string }> {
+  const groq = getGroqClient();
+
+  const { data: response, response: rawResponse } = await groq.chat.completions.create({
+    model: modelId,
+    temperature: 0.1,
+    max_tokens: 6000,
+    response_format: {
+      type: "json_schema",
+      json_schema: buildVisionJsonSchema(),
+    } as any,
+    messages,
+  }).withResponse();
+
+  // Update rate limit state from response headers
+  updateRateLimitState(modelId, rawResponse.headers);
+
+  const modelShort = modelId.includes("scout") ? "scout" : "maverick";
+  return {
+    content: response.choices[0]?.message?.content || "{}",
+    usage: {
+      inputTokens: response.usage?.prompt_tokens || 0,
+      outputTokens: response.usage?.completion_tokens || 0,
+    },
+    model: modelShort,
+  };
+}
+
+/** Sleep for a given number of milliseconds */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Parse retry-after header value (seconds) */
+function parseRetryAfter(value: string | null): number {
+  if (!value) return 5;
+  const n = parseFloat(value);
+  return isNaN(n) ? 5 : n;
+}
+
+/**
+ * Make a vision API call with Scout → Maverick fallback.
+ * 1. If proactive check says Scout is low on tokens → go straight to Maverick
+ * 2. Try Scout; on 429 → switch to Maverick
+ * 3. Try Maverick; on 429 → wait retry-after, then retry Maverick once
+ */
+async function callVisionWithFallback(
+  messages: any[],
+  filename: string,
+  batchLabel: string,
+): Promise<{ content: string; usage: GroqUsage; model: string }> {
+  // Proactive check: if Scout is known to be low, skip straight to Maverick
+  const skipScout = shouldUseFallback(VISION_SCOUT);
+  if (skipScout) {
+    console.log(`[Vision] ${filename} ${batchLabel}: Scout low on tokens, using Maverick`);
+  }
+
+  const primaryModel = skipScout ? VISION_MAVERICK : VISION_SCOUT;
+
+  try {
+    return await callVisionModel(primaryModel, messages);
+  } catch (err: any) {
+    const status = err?.status || err?.statusCode;
+    if (status !== 429) throw err; // non-rate-limit error — propagate
+
+    // If we already tried Maverick, wait and retry once
+    if (primaryModel === VISION_MAVERICK) {
+      const retryAfter = parseRetryAfter(err?.headers?.["retry-after"] ?? null);
+      console.log(`[Vision] ${filename} ${batchLabel}: Maverick 429, waiting ${retryAfter}s`);
+      await sleep(retryAfter * 1000);
+      return await callVisionModel(VISION_MAVERICK, messages);
+    }
+
+    // Scout 429 → fall back to Maverick
+    console.log(`[Vision] ${filename} ${batchLabel}: Scout 429, falling back to Maverick`);
+    try {
+      return await callVisionModel(VISION_MAVERICK, messages);
+    } catch (maverickErr: any) {
+      const maverickStatus = maverickErr?.status || maverickErr?.statusCode;
+      if (maverickStatus !== 429) throw maverickErr;
+
+      // Maverick also 429 → wait and retry once
+      const retryAfter = parseRetryAfter(maverickErr?.headers?.["retry-after"] ?? null);
+      console.log(`[Vision] ${filename} ${batchLabel}: Maverick also 429, waiting ${retryAfter}s`);
+      await sleep(retryAfter * 1000);
+      return await callVisionModel(VISION_MAVERICK, messages);
+    }
+  }
+}
+
+/**
+ * Extract structured data from a scanned PDF using vision models.
+ * Uses Scout as primary with Maverick fallback on rate limits.
+ * Converts PDF pages to PNG images and processes in batches of 3 pages.
+ */
+export async function extractWithVision(
+  pdfPath: string,
+  filename: string,
+  folder: string,
+  systemPrompt: string
+): Promise<{ result: ExtractionResult; usage: GroqUsage }> {
+  const totalUsage: GroqUsage = { inputTokens: 0, outputTokens: 0 };
+
+  // Get page count
+  let pageCount: number;
+  try {
+    pageCount = await getPdfPageCount(pdfPath);
+  } catch {
+    pageCount = 1;
+  }
+
+  // Cap at 9 pages (3 batches of 3)
+  const maxPages = Math.min(pageCount, 9);
+  const PAGES_PER_BATCH = 3;
+  const batchCount = Math.ceil(maxPages / PAGES_PER_BATCH);
+
+  console.log(`[Vision] ${filename}: ${pageCount} pages, processing ${maxPages} (${batchCount} batch(es))`);
+
+  const batchResults: ExtractionResult[] = [];
+
+  for (let batch = 0; batch < batchCount; batch++) {
+    const firstPage = batch * PAGES_PER_BATCH + 1;
+    const lastPage = Math.min(firstPage + PAGES_PER_BATCH - 1, maxPages);
+
+    // Convert pages to images - try 200 DPI first, fall back to 150 if too large
+    let images: PdfPageImage[];
+    let dpi = 200;
+
+    images = await pdfToImages(pdfPath, firstPage, lastPage, dpi);
+
+    // Check if total base64 exceeds 3.5MB, if so retry at 150 DPI
+    const totalSize = images.reduce((sum, img) => sum + img.sizeBytes, 0);
+    if (totalSize > 3.5 * 1024 * 1024) {
+      console.log(`[Vision] ${filename} batch ${batch + 1}: ${(totalSize / 1024 / 1024).toFixed(1)}MB at ${dpi} DPI, retrying at 150 DPI`);
+      dpi = 150;
+      images = await pdfToImages(pdfPath, firstPage, lastPage, dpi);
+    }
+
+    // Build image content blocks for the message
+    const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = images.map((img) => ({
+      type: "image_url" as const,
+      image_url: {
+        url: `data:image/png;base64,${img.base64}`,
+      },
+    }));
+
+    const pageRange = firstPage === lastPage ? `page ${firstPage}` : `pages ${firstPage}-${lastPage}`;
+    const batchLabel = `batch ${batch + 1}/${batchCount}`;
+
+    const messages = [
+      {
+        role: "system",
+        content: `${systemPrompt}
+
+You must respond with a single JSON object. No markdown, no explanation.
+Required fields: type, key_info, has_handwritten_data, handwritten_fields, extracted_data.`,
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text" as const,
+            text: `Extract information from ${pageRange} of this document.
+
+FILENAME: ${filename}
+FOLDER: ${folder}
+
+CRITICAL:
+- Include extracted_data.document_date for this specific document's own date.
+- If multiple dates appear, include extracted_data.document_date_confidence and extracted_data.document_date_reason.
+- Set has_handwritten_data to true only for substantive handwritten extracted values.
+- Include handwritten_fields as non-signature extracted field names that are handwritten (use [] when none).
+
+Return the JSON extraction now.`,
+          },
+          ...imageBlocks,
+        ],
+      },
+    ];
+
+    try {
+      const visionResult = await callVisionWithFallback(messages, filename, batchLabel);
+      const parsed = JSON.parse(visionResult.content);
+
+      console.log(`[Vision] ${filename} ${batchLabel}: done [groq-${visionResult.model}]`);
+
+      batchResults.push({
+        type: parsed.type || "other",
+        key_info: parsed.key_info || "",
+        has_handwritten_data: parsed.has_handwritten_data === true,
+        handwritten_fields: Array.isArray(parsed.handwritten_fields) ? parsed.handwritten_fields : [],
+        extracted_data: parsed.extracted_data || {},
+      });
+
+      totalUsage.inputTokens += visionResult.usage.inputTokens;
+      totalUsage.outputTokens += visionResult.usage.outputTokens;
+    } catch (err) {
+      console.error(`[Vision] ${filename} ${batchLabel} failed:`, err);
+      // Continue with remaining batches
+    }
+  }
+
+  // Merge batch results
+  const merged = mergeExtractions(batchResults, filename);
+
+  return { result: merged, usage: totalUsage };
+}
+
+/**
+ * Merge multiple extraction results from vision batches into a single result.
+ * First batch result is the primary; later batches contribute extracted_data fields.
+ */
+function mergeExtractions(results: ExtractionResult[], filename: string): ExtractionResult {
+  if (results.length === 0) {
+    return {
+      type: "other",
+      key_info: `Vision extraction produced no results for ${filename}`,
+      has_handwritten_data: false,
+      handwritten_fields: [],
+      extracted_data: {},
+    };
+  }
+
+  if (results.length === 1) {
+    return results[0];
+  }
+
+  // Use first batch as the base (it has the document header/type info)
+  const base = { ...results[0] };
+  const mergedData = { ...base.extracted_data };
+  const allHandwrittenFields = new Set(base.handwritten_fields || []);
+  const keyInfoParts = [base.key_info];
+
+  for (let i = 1; i < results.length; i++) {
+    const r = results[i];
+
+    // Merge extracted_data — later batches fill in missing fields only
+    for (const [key, value] of Object.entries(r.extracted_data || {})) {
+      if (!(key in mergedData) && value !== null && value !== undefined && value !== "") {
+        mergedData[key] = value;
+      }
+    }
+
+    // Merge handwritten fields
+    for (const field of r.handwritten_fields || []) {
+      allHandwrittenFields.add(field);
+    }
+
+    // Append key_info if it adds new information
+    if (r.key_info && !keyInfoParts.includes(r.key_info)) {
+      keyInfoParts.push(r.key_info);
+    }
+
+    // If any batch detected handwritten data, the overall result should reflect it
+    if (r.has_handwritten_data) {
+      base.has_handwritten_data = true;
+    }
+  }
+
+  return {
+    type: base.type,
+    key_info: keyInfoParts.join(" "),
+    has_handwritten_data: allHandwrittenFields.size > 0 || base.has_handwritten_data,
+    handwritten_fields: Array.from(allHandwrittenFields),
+    extracted_data: mergedData,
+  };
+}
+
+// ============================================================================
+// Hypergraph Generation with GPT-OSS 120B
+// ============================================================================
+
+/**
+ * Generate a hypergraph analysis chunk using GPT-OSS 120B.
+ */
+export async function generateHypergraphWithGptOss(
+  chunkJson: string,
+  chunkId: number,
+  chunkCount: number,
+  systemPrompt: string
+): Promise<{
+  result: {
+    hypergraph: Record<string, any>;
+    conflicts: any[];
+    summary: { total_fields_analyzed: number; fields_with_conflicts: number; confidence_score: number };
+  };
+  usage: GroqUsage;
+}> {
+  const groq = getGroqClient();
+
+  const response = await groq.chat.completions.create({
+    model: "openai/gpt-oss-120b",
+    temperature: 0.1,
+    max_tokens: 8000,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `${systemPrompt}
+
+You must respond with a single JSON object. No markdown, no explanation, no text outside the JSON.`,
+      },
+      {
+        role: "user",
+        content: `<document_index chunk="${chunkId}/${chunkCount}">
+${chunkJson}
+</document_index>
+
+Return ONLY the JSON hypergraph for this chunk. No explanation, no planning - just the JSON object.`,
+      },
+    ],
+  });
+
+  const content = response.choices[0]?.message?.content || "{}";
+  const parsed = JSON.parse(content);
+
+  return {
+    result: {
+      hypergraph: parsed.hypergraph || {},
+      conflicts: parsed.conflicts || [],
+      summary: parsed.summary || {
+        total_fields_analyzed: 0,
+        fields_with_conflicts: 0,
+        confidence_score: 0,
+      },
+    },
+    usage: {
+      inputTokens: response.usage?.prompt_tokens || 0,
+      outputTokens: response.usage?.completion_tokens || 0,
+    },
+  };
+}
+
+// ============================================================================
+// Case Summary Generation with GPT-OSS 120B
+// ============================================================================
+
+/**
+ * Generate case summary and phase using GPT-OSS 120B.
+ */
+export async function generateCaseSummaryWithGptOss(
+  condensedIndex: string,
+  systemPrompt: string,
+  userPrompt: string
+): Promise<{
+  result: { case_summary: string; case_phase: string };
+  usage: GroqUsage;
+}> {
+  const groq = getGroqClient();
+
+  const response = await groq.chat.completions.create({
+    model: "openai/gpt-oss-120b",
+    temperature: 0.1,
+    max_tokens: 2000,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `${systemPrompt}
+
+## OUTPUT FORMAT
+
+You must respond with a single JSON object containing exactly these fields:
+- "case_summary" (string): Brief narrative summary of the case (2-4 sentences). Include incident type, injuries, treatment/procedural status, and current posture.
+- "case_phase" (string): Current lifecycle phase based on documents present.
+
+No markdown, no explanation, no text outside the JSON.`,
+      },
+      {
+        role: "user",
+        content: userPrompt,
+      },
+    ],
+  });
+
+  const content = response.choices[0]?.message?.content || "{}";
+  const parsed = JSON.parse(content);
+
+  return {
+    result: {
+      case_summary: parsed.case_summary || "Case summary generation failed.",
+      case_phase: parsed.case_phase || "Intake",
+    },
+    usage: {
+      inputTokens: response.usage?.prompt_tokens || 0,
+      outputTokens: response.usage?.completion_tokens || 0,
+    },
+  };
+}

@@ -1,29 +1,15 @@
 /**
- * Haiku Case Summary Generator
+ * Case Summary Generator (Groq GPT-OSS 120B)
  *
  * Generates case_summary narrative and case_phase from document index.
  * Runs in parallel with hypergraph generation.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import { generateCaseSummaryWithGptOss } from "./groq-extract";
 import { loadSectionsByIds } from "../routes/knowledge";
 import { PI_PHASES } from "../practice-areas/personal-injury/config";
 import { WC_PHASES } from "../practice-areas/workers-comp/config";
 import { PRACTICE_AREAS } from "./index-schema";
-
-// Lazy client creation - API key is set by auth middleware before requests
-// Web shim (imported in server/index.ts) handles runtime selection
-let _anthropic: Anthropic | null = null;
-function getClient(): Anthropic {
-  if (!_anthropic) {
-    // Explicitly pass API key - env var reading may not work in bundled binary
-    _anthropic = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-      fetch: globalThis.fetch.bind(globalThis),
-    });
-  }
-  return _anthropic;
-}
 
 // Knowledge sections relevant for case summary
 const SUMMARY_SECTION_IDS = [
@@ -40,30 +26,9 @@ export interface CaseSummaryResult {
   };
 }
 
-function buildCaseSummarySchema(practiceArea?: string) {
-  const phaseEnum = practiceArea === PRACTICE_AREAS.WC
-    ? [...WC_PHASES]
-    : [...PI_PHASES];
-  return {
-    type: "object" as const,
-    properties: {
-      case_summary: {
-        type: "string" as const,
-        description: "Brief narrative summary of the case (2-4 sentences). Include incident type, injuries, treatment/procedural status, and current posture."
-      },
-      case_phase: {
-        type: "string" as const,
-        enum: phaseEnum,
-        description: "Current lifecycle phase based on documents present."
-      }
-    },
-    required: ["case_summary", "case_phase"] as const
-  };
-}
-
 /**
  * Determine case phase from document types present.
- * This provides a reasonable default that Haiku can refine.
+ * This provides a reasonable default that the model can refine.
  */
 function inferPhaseFromDocuments(folders: Record<string, any>, practiceArea?: string): string {
   const allTypes = new Set<string>();
@@ -147,7 +112,7 @@ function buildCondensedIndex(documentIndex: Record<string, any>): string {
 }
 
 /**
- * Generate case summary and phase using Haiku.
+ * Generate case summary and phase using Groq Qwen3 32B.
  */
 export async function generateCaseSummary(
   documentIndex: Record<string, any>,
@@ -156,7 +121,7 @@ export async function generateCaseSummary(
     practiceArea?: string;
   }
 ): Promise<CaseSummaryResult> {
-  console.log(`[CaseSummary] Starting Haiku summary generation`);
+  console.log(`[CaseSummary] Starting Groq GPT-OSS summary generation`);
   const startTime = Date.now();
   const practiceAreaInput = options?.practiceArea || documentIndex.practice_area;
   const practiceArea = practiceAreaInput === PRACTICE_AREAS.WC
@@ -188,6 +153,8 @@ export async function generateCaseSummary(
     ? contextLines.join("\n")
     : "No extra case metadata provided.";
 
+  const phaseEnum = isWC ? [...WC_PHASES] : [...PI_PHASES];
+
   const phaseDefinitions = isWC
     ? `- **Intake**: Initial WC claim setup and onboarding
 - **Investigation**: Compensability and records investigation in progress
@@ -216,6 +183,10 @@ ${knowledge}
 
 ${phaseDefinitions}
 
+## VALID PHASES
+
+case_phase must be one of: ${phaseEnum.join(", ")}
+
 ## INSTRUCTIONS
 
 1. Review the document list and key information
@@ -224,9 +195,7 @@ ${phaseDefinitions}
    - Injuries described
    - Treatment status (ongoing, completed, etc.)
    - Any notable case factors
-3. Determine the case phase based on what documents are present
-
-Use the case_summary tool to return your analysis.`;
+3. Determine the case phase based on what documents are present`;
 
   const userPrompt = `CASE CONTEXT:
 ${contextBlock}
@@ -236,40 +205,25 @@ ${condensedIndex}
 
 Initial phase inference (you may adjust): ${inferredPhase}
 
-Analyze the case and use the case_summary tool to return your summary and phase determination.`;
+Analyze the case and return your summary and phase determination as JSON.`;
 
   try {
-    const response = await getClient().messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1000,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userPrompt }],
-      tools: [{
-        name: "case_summary",
-        description: "Output the case summary and phase determination",
-        input_schema: buildCaseSummarySchema(practiceArea)
-      }],
-      tool_choice: { type: "tool", name: "case_summary" }
-    });
-
-    // Extract tool use
-    const toolBlock = response.content.find(block => block.type === "tool_use");
-    if (!toolBlock || toolBlock.type !== "tool_use") {
-      throw new Error("No tool use response from Haiku");
-    }
-
-    const result = toolBlock.input as { case_summary: string; case_phase: string };
+    const { result, usage } = await generateCaseSummaryWithGptOss(
+      condensedIndex,
+      systemPrompt,
+      userPrompt
+    );
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`[CaseSummary] Done in ${elapsed}s. Phase: ${result.case_phase}`);
-    console.log(`[CaseSummary] Usage: ${response.usage.input_tokens} in / ${response.usage.output_tokens} out`);
+    console.log(`[CaseSummary] Usage: ${usage.inputTokens} in / ${usage.outputTokens} out`);
 
     return {
       case_summary: result.case_summary,
       case_phase: result.case_phase,
       usage: {
-        inputTokens: response.usage.input_tokens,
-        outputTokens: response.usage.output_tokens
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens
       }
     };
   } catch (error) {

@@ -354,6 +354,81 @@ const getDocumentFileName = (file: DocumentFile): string | undefined => {
   return file.filename || file.file
 }
 
+const normalizeDocumentLookupPath = (value: string): string =>
+  value
+    .replace(/\\/g, '/')
+    .replace(/^\.\/+/, '')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/')
+    .trim()
+    .toLowerCase()
+
+const isPlaceholderPacketTitle = (value: string | undefined): boolean => {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return true
+  if (normalized === 'selected document' || normalized === 'selected doc' || normalized === 'document') {
+    return true
+  }
+  return /^doc_[a-f0-9]{8}$/i.test(normalized)
+}
+
+const resolvePacketTitle = (value: string | undefined, fallback: string): string => {
+  const trimmed = typeof value === 'string' ? value.trim() : ''
+  if (isPlaceholderPacketTitle(trimmed)) return fallback
+  return trimmed
+}
+
+const fnv1a32 = (input: string): string => {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+const buildDocumentIdFromPath = (path: string): string => {
+  const normalized = normalizeDocumentLookupPath(path)
+  return `doc_${fnv1a32(normalized)}`
+}
+
+const buildDocumentId = (folder: string, filename: string): string => {
+  const normalizedFolder = normalizeDocumentLookupPath(folder)
+  const normalizedFile = normalizeDocumentLookupPath(filename)
+  const canonical = normalizedFolder && normalizedFolder !== '.' && normalizedFolder !== 'root'
+    ? `${normalizedFolder}/${normalizedFile}`
+    : normalizedFile
+  return buildDocumentIdFromPath(canonical)
+}
+
+const getCanonicalPacketPath = (
+  rawPath: string,
+  docLookup: Map<string, { file: DocumentFile; folder: string }>
+): string | null => {
+  const normalizedPath = normalizeDocumentLookupPath(rawPath)
+  const basename = normalizedPath.split('/').pop() || normalizedPath
+  const entry = docLookup.get(normalizedPath) || docLookup.get(basename)
+  if (!entry) return null
+  const matchName = getDocumentFileName(entry.file)
+  if (!matchName) return null
+  return entry.folder && entry.folder !== '.' && entry.folder !== ''
+    ? `${entry.folder}/${matchName}`
+    : matchName
+}
+
+const getCanonicalPacketPathById = (
+  docId: string,
+  docLookupById: Map<string, { file: DocumentFile; folder: string }>
+): string | null => {
+  const entry = docLookupById.get(docId)
+  if (!entry) return null
+  const matchName = getDocumentFileName(entry.file)
+  if (!matchName) return null
+  return entry.folder && entry.folder !== '.' && entry.folder !== ''
+    ? `${entry.folder}/${matchName}`
+    : matchName
+}
+
 
 // Icon components
 const FolderIcon = () => (
@@ -604,42 +679,79 @@ function App() {
     for (const [folder, data] of Object.entries(documentIndex.folders)) {
       for (const file of getFolderFiles(data)) {
         if (typeof file === 'string') continue
-        const name = getDocumentFileName(file)?.toLowerCase()
+        const name = getDocumentFileName(file)
         if (!name) continue
-        const fullPath = (folder === '.' || folder === '') ? name : `${folder.toLowerCase()}/${name}`
+        const normalizedName = normalizeDocumentLookupPath(name)
+        const fullPath = folder === '.' || folder === '' ? normalizedName : normalizeDocumentLookupPath(`${folder}/${name}`)
         const entry = { file, folder }
         // Full path keys (highest priority — set first, never overwritten)
         if (!map.has(fullPath)) map.set(fullPath, entry)
         const noExt = fullPath.replace('.pdf', '')
         if (noExt !== fullPath && !map.has(noExt)) map.set(noExt, entry)
         // Bare filename keys (lower priority — only set if not already taken)
-        if (!map.has(name)) map.set(name, entry)
-        const nameNoExt = name.replace('.pdf', '')
-        if (nameNoExt !== name && !map.has(nameNoExt)) map.set(nameNoExt, entry)
+        if (!map.has(normalizedName)) map.set(normalizedName, entry)
+        const nameNoExt = normalizedName.replace('.pdf', '')
+        if (nameNoExt !== normalizedName && !map.has(nameNoExt)) map.set(nameNoExt, entry)
+      }
+    }
+    return map
+  }, [documentIndex])
+
+  const docLookupById = useMemo(() => {
+    const map = new Map<string, { file: DocumentFile; folder: string }>()
+    if (!documentIndex?.folders) return map
+    for (const [folder, data] of Object.entries(documentIndex.folders)) {
+      for (const file of getFolderFiles(data)) {
+        if (typeof file === 'string') {
+          const docId = buildDocumentId(folder, file)
+          map.set(docId, { file, folder })
+          continue
+        }
+        const name = getDocumentFileName(file)
+        if (!name) continue
+        const docId =
+          typeof file.doc_id === 'string' && file.doc_id.trim()
+            ? file.doc_id.trim()
+            : buildDocumentId(folder, name)
+        map.set(docId, { file, folder })
       }
     }
     return map
   }, [documentIndex])
 
   const handleEnterPacketModeFromAgent = useCallback(async (
-    proposedDocs: Array<{ path: string; title?: string }>,
+    proposedDocs: Array<{ docId?: string; path?: string; title?: string }>,
     frontMatter: Partial<PacketFrontMatter>
   ) => {
     const defaultFm = await createDefaultFrontMatter()
     const cleaned = Object.fromEntries(
       Object.entries(frontMatter).filter(([, v]) => v !== undefined)
     )
-    const documents: PacketDocument[] = proposedDocs.map((doc, i) => {
-      const entry = docLookup.get(doc.path.toLowerCase())
+    const resolvedDocs = proposedDocs.flatMap((doc) => {
+      const canonicalPath =
+        (doc.docId ? getCanonicalPacketPathById(doc.docId, docLookupById) : null)
+        || (doc.path ? getCanonicalPacketPath(doc.path, docLookup) : null)
+      if (!canonicalPath) return []
+      return [{ ...doc, canonicalPath, docId: doc.docId || buildDocumentIdFromPath(canonicalPath) }]
+    })
+
+    const documents: PacketDocument[] = resolvedDocs.map((doc, i) => {
+      const normalizedPath = normalizeDocumentLookupPath(doc.canonicalPath)
+      const basename = normalizedPath.split('/').pop() || normalizedPath
+      const entry = docLookup.get(normalizedPath) || docLookup.get(basename)
       const match = entry?.file
-      const fileName = doc.path.split('/').pop() || doc.path
+      const fileName = doc.canonicalPath.split('/').pop() || doc.canonicalPath
       if (match && typeof match !== 'string') {
         // Resolve the actual path from the index (folder + filename) rather than trusting the agent's path
         const actualFileName = getDocumentFileName(match) || fileName
         const resolvedPath = entry.folder && entry.folder !== '.' && entry.folder !== ''
           ? `${entry.folder}/${actualFileName}`
           : actualFileName
-        const title = typeof match.title === 'string' ? match.title : (doc.title || fileName)
+        const indexTitle = typeof match.title === 'string'
+          ? resolvePacketTitle(match.title, '')
+          : ''
+        const providedTitle = resolvePacketTitle(doc.title, '')
+        const title = indexTitle || providedTitle || actualFileName
         const date = typeof match.date === 'string' ? match.date : null
         const type = typeof match.type === 'string' ? match.type : ''
         const hasHandwrittenData = match.has_handwritten_data === true
@@ -655,17 +767,17 @@ function App() {
             : !date ? 'No date' : undefined
         return { path: resolvedPath, title, date, type, fileName: actualFileName, pinned: false, order: i, hasWarning, warningReason }
       }
-      // No index match — fall back to agent-provided title
+      // Should be unreachable because unresolved docs are filtered above.
       return {
-        path: doc.path,
-        title: doc.title || fileName,
+        path: doc.canonicalPath,
+        title: resolvePacketTitle(doc.title, fileName),
         date: null,
         type: '',
         fileName,
         pinned: false,
         order: i,
         hasWarning: true,
-        warningReason: 'No date',
+        warningReason: 'No date'
       }
     })
     setPacketState({
@@ -678,7 +790,7 @@ function App() {
       draftId: null,
     })
     setPacketMode(true)
-  }, [createDefaultFrontMatter, docLookup])
+  }, [createDefaultFrontMatter, docLookup, docLookupById])
 
   const handleEnterPacketModeFromDraft = useCallback(async (draftId: string) => {
     if (!caseFolder) return
@@ -686,11 +798,28 @@ function App() {
       const res = await fetch(`${API_URL}/api/docs/packet-draft/${encodeURIComponent(draftId)}?case=${encodeURIComponent(caseFolder)}`)
       if (res.ok) {
         const draft = await res.json() as PacketState
-        setPacketState({ ...draft, draftId })
+        const canonicalDocs = (draft.documents || [])
+          .map((doc, index) => {
+            const derivedDocId = (doc as PacketDocument & { docId?: string }).docId
+              || buildDocumentIdFromPath(doc.path)
+            const canonicalPath =
+              getCanonicalPacketPathById(derivedDocId, docLookupById)
+              || getCanonicalPacketPath(doc.path, docLookup)
+            if (!canonicalPath) return null
+            return {
+              ...doc,
+              path: canonicalPath,
+              title: resolvePacketTitle(doc.title, canonicalPath.split('/').pop() || canonicalPath),
+              order: index,
+            }
+          })
+          .filter((doc): doc is PacketDocument => Boolean(doc))
+
+        setPacketState({ ...draft, documents: canonicalDocs, draftId })
         setPacketMode(true)
       }
     } catch { /* ignore */ }
-  }, [caseFolder])
+  }, [caseFolder, docLookup, docLookupById])
 
   const handleExitPacketMode = useCallback(() => {
     setPacketMode(false)
@@ -1485,7 +1614,9 @@ function App() {
 
   const handleShowFile = useCallback((filePath: string) => {
     if (!caseFolder) return
-    const entry = docLookup.get(filePath.toLowerCase())
+    const normalizedPath = normalizeDocumentLookupPath(filePath)
+    const basename = normalizedPath.split('/').pop() || normalizedPath
+    const entry = docLookup.get(normalizedPath) || docLookup.get(basename)
     let resolvedPath = filePath
     if (entry) {
       const matchName = getDocumentFileName(entry.file)
@@ -2051,7 +2182,9 @@ function App() {
                 }}
                 isReindexing={indexingProgress?.isRunning && indexingProgress?.caseFolder === caseFolder}
                 onEvidencePacketPlanned={(data) => {
-                  handleEnterPacketModeFromAgent(data.documents, data.frontMatter)
+                  void handleEnterPacketModeFromAgent(data.documents, data.frontMatter).catch((error) => {
+                    console.error("Failed to enter packet mode from agent plan", error)
+                  })
                 }}
               />
             </div>

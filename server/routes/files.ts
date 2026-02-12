@@ -1,10 +1,11 @@
 import { Hono } from "hono";
 import { readdir, stat, readFile, writeFile, mkdir } from "fs/promises";
-import { join, dirname } from "path";
+import { join, dirname, resolve, sep } from "path";
 import { homedir } from "os";
 import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
 import { applyResolvedFieldToSummary } from "../lib/index-summary-sync";
 import { buildCaseMap } from "../lib/case-map";
+import { writeIndexDerivedFiles } from "../lib/meta-index";
 
 // System/temporary files to ignore during file enumeration
 const IGNORED_FILES = new Set([
@@ -121,6 +122,152 @@ async function ensureCaseMapExists(
   } catch (error) {
     console.warn(`[CaseMap] Failed to generate case_map.json for ${caseFolder}:`, error);
   }
+}
+
+function normalizePath(value: string): string {
+  return value
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "")
+    .replace(/\/+/g, "/")
+    .trim();
+}
+
+function normalizeComparablePath(value: string): string {
+  return normalizePath(value)
+    .replace(/\s+/g, " ")
+    .replace(/\s+\./g, ".")
+    .toLowerCase();
+}
+
+function joinRelativePath(folderName: string, fileName: string): string {
+  const folder = normalizePath(folderName);
+  const file = normalizePath(fileName);
+  if (!file) return "";
+  if (!folder || folder === "." || folder.toLowerCase() === "root") return file;
+  return `${folder}/${file}`;
+}
+
+function resolveCasePath(caseFolder: string, relativePath: string): string {
+  const base = resolve(caseFolder);
+  const target = resolve(base, relativePath);
+  if (target !== base && !target.startsWith(base + sep)) {
+    throw new Error(`Path is outside case folder: ${relativePath}`);
+  }
+  return target;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function buildIndexedPathMap(index: any): Map<string, string> {
+  const pathMap = new Map<string, string>();
+  const folders = index?.folders;
+  if (!folders || typeof folders !== "object") return pathMap;
+
+  const addPath = (candidate: string, canonical: string) => {
+    const candidateKey = normalizeComparablePath(candidate);
+    const canonicalPath = normalizePath(canonical);
+    if (!candidateKey || !canonicalPath) return;
+    if (!pathMap.has(candidateKey)) {
+      pathMap.set(candidateKey, canonicalPath);
+    }
+  };
+
+  for (const [folderName, folderData] of Object.entries(folders)) {
+    let docs: any[] = [];
+    if (Array.isArray(folderData)) {
+      docs = folderData;
+    } else if (folderData && typeof folderData === "object") {
+      const folderObj = folderData as any;
+      if (Array.isArray(folderObj.files)) docs = folderObj.files;
+      else if (Array.isArray(folderObj.documents)) docs = folderObj.documents;
+    }
+
+    for (const doc of docs) {
+      let entryPath = "";
+      let fileName = "";
+
+      if (typeof doc === "string") {
+        fileName = doc;
+      } else if (doc && typeof doc === "object") {
+        const rawPath = typeof doc.path === "string" ? normalizePath(doc.path) : "";
+        const rawFilename = typeof doc.filename === "string" ? doc.filename : "";
+        const rawFile = typeof doc.file === "string" ? doc.file : "";
+        fileName = rawFilename || rawFile || (rawPath ? rawPath.split("/").pop() || "" : "");
+        entryPath = rawPath;
+      }
+
+      const canonicalPath =
+        entryPath && entryPath.includes("/")
+          ? entryPath
+          : joinRelativePath(folderName, entryPath || fileName);
+
+      if (!canonicalPath) continue;
+
+      addPath(canonicalPath, canonicalPath);
+      const canonicalName = canonicalPath.split("/").pop() || canonicalPath;
+      addPath(canonicalName, canonicalPath);
+
+      const noExtPath = canonicalPath.replace(/\.pdf$/i, "");
+      const noExtName = canonicalName.replace(/\.pdf$/i, "");
+      if (noExtPath !== canonicalPath) addPath(noExtPath, canonicalPath);
+      if (noExtName !== canonicalName) addPath(noExtName, canonicalPath);
+    }
+  }
+
+  return pathMap;
+}
+
+async function resolveDocumentPath(
+  caseFolder: string,
+  requestedPath: string
+): Promise<{ fullPath: string; relativePath: string }> {
+  const normalizedRequestedPath = normalizePath(requestedPath);
+  if (!normalizedRequestedPath) {
+    throw new Error("Missing file path");
+  }
+
+  const directFullPath = resolveCasePath(caseFolder, normalizedRequestedPath);
+  if (await pathExists(directFullPath)) {
+    return { fullPath: directFullPath, relativePath: normalizedRequestedPath };
+  }
+
+  try {
+    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexContent = await readFile(indexPath, "utf-8");
+    const index = JSON.parse(indexContent);
+    const pathMap = buildIndexedPathMap(index);
+    const requestedComparablePath = normalizeComparablePath(normalizedRequestedPath);
+
+    const candidates = [
+      requestedComparablePath,
+      normalizeComparablePath(normalizedRequestedPath.replace(/\.pdf$/i, "")),
+      normalizeComparablePath(normalizedRequestedPath.split("/").pop() || normalizedRequestedPath),
+      normalizeComparablePath(
+        (normalizedRequestedPath.split("/").pop() || normalizedRequestedPath).replace(/\.pdf$/i, "")
+      ),
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      const mappedPath = pathMap.get(candidate);
+      if (!mappedPath) continue;
+      const fullPath = resolveCasePath(caseFolder, mappedPath);
+      if (await pathExists(fullPath)) {
+        return { fullPath, relativePath: mappedPath };
+      }
+    }
+  } catch {
+    // Fall through to not found
+  }
+
+  throw new Error("File not found");
 }
 
 // Browse directories for folder picker
@@ -422,6 +569,7 @@ app.post("/document-summary", async (c) => {
     });
 
     await writeFile(indexPath, JSON.stringify(index, null, 2));
+    await writeIndexDerivedFiles(caseFolder, index);
 
     return c.json({
       success: true,
@@ -713,16 +861,10 @@ app.get("/view", async (c) => {
     return access.response;
   }
 
-  const fullPath = join(caseFolder, filePath);
-  const filename = filePath.split("/").pop() || "file";
-
   try {
+    const { fullPath, relativePath } = await resolveDocumentPath(caseFolder, filePath);
+    const filename = relativePath.split("/").pop() || "file";
     const file = Bun.file(fullPath);
-    const exists = await file.exists();
-
-    if (!exists) {
-      return c.json({ error: "File not found" }, 404);
-    }
 
     const contentType = getContentType(filename, file.type);
     const arrayBuffer = await file.arrayBuffer();
@@ -737,6 +879,9 @@ app.get("/view", async (c) => {
       },
     });
   } catch (error) {
+    if (error instanceof Error && error.message === "File not found") {
+      return c.json({ error: "File not found" }, 404);
+    }
     console.error("File view error:", error);
     return c.json({ error: "Could not read file" }, 500);
   }
@@ -899,6 +1044,7 @@ app.post("/resolve", async (c) => {
 
     // Write updated index
     await writeFile(indexPath, JSON.stringify(index, null, 2));
+    await writeIndexDerivedFiles(caseFolder, index);
 
     return c.json({
       success: true,
@@ -1029,6 +1175,7 @@ app.patch("/contact-card", async (c) => {
     });
 
     await writeFile(indexPath, JSON.stringify(index, null, 2));
+    await writeIndexDerivedFiles(caseFolder, index);
 
     return c.json({
       success: true,

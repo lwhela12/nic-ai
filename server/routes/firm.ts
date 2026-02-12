@@ -15,8 +15,10 @@ import { loadPracticeGuide, loadSectionsByIds, clearKnowledgeCache } from "./kno
 import { extractTextFromFile } from "../lib/extract";
 import { generateCaseSummary } from "../lib/case-summary";
 import { mergeToIndex, diffIndexes, type HypergraphResult, type IndexDiff } from "../lib/merge-index";
+import { extractWithGptOss, extractWithVision, generateHypergraphWithGptOss } from "../lib/groq-extract";
 import { directFirmChat, type FirmChatScope } from "../lib/firm-chat";
 import { buildCaseMap } from "../lib/case-map";
+import { writeIndexDerivedFiles } from "../lib/meta-index";
 import {
   normalizeIndex,
   validateIndex,
@@ -27,6 +29,7 @@ import { practiceAreaRegistry, PRACTICE_AREAS } from "../practice-areas";
 import { normalizePracticeArea, resolveFirmPracticeArea } from "../lib/practice-area";
 import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
 import { formatDateYYYYMMDD, parseFlexibleDate } from "../lib/date-format";
+import { buildDocumentId } from "../lib/document-id";
 
 // ============================================================================
 // Usage Reporting
@@ -1528,333 +1531,238 @@ function resolveDocumentDate(extraction: FileExtraction): {
   };
 }
 
-async function extractFile(
+// ============================================================================
+// Pre-classification: determine text vs vision extraction for each file
+// ============================================================================
+
+interface ClassifiedFile {
+  filePath: string;       // relative path like "Intake/Intake.pdf"
+  filename: string;
+  folder: string;
+  fullPath: string;
+  useText: boolean;       // true = text extraction (GPT-OSS), false = vision (Scout/Maverick)
+  extractedText: string;  // pre-extracted text (only meaningful when useText=true)
+  fileSizeMB: number;
+}
+
+async function classifyFile(
   caseFolder: string,
-  filePath: string, // relative path like "Intake/Intake.pdf"
-  fileIndex: number,
-  totalFiles: number,
-  practiceArea?: string,
-  onProgress?: (event: { type: string; [key: string]: any }) => void,
-  sdkCliOpts?: ReturnType<typeof getSDKCliOptions>,
-  cachedSystemPrompt?: string
-): Promise<FileExtraction> {
+  filePath: string,
+): Promise<ClassifiedFile> {
   const filename = filePath.split('/').pop() || filePath;
   const rawFolder = dirname(filePath).replace(/\\/g, '/');
   const folder = rawFolder === '.' ? '.' : rawFolder;
   const fullPath = join(caseFolder, filePath);
+
+  let fileSizeMB = 0;
+  try {
+    const fileStats = await stat(fullPath);
+    fileSizeMB = fileStats.size / (1024 * 1024);
+  } catch {
+    // File not found — will be caught during extraction
+    return { filePath, filename, folder, fullPath, useText: false, extractedText: '', fileSizeMB: 0 };
+  }
+
+  // Try to extract text server-side
+  let extractedText = '';
+  let useText = false;
+  try {
+    extractedText = await extractTextFromFile(fullPath);
+    useText = extractedText.length > 50 &&
+      !extractedText.startsWith('[Could not') &&
+      !extractedText.startsWith('[Binary file');
+  } catch {
+    // Text extraction failed — will use vision
+  }
+
+  // Truncate if too long to avoid token limits
+  const MAX_CHARS = 15000;
+  if (useText && extractedText.length > MAX_CHARS) {
+    extractedText = extractedText.slice(0, MAX_CHARS) + '\n\n[... truncated ...]';
+  }
+
+  return { filePath, filename, folder, fullPath, useText, extractedText, fileSizeMB };
+}
+
+// ============================================================================
+// Text extraction: GPT-OSS 120B (Path 1)
+// ============================================================================
+
+async function extractFileText(
+  classified: ClassifiedFile,
+  fileIndex: number,
+  totalFiles: number,
+  practiceArea?: string,
+  onProgress?: (event: { type: string; [key: string]: any }) => void,
+): Promise<FileExtraction> {
+  const { filename, folder, fullPath, extractedText } = classified;
   const startTime = Date.now();
 
-  // Track messages for debugging failures
-  const messageLog: Array<{ type: string; subtype?: string; detail?: string }> = [];
+  onProgress?.({ type: "file_start", fileIndex, totalFiles, filename, folder });
+
+  let result: FileExtraction = {
+    filename,
+    folder,
+    type: 'other',
+    key_info: '',
+    has_handwritten_data: false,
+    handwritten_fields: [],
+  };
+  const usage: UsageStats = {
+    inputTokens: 0,
+    inputTokensNew: 0,
+    inputTokensCacheWrite: 0,
+    inputTokensCacheRead: 0,
+    outputTokens: 0,
+    apiCalls: 0,
+    model: 'groq'
+  };
 
   try {
-    // Pre-flight checks
-    let fileStats;
-    try {
-      fileStats = await stat(fullPath);
-    } catch (statErr) {
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      console.error(`[${fileIndex + 1}/${totalFiles}] ✗ File not found: ${filename} (${elapsed}s)`);
-      return {
-        filename,
-        folder,
-        type: 'other',
-        key_info: 'File not found or inaccessible',
-        has_handwritten_data: false,
-        handwritten_fields: [],
-        error: `File not found: ${fullPath}`,
-      };
-    }
-
-    // Warn about very large files (>10MB)
-    const fileSizeMB = fileStats.size / (1024 * 1024);
-    if (fileSizeMB > 10) {
-      console.warn(`[${fileIndex + 1}/${totalFiles}] ⚠ Large file: ${filename} (${fileSizeMB.toFixed(1)}MB)`);
-    }
-
-    console.log(`[${fileIndex + 1}/${totalFiles}] Starting: ${filename} (${fileSizeMB.toFixed(2)}MB)`);
-    onProgress?.({ type: "file_start", fileIndex, totalFiles, filename, folder });
-
-    // PRE-EXTRACT: Try to extract text server-side before calling agent
-    let extractedText = '';
-    let usePreExtracted = false;
-    const extractStartTime = Date.now();
-    try {
-      extractedText = await extractTextFromFile(fullPath);
-      const extractElapsed = ((Date.now() - extractStartTime) / 1000).toFixed(1);
-      console.log(`[${fileIndex + 1}/${totalFiles}] Extracted ${extractedText.length} chars in ${extractElapsed}s`);
-
-      // Only use pre-extracted text if we got meaningful content
-      usePreExtracted = extractedText.length > 50 &&
-        !extractedText.startsWith('[Could not') &&
-        !extractedText.startsWith('[Binary file');
-    } catch (extractErr) {
-      console.warn(`[${fileIndex + 1}/${totalFiles}] Text extraction failed, falling back to agent:`, extractErr);
-    }
-
-    // Truncate if too long to avoid token limits
-    const MAX_CHARS = 15000;
-    if (usePreExtracted && extractedText.length > MAX_CHARS) {
-      extractedText = extractedText.slice(0, MAX_CHARS) + '\n\n[... truncated ...]';
-      console.log(`[${fileIndex + 1}/${totalFiles}] Truncated to ${MAX_CHARS} chars`);
-    }
-
-    // Track extraction method for logging (updated below if large file uses agent)
-    let extractionMethod = usePreExtracted ? 'pre-extracted' : 'pdf-direct';
-
-    let result: FileExtraction = {
+    const groqResult = await extractWithGptOss(
+      extractedText,
       filename,
       folder,
-      type: 'other',
-      key_info: '',
-      has_handwritten_data: false,
-      handwritten_fields: [],
-    };
-    let usage: UsageStats = {
-      inputTokens: 0,
-      inputTokensNew: 0,
-      inputTokensCacheWrite: 0,
-      inputTokensCacheRead: 0,
-      outputTokens: 0,
-      apiCalls: 0,
-      model: 'haiku'
-    };
+      getFileExtractionSystemPrompt(practiceArea)
+    );
 
-    // ========================================================================
-    // PATH 1: Pre-extracted text → Direct API with structured tool_use
-    // ========================================================================
-    if (usePreExtracted) {
-      try {
-        const response = await getClient().messages.create({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 2000,
-          system: getFileExtractionSystemPrompt(practiceArea),
-          messages: [{
-            role: "user",
-            content: `Extract information from this document.
+    const handwrittenFields = normalizeHandwrittenFields(groqResult.result.handwritten_fields);
+    const hasHandwrittenData = handwrittenFields.length > 0;
 
-FILENAME: ${filename}
-FOLDER: ${folder}
-
-DOCUMENT TEXT:
-${extractedText}
-
-CRITICAL:
-- Include extracted_data.document_date for this specific document's own date.
-- If multiple dates appear, include extracted_data.document_date_confidence and extracted_data.document_date_reason.
-- Set has_handwritten_data to true only for substantive handwritten extracted values (exclude signature/initial-only markings).
-- Include handwritten_fields as non-signature extracted field names that are handwritten (use [] when none).
-
-Use the extract_document tool to return your findings.`
-          }],
-          tools: [FILE_EXTRACTION_TOOL_SCHEMA],
-          tool_choice: { type: "tool", name: "extract_document" }
-        });
-
-        // Capture usage
-        usage.inputTokensNew = response.usage.input_tokens || 0;
-        usage.inputTokensCacheWrite = (response.usage as any).cache_creation_input_tokens || 0;
-        usage.inputTokensCacheRead = (response.usage as any).cache_read_input_tokens || 0;
-        usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
-        usage.outputTokens = response.usage.output_tokens || 0;
-        usage.apiCalls = 1;
-
-        // Extract tool use result
-        const toolBlock = response.content.find(block => block.type === 'tool_use');
-        if (toolBlock && toolBlock.type === 'tool_use') {
-          const extracted = toolBlock.input as {
-            type: string;
-            key_info: string;
-            has_handwritten_data?: boolean;
-            handwritten_fields?: string[];
-            extracted_data: Record<string, unknown>;
-          };
-          const handwrittenFields = normalizeHandwrittenFields(extracted.handwritten_fields);
-          const hasHandwrittenData = handwrittenFields.length > 0;
-
-          result = {
-            filename,
-            folder,
-            type: extracted.type || 'other',
-            key_info: extracted.key_info || '',
-            has_handwritten_data: hasHandwrittenData,
-            handwritten_fields: hasHandwrittenData ? handwrittenFields : [],
-            extracted_data: extracted.extracted_data,
-          };
-        }
-      } catch (apiErr) {
-        console.error(`[${fileIndex + 1}/${totalFiles}] Direct API error for ${filename}:`, apiErr);
-        result.key_info = `Extraction failed: ${apiErr instanceof Error ? apiErr.message : String(apiErr)}`;
-        result.error = apiErr instanceof Error ? apiErr.message : String(apiErr);
-      }
-
-      result.usage = usage;
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      console.log(`[${fileIndex + 1}/${totalFiles}] ✓ Done: ${filename} (${elapsed}s) - ${result.type} [structured-extraction]`);
-      onProgress?.({
-        type: "file_done",
-        fileIndex,
-        totalFiles,
-        filename,
-        folder,
-        docType: result.type,
-        extractionMethod: 'structured',
-        elapsed: parseFloat(elapsed)
-      });
-      return result;
-    }
-
-    // ========================================================================
-    // PATH 2: Agent SDK fallback for all non-pre-extracted files
-    // Uses Haiku agent with Read/Bash tools to examine the file
-    // ========================================================================
-    console.log(`[${fileIndex + 1}/${totalFiles}] [agent-fallback] ${filename}`);
-    extractionMethod = 'agent-fallback';
-
-    // Use cached SDK options or create them (should be cached at call site)
-    const effectiveSdkCliOpts = sdkCliOpts ?? getSDKCliOptions();
-    const effectiveSystemPrompt = cachedSystemPrompt ?? getFileExtractionSystemPromptWithTools(practiceArea);
-    const agentPrompt = `Extract information from this file: ${fullPath}
-
-Use the Read tool to read the file. Then return the JSON extraction with these fields:
-- type: document type
-- key_info: 2-3 sentence summary
-- has_handwritten_data: true/false when substantive extracted values appear handwritten (exclude signature/initial-only markings)
-- handwritten_fields: array of non-signature extracted field names that are handwritten (use [] when none)
-- extracted_data: object with any data found, including:
-  * document_date (this specific document's date)
-  * document_date_confidence (high|medium|low|unknown)
-  * document_date_reason (short explanation when multiple dates exist)
-
-Return ONLY valid JSON, no markdown.`;
-
-    const AGENT_TIMEOUT_MS = 60000; // 60 seconds
-
-    try {
-      // Wrap agent query in a promise with timeout to prevent hanging
-      const agentPromise = (async () => {
-        for await (const msg of query({
-          prompt: agentPrompt,
-          options: {
-            cwd: caseFolder,
-            systemPrompt: effectiveSystemPrompt,
-            model: "haiku" as const,
-            allowedTools: ["Bash", "Read"],
-            permissionMode: "acceptEdits" as const,
-            maxTurns: 5,
-            persistSession: false,
-            ...effectiveSdkCliOpts,
-          },
-        })) {
-          if (msg.type === "assistant") {
-            for (const block of msg.message.content) {
-              if (block.type === "text") {
-                try {
-                  const jsonMatch = block.text.match(/\{[\s\S]*\}/);
-                  if (jsonMatch) {
-                    const parsed = JSON.parse(jsonMatch[0]);
-                    result = {
-                      filename: parsed.filename || filename,
-                      folder,
-                      type: parsed.type || 'other',
-                      key_info: parsed.key_info || '',
-                      has_handwritten_data: normalizeHandwrittenFields(parsed.handwritten_fields).length > 0,
-                      handwritten_fields: normalizeHandwrittenFields(parsed.handwritten_fields),
-                      extracted_data: parsed.extracted_data,
-                    };
-                  }
-                } catch {
-                  result.key_info = block.text.slice(0, 500);
-                }
-              }
-            }
-          }
-
-          if (msg.type === "result" && (msg as any).usage) {
-            const finalUsage = (msg as any).usage;
-            usage.inputTokensNew = finalUsage.input_tokens || 0;
-            usage.inputTokensCacheWrite = finalUsage.cache_creation_input_tokens || 0;
-            usage.inputTokensCacheRead = finalUsage.cache_read_input_tokens || 0;
-            usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
-            usage.outputTokens = finalUsage.output_tokens || 0;
-            usage.apiCalls = 1;
-          }
-        }
-      })();
-
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Agent timeout after ${AGENT_TIMEOUT_MS / 1000}s`)), AGENT_TIMEOUT_MS)
-      );
-
-      await Promise.race([agentPromise, timeoutPromise]);
-    } catch (agentErr) {
-      console.error(`[${fileIndex + 1}/${totalFiles}] Agent fallback error for ${filename}:`, agentErr);
-      result.key_info = `Extraction failed: ${agentErr instanceof Error ? agentErr.message : String(agentErr)}`;
-      result.error = agentErr instanceof Error ? agentErr.message : String(agentErr);
-    }
-
-    result.usage = usage;
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`[${fileIndex + 1}/${totalFiles}] ✓ Done: ${filename} (${elapsed}s) - ${result.type} [${extractionMethod}]`);
-    onProgress?.({
-      type: "file_done",
-      fileIndex,
-      totalFiles,
+    result = {
       filename,
       folder,
-      docType: result.type,
-      extractionMethod,
-      elapsed: parseFloat(elapsed)
-    });
-    return result;
-  } catch (err) {
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-
-    // Extract detailed error info
-    const errAny = err as any;
-    const errorDetails = {
-      message: err instanceof Error ? err.message : String(err),
-      code: errAny?.code,
-      exitCode: errAny?.exitCode,
-      stderr: errAny?.stderr,
-      stdout: errAny?.stdout,
-      cause: errAny?.cause,
-      stack: err instanceof Error ? err.stack?.split('\n').slice(0, 5).join('\n') : undefined,
+      type: groqResult.result.type || 'other',
+      key_info: groqResult.result.key_info || '',
+      has_handwritten_data: hasHandwrittenData,
+      handwritten_fields: hasHandwrittenData ? handwrittenFields : [],
+      extracted_data: groqResult.result.extracted_data,
     };
 
-    // Log detailed failure info
-    console.error(`[${fileIndex + 1}/${totalFiles}] ✗ FAILED: ${filename} (${elapsed}s)`);
-    console.error(`  File path: ${fullPath}`);
-    console.error(`  Error: ${errorDetails.message}`);
-    if (errorDetails.code) console.error(`  Code: ${errorDetails.code}`);
-    if (errorDetails.exitCode) console.error(`  Exit code: ${errorDetails.exitCode}`);
-    if (errorDetails.stderr) console.error(`  Stderr: ${errorDetails.stderr}`);
-    if (errorDetails.cause) console.error(`  Cause: ${JSON.stringify(errorDetails.cause)}`);
-    if (messageLog.length > 0) {
-      console.error(`  Message log (${messageLog.length} messages):`);
-      messageLog.slice(-5).forEach((m, i) => {
-        console.error(`    [${i}] ${m.type}${m.subtype ? ':' + m.subtype : ''} ${m.detail || ''}`);
-      });
-    }
+    usage.inputTokens = groqResult.usage.inputTokens;
+    usage.inputTokensNew = groqResult.usage.inputTokens;
+    usage.outputTokens = groqResult.usage.outputTokens;
+    usage.apiCalls = 1;
+  } catch (apiErr) {
+    console.error(`[${fileIndex + 1}/${totalFiles}] GPT-OSS error for ${filename}:`, apiErr);
+    result.key_info = `Extraction failed: ${apiErr instanceof Error ? apiErr.message : String(apiErr)}`;
+    result.error = apiErr instanceof Error ? apiErr.message : String(apiErr);
+  }
 
-    onProgress?.({
-      type: "file_error",
-      fileIndex,
-      totalFiles,
-      filename,
-      error: errorDetails.message,
-      errorDetails
-    });
+  result.usage = usage;
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`[${fileIndex + 1}/${totalFiles}] ✓ Done: ${filename} (${elapsed}s) - ${result.type} [groq-gpt-oss]`);
+  onProgress?.({
+    type: "file_done",
+    fileIndex,
+    totalFiles,
+    filename,
+    folder,
+    docType: result.type,
+    extractionMethod: 'groq-gpt-oss',
+    elapsed: parseFloat(elapsed)
+  });
+  return result;
+}
+
+// ============================================================================
+// Vision extraction: Scout → Maverick fallback (Path 2)
+// ============================================================================
+
+async function extractFileVision(
+  classified: ClassifiedFile,
+  fileIndex: number,
+  totalFiles: number,
+  practiceArea?: string,
+  onProgress?: (event: { type: string; [key: string]: any }) => void,
+): Promise<FileExtraction> {
+  const { filename, folder, fullPath } = classified;
+  const startTime = Date.now();
+
+  onProgress?.({ type: "file_start", fileIndex, totalFiles, filename, folder });
+
+  // Pre-flight: check file exists
+  try {
+    await stat(fullPath);
+  } catch {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.error(`[${fileIndex + 1}/${totalFiles}] ✗ File not found: ${filename} (${elapsed}s)`);
     return {
       filename,
       folder,
       type: 'other',
-      key_info: 'Failed to extract',
+      key_info: 'File not found or inaccessible',
       has_handwritten_data: false,
       handwritten_fields: [],
-      error: errorDetails.message,
+      error: `File not found: ${fullPath}`,
     };
   }
+
+  let result: FileExtraction = {
+    filename,
+    folder,
+    type: 'other',
+    key_info: '',
+    has_handwritten_data: false,
+    handwritten_fields: [],
+  };
+  const usage: UsageStats = {
+    inputTokens: 0,
+    inputTokensNew: 0,
+    inputTokensCacheWrite: 0,
+    inputTokensCacheRead: 0,
+    outputTokens: 0,
+    apiCalls: 0,
+    model: 'groq'
+  };
+
+  console.log(`[${fileIndex + 1}/${totalFiles}] [groq-vision] ${filename}`);
+
+  try {
+    const groqResult = await extractWithVision(
+      fullPath,
+      filename,
+      folder,
+      getFileExtractionSystemPrompt(practiceArea)
+    );
+
+    const handwrittenFields = normalizeHandwrittenFields(groqResult.result.handwritten_fields);
+    const hasHandwrittenData = handwrittenFields.length > 0;
+
+    result = {
+      filename,
+      folder,
+      type: groqResult.result.type || 'other',
+      key_info: groqResult.result.key_info || '',
+      has_handwritten_data: hasHandwrittenData,
+      handwritten_fields: hasHandwrittenData ? handwrittenFields : [],
+      extracted_data: groqResult.result.extracted_data,
+    };
+
+    usage.inputTokens = groqResult.usage.inputTokens;
+    usage.inputTokensNew = groqResult.usage.inputTokens;
+    usage.outputTokens = groqResult.usage.outputTokens;
+    usage.apiCalls = 1;
+  } catch (visionErr) {
+    console.error(`[${fileIndex + 1}/${totalFiles}] Vision error for ${filename}:`, visionErr);
+    result.key_info = `Extraction failed: ${visionErr instanceof Error ? visionErr.message : String(visionErr)}`;
+    result.error = visionErr instanceof Error ? visionErr.message : String(visionErr);
+  }
+
+  result.usage = usage;
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`[${fileIndex + 1}/${totalFiles}] ✓ Done: ${filename} (${elapsed}s) - ${result.type} [groq-vision]`);
+  onProgress?.({
+    type: "file_done",
+    fileIndex,
+    totalFiles,
+    filename,
+    folder,
+    docType: result.type,
+    extractionMethod: 'groq-vision',
+    elapsed: parseFloat(elapsed)
+  });
+  return result;
 }
 
 // Sonnet synthesizes case summary from extracted data using single-turn structured output
@@ -2270,17 +2178,9 @@ async function indexCase(
     // No previous index
   }
 
-  // Aggregate usage tracking with cache breakdown
+  // Aggregate usage tracking
   const totalUsage = {
-    haiku: {
-      inputTokens: 0,
-      inputTokensNew: 0,
-      inputTokensCacheWrite: 0,
-      inputTokensCacheRead: 0,
-      outputTokens: 0,
-      apiCalls: 0
-    },
-    sonnet: {
+    groq: {
       inputTokens: 0,
       inputTokensNew: 0,
       inputTokensCacheWrite: 0,
@@ -2320,13 +2220,34 @@ async function indexCase(
       return { success: false, error: "No files found in case folder" };
     }
 
-    // Step 2: Extract files in batches with GC pauses
-    const BATCH_SIZE = 15;
-    console.log(`\n========== EXTRACTING ${files.length} FILES (batches of ${BATCH_SIZE} with GC) ==========`);
-    onProgress({ type: "status", caseName, message: `Extracting ${files.length} files (${BATCH_SIZE} at a time)...` });
+    // Step 2a: Pre-classify all files (fast, parallel, no LLM calls)
+    console.log(`\n========== PRE-CLASSIFYING ${files.length} FILES ==========`);
+    onProgress({ type: "status", caseName, message: `Classifying ${files.length} files...` });
 
-    // Batch-based extraction with forced GC between batches to prevent memory accumulation
-    const extractions: FileExtraction[] = [];
+    const classifiedFiles: ClassifiedFile[] = [];
+    const CLASSIFY_BATCH_SIZE = 15;
+    const classifyBatches = Math.ceil(files.length / CLASSIFY_BATCH_SIZE);
+
+    for (let b = 0; b < classifyBatches; b++) {
+      const start = b * CLASSIFY_BATCH_SIZE;
+      const batch = files.slice(start, start + CLASSIFY_BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map((filePath) => classifyFile(caseFolder, filePath))
+      );
+      classifiedFiles.push(...batchResults);
+    }
+
+    // Step 2b: Split into text and vision buckets
+    const textFiles = classifiedFiles.filter(f => f.useText);
+    const visionFiles = classifiedFiles.filter(f => !f.useText);
+
+    console.log(`========== CLASSIFIED: ${textFiles.length} text, ${visionFiles.length} vision ==========`);
+    onProgress({ type: "status", caseName, message: `Extracting: ${textFiles.length} text (GPT-OSS) + ${visionFiles.length} vision (Scout/Maverick)` });
+
+    // Step 2c: Extract both buckets in parallel with independent concurrency
+    const TEXT_BATCH_SIZE = 15;
+    const VISION_BATCH_SIZE = 3;
+    const totalFiles = files.length;
     let completedCount = 0;
 
     async function processInBatches<T>(
@@ -2342,19 +2263,17 @@ async function indexCase(
         const end = Math.min(start + batchSize, items.length);
         const batch = items.slice(start, end);
 
-        // Process batch concurrently
         const batchResults = await Promise.all(
           batch.map(async (item, batchIndex) => {
             const globalIndex = start + batchIndex;
             try {
               return await processor(item, globalIndex);
             } catch (err) {
-              const filename = typeof item === 'string' ? (item as string).split('/').pop() || String(item) : String(item);
-              const folder = typeof item === 'string' ? (item as string).split('/')[0] || 'root' : 'root';
-              console.error(`[${globalIndex + 1}/${items.length}] Unhandled error for ${filename}:`, err);
+              const cf = item as any as ClassifiedFile;
+              console.error(`[${globalIndex + 1}/${totalFiles}] Unhandled error for ${cf.filename}:`, err);
               return {
-                filename,
-                folder,
+                filename: cf.filename || 'unknown',
+                folder: cf.folder || 'root',
                 type: 'other' as const,
                 key_info: 'Failed to extract',
                 has_handwritten_data: false,
@@ -2367,10 +2286,9 @@ async function indexCase(
 
         results.push(...batchResults);
         completedCount += batch.length;
-        console.log(`--- Progress: ${completedCount}/${items.length} files complete (batch ${batchNum + 1}/${totalBatches}) ---`);
+        console.log(`--- Progress: ${completedCount}/${totalFiles} files complete ---`);
 
-        // Force garbage collection every 5 batches (75 files at batch size 15) to prevent memory accumulation
-        // without causing excessive pauses
+        // Force garbage collection every 5 batches to prevent memory accumulation
         if ((batchNum + 1) % 5 === 0 && typeof Bun !== 'undefined' && Bun.gc) {
           Bun.gc(true);
           console.log(`[gc] Forced garbage collection after ${completedCount} files`);
@@ -2380,36 +2298,42 @@ async function indexCase(
       return results;
     }
 
-    // Pre-compute SDK options and system prompt once for all files (eliminates per-file overhead)
-    const sdkCliOpts = getSDKCliOptions();
-    const cachedSystemPrompt = getFileExtractionSystemPromptWithTools(options?.practiceArea);
+    const [textResults, visionResults] = await Promise.all([
+      processInBatches(
+        textFiles,
+        TEXT_BATCH_SIZE,
+        (classified, index) => extractFileText(
+          classified,
+          index,
+          totalFiles,
+          options?.practiceArea,
+          (event) => { onProgress({ ...event, caseName }); }
+        )
+      ),
+      processInBatches(
+        visionFiles,
+        VISION_BATCH_SIZE,
+        (classified, index) => extractFileVision(
+          classified,
+          index,
+          totalFiles,
+          options?.practiceArea,
+          (event) => { onProgress({ ...event, caseName }); }
+        )
+      ),
+    ]);
 
-    const extractionResults = await processInBatches(
-      files,
-      BATCH_SIZE,
-      (filePath, index) => extractFile(
-        caseFolder,
-        filePath,
-        index,
-        files.length,
-        options?.practiceArea,
-        (event) => { onProgress({ ...event, caseName }); },
-        sdkCliOpts,
-        cachedSystemPrompt
-      )
-    );
-
-    extractions.push(...extractionResults);
+    const extractions: FileExtraction[] = [...textResults, ...visionResults];
 
     // Aggregate extraction usage with cache breakdown
     for (const extraction of extractions) {
       if (extraction.usage) {
-        totalUsage.haiku.inputTokens += extraction.usage.inputTokens;
-        totalUsage.haiku.inputTokensNew += extraction.usage.inputTokensNew || 0;
-        totalUsage.haiku.inputTokensCacheWrite += extraction.usage.inputTokensCacheWrite || 0;
-        totalUsage.haiku.inputTokensCacheRead += extraction.usage.inputTokensCacheRead || 0;
-        totalUsage.haiku.outputTokens += extraction.usage.outputTokens;
-        totalUsage.haiku.apiCalls += extraction.usage.apiCalls;
+        totalUsage.groq.inputTokens += extraction.usage.inputTokens;
+        totalUsage.groq.inputTokensNew += extraction.usage.inputTokensNew || 0;
+        totalUsage.groq.inputTokensCacheWrite += extraction.usage.inputTokensCacheWrite || 0;
+        totalUsage.groq.inputTokensCacheRead += extraction.usage.inputTokensCacheRead || 0;
+        totalUsage.groq.outputTokens += extraction.usage.outputTokens;
+        totalUsage.groq.apiCalls += extraction.usage.apiCalls;
       }
     }
 
@@ -2424,6 +2348,7 @@ async function indexCase(
     // Step 3: Build preliminary index for hypergraph analysis
     // For incremental mode, start with existing folders and merge new extractions
     const folders: Record<string, { files: Array<{
+      doc_id?: string;
       filename: string;
       type: string;
       key_info: string;
@@ -2449,6 +2374,7 @@ async function indexCase(
       }
 
       const fileEntry: {
+        doc_id?: string;
         filename: string;
         type: string;
         key_info: string;
@@ -2458,6 +2384,7 @@ async function indexCase(
         handwritten_fields: string[];
         extracted_data?: Record<string, any>;
       } = {
+        doc_id: buildDocumentId(extraction.folder, extraction.filename),
         filename: extraction.filename,
         type: extraction.type,
         key_info: extraction.key_info,
@@ -2593,7 +2520,7 @@ async function indexCase(
       related_cases: initialIndex.related_cases,
     };
 
-    // Run both Haiku calls in parallel
+    // Run both Groq calls in parallel
     const [hypergraphResult, caseSummaryResult] = await Promise.all([
       generateHypergraph(caseFolder, { folders }, options?.practiceArea),
       generateCaseSummary(initialIndexForSummary, {
@@ -2607,20 +2534,20 @@ async function indexCase(
     await writeFile(hypergraphPath, JSON.stringify(hypergraphResult, null, 2));
     console.log(`[Hypergraph] Wrote hypergraph_analysis.json`);
 
-    // Add hypergraph usage to Haiku totals
+    // Add hypergraph usage to Groq totals
     if (hypergraphResult.usage) {
-      totalUsage.haiku.inputTokens += hypergraphResult.usage.inputTokens;
-      totalUsage.haiku.inputTokensNew += hypergraphResult.usage.inputTokensNew || 0;
-      totalUsage.haiku.inputTokensCacheWrite += hypergraphResult.usage.inputTokensCacheWrite || 0;
-      totalUsage.haiku.inputTokensCacheRead += hypergraphResult.usage.inputTokensCacheRead || 0;
-      totalUsage.haiku.outputTokens += hypergraphResult.usage.outputTokens;
-      totalUsage.haiku.apiCalls += hypergraphResult.usage.apiCalls;
+      totalUsage.groq.inputTokens += hypergraphResult.usage.inputTokens;
+      totalUsage.groq.inputTokensNew += hypergraphResult.usage.inputTokensNew || 0;
+      totalUsage.groq.inputTokensCacheWrite += hypergraphResult.usage.inputTokensCacheWrite || 0;
+      totalUsage.groq.inputTokensCacheRead += hypergraphResult.usage.inputTokensCacheRead || 0;
+      totalUsage.groq.outputTokens += hypergraphResult.usage.outputTokens;
+      totalUsage.groq.apiCalls += hypergraphResult.usage.apiCalls;
     }
 
-    // Add case summary usage to Haiku totals
-    totalUsage.haiku.inputTokens += caseSummaryResult.usage.inputTokens;
-    totalUsage.haiku.outputTokens += caseSummaryResult.usage.outputTokens;
-    totalUsage.haiku.apiCalls += 1;
+    // Add case summary usage to Groq totals
+    totalUsage.groq.inputTokens += caseSummaryResult.usage.inputTokens;
+    totalUsage.groq.outputTokens += caseSummaryResult.usage.outputTokens;
+    totalUsage.groq.apiCalls += 1;
 
     onProgress({
       type: "hypergraph_complete",
@@ -2653,10 +2580,10 @@ async function indexCase(
     // Compute diff between old and new index
     const indexDiff = diffIndexes(previousIndex, normalizedIndex);
 
-    // Write final normalized index
+    // Write final normalized index + all derived files
     await writeFile(indexPath, JSON.stringify(normalizedIndex, null, 2));
-    await writeCaseMap(caseFolder, normalizedIndex);
-    console.log(`[Index] Wrote normalized document_index.json`);
+    await writeIndexDerivedFiles(caseFolder, normalizedIndex);
+    console.log(`[Index] Wrote normalized document_index.json + meta_index.json + per-folder indexes`);
     console.log(`[Diff] ${indexDiff.summary}`);
 
     // ========== SONNET SYNTHESIS (COMMENTED OUT - replaced by parallel Haiku + programmatic merge) ==========
@@ -2701,22 +2628,13 @@ async function indexCase(
     // totalUsage.sonnet.apiCalls += summaryUsage.apiCalls;
     // ========== END SONNET SYNTHESIS ==========
 
-    // Report usage stats with cache breakdown
+    // Report usage stats
     const usageReport = {
-      haiku: totalUsage.haiku,
-      sonnet: totalUsage.sonnet,
-      totalInputTokens: totalUsage.haiku.inputTokens + totalUsage.sonnet.inputTokens,
-      totalOutputTokens: totalUsage.haiku.outputTokens + totalUsage.sonnet.outputTokens,
-      totalApiCalls: totalUsage.haiku.apiCalls + totalUsage.sonnet.apiCalls,
-      totalCacheRead: totalUsage.haiku.inputTokensCacheRead + totalUsage.sonnet.inputTokensCacheRead,
-      totalCacheWrite: totalUsage.haiku.inputTokensCacheWrite + totalUsage.sonnet.inputTokensCacheWrite,
-      totalNew: totalUsage.haiku.inputTokensNew + totalUsage.sonnet.inputTokensNew,
+      groq: totalUsage.groq,
+      totalInputTokens: totalUsage.groq.inputTokens,
+      totalOutputTokens: totalUsage.groq.outputTokens,
+      totalApiCalls: totalUsage.groq.apiCalls,
     };
-
-    // Calculate cache hit percentage
-    const cacheHitPercent = usageReport.totalInputTokens > 0
-      ? ((usageReport.totalCacheRead / usageReport.totalInputTokens) * 100).toFixed(1)
-      : '0';
 
     onProgress({
       type: "usage_stats",
@@ -2724,15 +2642,12 @@ async function indexCase(
       usage: usageReport,
     });
 
-    // Pretty print usage to console with cache breakdown
+    // Pretty print usage to console
     console.log(`\n========== USAGE STATS: ${caseName} ==========`);
-    console.log(`Haiku:  ${usageReport.haiku.apiCalls} calls, ${usageReport.haiku.inputTokens.toLocaleString()} in / ${usageReport.haiku.outputTokens.toLocaleString()} out`);
-    console.log(`        (cache: ${usageReport.haiku.inputTokensCacheRead.toLocaleString()} read, ${usageReport.haiku.inputTokensCacheWrite.toLocaleString()} write, ${usageReport.haiku.inputTokensNew.toLocaleString()} new)`);
-    console.log(`Sonnet: ${usageReport.sonnet.apiCalls} calls, ${usageReport.sonnet.inputTokens.toLocaleString()} in / ${usageReport.sonnet.outputTokens.toLocaleString()} out`);
-    console.log(`        (cache: ${usageReport.sonnet.inputTokensCacheRead.toLocaleString()} read, ${usageReport.sonnet.inputTokensCacheWrite.toLocaleString()} write, ${usageReport.sonnet.inputTokensNew.toLocaleString()} new)`);
+    console.log(`Groq:   ${usageReport.groq.apiCalls} calls, ${usageReport.groq.inputTokens.toLocaleString()} in / ${usageReport.groq.outputTokens.toLocaleString()} out`);
     console.log(`---------------------------------------------`);
     console.log(`TOTAL:  ${usageReport.totalApiCalls} API calls`);
-    console.log(`        ${usageReport.totalInputTokens.toLocaleString()} input tokens (${cacheHitPercent}% cache hits)`);
+    console.log(`        ${usageReport.totalInputTokens.toLocaleString()} input tokens`);
     console.log(`        ${usageReport.totalOutputTokens.toLocaleString()} output tokens`);
     console.log(`=============================================\n`);
 
@@ -3167,6 +3082,208 @@ async function checkNeedsReindex(casePath: string, indexedAt: number): Promise<b
 // HYPERGRAPH GENERATION - Cross-document consistency analysis
 // ============================================================================
 
+// ── Programmatic hypergraph augmentation ────────────────────────────────────
+//
+// The LLM analyzes chunked document indexes to build value→source mappings,
+// but frequently misses values when the index is large. This function scans
+// ALL extracted_data across every document and augments the LLM's hypergraph
+// with ground-truth source counts so consensus is accurate.
+
+/** Map of hypergraph field name → extracted_data keys that feed into it */
+const HYPERGRAPH_FIELD_ALIASES: Record<string, string[]> = {
+  // Common to PI and WC
+  claimant_name: ["claimant_name", "client_name", "patient_name"],
+  date_of_birth: ["date_of_birth", "dob"],
+  client_phone: ["client_phone", "phone", "claimant_phone"],
+  client_email: ["client_email", "email", "claimant_email"],
+  client_address: ["client_address", "address", "claimant_address"],
+  // PI-specific
+  date_of_loss: ["date_of_loss", "dol"],
+  // WC-specific
+  date_of_injury: ["date_of_injury", "doi"],
+  employer_name: ["employer_name", "employer"],
+  employer_address: ["employer_address"],
+  job_title: ["job_title", "job_title_at_time_of_injury"],
+  wc_carrier: ["wc_carrier", "wc_insurance_carrier", "carrier_name"],
+  claim_number: ["claim_number", "wc_claim_number"],
+  tpa_name: ["tpa_name", "third_party_administrator"],
+  adjuster_name: ["adjuster_name"],
+  adjuster_phone: ["adjuster_phone"],
+  disability_type: ["disability_type"],
+  amw: ["amw", "average_monthly_wage", "aww"],
+  compensation_rate: ["compensation_rate", "weekly_compensation_rate"],
+  body_parts_injured: ["body_parts_injured", "body_parts"],
+  mmi_date: ["mmi_date"],
+  ppd_rating: ["ppd_rating"],
+};
+
+/** Build a reverse lookup: extracted_data key → hypergraph field name */
+function buildAliasReverseMap(): Map<string, string> {
+  const reverseMap = new Map<string, string>();
+  for (const [hgField, aliases] of Object.entries(HYPERGRAPH_FIELD_ALIASES)) {
+    for (const alias of aliases) {
+      // First alias mapping wins (most specific)
+      if (!reverseMap.has(alias)) {
+        reverseMap.set(alias, hgField);
+      }
+    }
+  }
+  return reverseMap;
+}
+
+/** Normalize a value for grouping: lowercase, collapse whitespace, trim */
+function normalizeForGrouping(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Scan all extracted_data in the document index and augment the hypergraph
+ * with accurate source counts. Then recompute consensus for each field.
+ */
+function augmentHypergraphFromExtractedData(
+  hypergraph: Record<string, {
+    values: Array<{ value: string; sources: string[]; count: number }>;
+    consensus: string;
+    confidence: number;
+    has_conflict: boolean;
+  }>,
+  conflictMap: Map<string, any>,
+  documentIndex: Record<string, any>
+): void {
+  const aliasMap = buildAliasReverseMap();
+
+  // Collect: hgField → normalizedValue → { canonical: string (most common casing), sources: Set<filename> }
+  const fieldValues = new Map<string, Map<string, { canonical: string; canonicalCount: Map<string, number>; sources: Set<string> }>>();
+
+  const rawFolders = documentIndex.folders || {};
+  for (const [_folderName, folderData] of Object.entries(rawFolders) as [string, any][]) {
+    const files = Array.isArray(folderData) ? folderData : folderData?.files;
+    if (!Array.isArray(files)) continue;
+
+    for (const file of files) {
+      const filename = file?.filename;
+      if (!filename || !file?.extracted_data) continue;
+
+      const ed = file.extracted_data as Record<string, unknown>;
+      for (const [key, rawValue] of Object.entries(ed)) {
+        const hgField = aliasMap.get(key);
+        if (!hgField) continue;
+
+        // Only process string/number values
+        const strValue = typeof rawValue === "string" ? rawValue.trim()
+          : typeof rawValue === "number" ? String(rawValue)
+          : null;
+        if (!strValue) continue;
+
+        const normalized = normalizeForGrouping(strValue);
+        if (!normalized) continue;
+
+        if (!fieldValues.has(hgField)) {
+          fieldValues.set(hgField, new Map());
+        }
+        const valMap = fieldValues.get(hgField)!;
+
+        if (!valMap.has(normalized)) {
+          valMap.set(normalized, { canonical: strValue, canonicalCount: new Map([[strValue, 1]]), sources: new Set([filename]) });
+        } else {
+          const entry = valMap.get(normalized)!;
+          entry.sources.add(filename);
+          // Track most common exact casing
+          entry.canonicalCount.set(strValue, (entry.canonicalCount.get(strValue) || 0) + 1);
+          // Update canonical to most frequent casing
+          let bestCount = 0;
+          for (const [form, count] of entry.canonicalCount) {
+            if (count > bestCount) {
+              bestCount = count;
+              entry.canonical = form;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Augment each hypergraph field with programmatic data
+  for (const [hgField, valueMap] of fieldValues) {
+    if (!hypergraph[hgField]) {
+      hypergraph[hgField] = { values: [], consensus: "", confidence: 0, has_conflict: false };
+    }
+    const node = hypergraph[hgField];
+
+    // Build a normalized lookup for existing LLM values
+    const existingByNorm = new Map<string, number>(); // normalized → index in node.values
+    for (let i = 0; i < node.values.length; i++) {
+      existingByNorm.set(normalizeForGrouping(node.values[i].value), i);
+    }
+
+    // Merge programmatic values into the node
+    for (const [normalized, entry] of valueMap) {
+      const existingIdx = existingByNorm.get(normalized);
+      if (existingIdx !== undefined) {
+        // LLM already has this value — add any missing sources
+        const existing = node.values[existingIdx];
+        const sourceSet = new Set(existing.sources);
+        for (const src of entry.sources) sourceSet.add(src);
+        existing.sources = Array.from(sourceSet);
+        existing.count = existing.sources.length;
+      } else {
+        // LLM missed this value entirely — add it
+        node.values.push({
+          value: entry.canonical,
+          sources: Array.from(entry.sources),
+          count: entry.sources.size,
+        });
+      }
+    }
+
+    // Recompute consensus: sort by count desc, pick winner
+    node.values.sort((a, b) => b.count - a.count);
+    const totalMentions = node.values.reduce((sum, v) => sum + v.count, 0);
+    const topCount = node.values[0]?.count || 0;
+    const secondCount = node.values[1]?.count || 0;
+
+    // If tied at top, mark UNCERTAIN
+    if (node.values.length > 1 && topCount === secondCount) {
+      node.consensus = "UNCERTAIN";
+      node.confidence = 0;
+    } else {
+      node.consensus = node.values[0]?.value || "";
+      node.confidence = totalMentions > 0 ? topCount / totalMentions : 0;
+    }
+    node.has_conflict = node.values.length > 1;
+  }
+
+  // Rebuild conflicts from augmented hypergraph
+  conflictMap.clear();
+  for (const [field, node] of Object.entries(hypergraph)) {
+    if (!node.has_conflict || node.values.length < 2) continue;
+
+    const consensusValue = node.consensus;
+    const consensusSources = node.consensus !== "UNCERTAIN" ? node.values[0]?.sources || [] : [];
+
+    for (let i = (consensusValue === "UNCERTAIN" ? 0 : 1); i < node.values.length; i++) {
+      const outlier = node.values[i];
+      const key = `${field}|${consensusValue}|${outlier.value}`;
+      if (!conflictMap.has(key)) {
+        conflictMap.set(key, {
+          field,
+          consensus_value: consensusValue,
+          consensus_sources: [...consensusSources],
+          outlier_value: outlier.value,
+          outlier_sources: [...outlier.sources],
+        });
+      }
+    }
+  }
+
+  // Log augmentation results
+  let augmentedFields = 0;
+  for (const [field, node] of Object.entries(hypergraph)) {
+    if (fieldValues.has(field)) augmentedFields++;
+  }
+  console.log(`[Hypergraph] Programmatic augmentation: ${augmentedFields} fields cross-checked against extracted_data`);
+}
+
 // System prompt for hypergraph generation (Haiku) - Personal Injury
 const hypergraphSystemPromptPI = `You are a data consistency analyzer for a Personal Injury law firm.
 
@@ -3385,7 +3502,7 @@ async function generateHypergraph(
     inputTokensCacheRead: 0,
     outputTokens: 0,
     apiCalls: 0,
-    model: 'haiku'
+    model: 'groq'
   };
 
   const HYPERGRAPH_CHUNK_MAX_CHARS = 55000;
@@ -3538,54 +3655,20 @@ async function generateHypergraph(
       },
     };
 
-    for await (const msg of query({
-      prompt: `<document_index chunk="${chunk.id}/${chunkCount}">
-${chunkJson}
-</document_index>
+    try {
+      const groqResult = await generateHypergraphWithGptOss(
+        chunkJson,
+        chunk.id,
+        chunkCount,
+        getHypergraphPrompt(practiceArea)
+      );
 
-Return ONLY the JSON hypergraph for this chunk. No explanation, no planning - just the JSON object.`,
-      options: {
-        cwd: caseFolder,
-        systemPrompt: getHypergraphPrompt(practiceArea),
-        model: "haiku",
-        allowedTools: [],
-        permissionMode: "acceptEdits",
-        maxTurns: 4,
-        persistSession: false,
-        ...getSDKCliOptions(),
-      },
-    })) {
-      if (msg.type === "assistant") {
-        for (const block of msg.message.content) {
-          if (block.type !== "text") continue;
-          try {
-            const jsonMatch = block.text.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) continue;
-            const parsed = JSON.parse(jsonMatch[0]);
-            chunkResult = {
-              hypergraph: parsed.hypergraph || {},
-              conflicts: parsed.conflicts || [],
-              summary: parsed.summary || {
-                total_fields_analyzed: 0,
-                fields_with_conflicts: 0,
-                confidence_score: 0,
-              },
-            };
-          } catch (e) {
-            console.error(`[Hypergraph] Failed to parse chunk ${chunk.id} JSON:`, e);
-            console.error("[Hypergraph] Raw chunk output:", block.text.slice(0, 500));
-          }
-        }
-      }
-
-      if (msg.type === "result" && (msg as any).usage) {
-        const finalUsage = (msg as any).usage;
-        usage.inputTokensNew += finalUsage.input_tokens || 0;
-        usage.inputTokensCacheWrite += finalUsage.cache_creation_input_tokens || 0;
-        usage.inputTokensCacheRead += finalUsage.cache_read_input_tokens || 0;
-        usage.outputTokens += finalUsage.output_tokens || 0;
-        usage.apiCalls += 1;
-      }
+      chunkResult = groqResult.result;
+      usage.inputTokensNew += groqResult.usage.inputTokens;
+      usage.outputTokens += groqResult.usage.outputTokens;
+      usage.apiCalls += 1;
+    } catch (e) {
+      console.error(`[Hypergraph] Failed to process chunk ${chunk.id}:`, e);
     }
 
     chunkResults.push(chunkResult);
@@ -3655,6 +3738,13 @@ Return ONLY the JSON hypergraph for this chunk. No explanation, no planning - ju
     }
   }
 
+  // ======================================================================
+  // Programmatic augmentation: scan ALL extracted_data across every
+  // document to ensure the hypergraph has accurate source counts.
+  // The LLM often misses values when the index is large/chunked.
+  // ======================================================================
+  augmentHypergraphFromExtractedData(mergedHypergraph, conflictMap, documentIndex);
+
   const fields = Object.keys(mergedHypergraph);
   const fieldsWithConflicts = fields.filter((field) => mergedHypergraph[field].has_conflict).length;
   const avgConfidence = fields.length > 0
@@ -3672,16 +3762,11 @@ Return ONLY the JSON hypergraph for this chunk. No explanation, no planning - ju
     usage,
   };
 
-  const cacheHitPercent = usage.inputTokens > 0
-    ? ((usage.inputTokensCacheRead / usage.inputTokens) * 100).toFixed(1)
-    : "0";
-
-  console.log(`Hypergraph generated:`);
+  console.log(`Hypergraph generated (Groq GPT-OSS):`);
   console.log(`  Fields analyzed: ${result.summary.total_fields_analyzed}`);
   console.log(`  Conflicts found: ${result.summary.fields_with_conflicts}`);
   console.log(`  Confidence: ${(result.summary.confidence_score * 100).toFixed(0)}%`);
   console.log(`  Usage: ${usage.inputTokens.toLocaleString()} in / ${usage.outputTokens.toLocaleString()} out`);
-  console.log(`  Cache: ${usage.inputTokensCacheRead.toLocaleString()} read (${cacheHitPercent}%), ${usage.inputTokensCacheWrite.toLocaleString()} write, ${usage.inputTokensNew.toLocaleString()} new`);
   console.log(`==========================================\n`);
 
   return result;
@@ -4326,7 +4411,7 @@ app.put("/case/assign", async (c) => {
     // Normalize and save
     const normalized = normalizeIndex(index);
     await writeFile(indexPath, JSON.stringify(normalized, null, 2));
-    await writeCaseMap(casePath, normalized);
+    await writeIndexDerivedFiles(casePath, normalized);
 
     return c.json({ success: true, assignments: normalized.assignments });
   } catch (error) {
@@ -4371,7 +4456,7 @@ app.delete("/case/unassign", async (c) => {
     // Normalize and save
     const normalized = normalizeIndex(index);
     await writeFile(indexPath, JSON.stringify(normalized, null, 2));
-    await writeCaseMap(casePath, normalized);
+    await writeIndexDerivedFiles(casePath, normalized);
 
     return c.json({ success: true, assignments: normalized.assignments });
   } catch (error) {

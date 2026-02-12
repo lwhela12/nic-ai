@@ -25,8 +25,10 @@ import {
 import { loadFirmInfo } from "./export";
 import { applyResolvedFieldToSummary } from "./index-summary-sync";
 import { extractPdfText } from "./pdftotext";
-import { buildCaseMap, buildCaseMapPromptView } from "./case-map";
+import { buildCaseMap } from "./case-map";
+import { generateMetaIndex, splitIndexToFolders, buildMetaIndexPromptView, writeIndexDerivedFiles } from "./meta-index";
 import { generateHypergraph } from "../routes/firm";
+import { buildDocumentId, buildDocumentIdFromPath } from "./document-id";
 
 // Client creation - recreated when API key changes
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -73,7 +75,7 @@ interface AgentDocumentView {
   invalidPaths?: string[];
 }
 
-const CASE_CONTEXT_MAX_CHARS = 80000;
+const CASE_CONTEXT_MAX_CHARS = 120000;
 const INDEX_SLICE_MAX_CHARS = 12000;
 
 // Tool definitions
@@ -338,18 +340,27 @@ const TOOLS: Anthropic.Tool[] = [
         },
         documents: {
           type: "array",
-          description: "Explicit ordered list of documents to include.",
+          description: "Explicit ordered list of indexed documents to include. Prefer doc_id values from create_evidence_packet output; path or filename+folder is accepted as a compatibility fallback.",
           items: {
             type: "object",
             properties: {
+              doc_id: { type: "string" },
+              docId: { type: "string" },
+              document_id: { type: "string" },
+              documentId: { type: "string" },
+              id: { type: "string" },
               path: { type: "string" },
+              folder: { type: "string" },
               title: { type: "string" },
               date: { type: "string" },
               doc_type: { type: "string" },
               docType: { type: "string" },
               include: { type: "boolean" },
+              fileName: { type: "string" },
+              filename: { type: "string" },
+              file: { type: "string" },
             },
-            required: ["path", "title"],
+            required: [],
           },
         },
         output_path: {
@@ -727,6 +738,15 @@ function titleFromFilename(filename: string): string {
     .trim();
 }
 
+function isPlaceholderDocumentTitle(value: string | undefined): boolean {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return true;
+  if (normalized === "selected document" || normalized === "selected doc" || normalized === "document") {
+    return true;
+  }
+  return /^doc_[a-f0-9]{8}$/i.test(normalized);
+}
+
 function inferDocType(title: string, path: string): string | undefined {
   const value = `${title} ${path}`.toLowerCase();
   if (/\bc-?3\b/.test(value)) return "c3";
@@ -1012,27 +1032,188 @@ function normalizeDocumentsInput(raw: any): EvidencePacketDocumentInput[] {
   if (!Array.isArray(raw)) return [];
   const docs: EvidencePacketDocumentInput[] = [];
   for (const item of raw) {
-    if (!item || typeof item.path !== "string") continue;
-    const path = item.path.trim();
-    if (!path) continue;
+    if (typeof item === "string") {
+      const selector = item.trim();
+      if (!selector) continue;
+      docs.push({
+        path: selector, // Temporary selector container; canonicalized against the index before packet mode opens.
+        title: "",
+        include: true,
+      });
+      continue;
+    }
+    if (!item || typeof item !== "object") continue;
 
-    const title = typeof item.title === "string" && item.title.trim()
-      ? item.title.trim()
-      : titleFromFilename(path.split("/").pop() || path);
+    const text = (value: unknown): string =>
+      typeof value === "string" ? value.trim() : "";
+
+    const docId = text(item.doc_id)
+      || text(item.docId)
+      || text(item.document_id)
+      || text(item.documentId)
+      || text(item.id);
+
+    const path = text(item.path)
+      || text(item.relative_path)
+      || text(item.relativePath);
+
+    const folder = text(item.folder)
+      || text(item.folder_name)
+      || text(item.folderName);
+    const filename = text(item.fileName)
+      || text(item.filename)
+      || text(item.file);
+
+    const normalizedFolder = folder
+      .replace(/\\/g, "/")
+      .replace(/^\.\/+/, "")
+      .replace(/^\/+/, "")
+      .replace(/\/+/g, "/")
+      .replace(/\/+$/, "");
+    const normalizedFilename = filename
+      .replace(/\\/g, "/")
+      .replace(/^\.\/+/, "")
+      .replace(/^\/+/, "")
+      .replace(/\/+/g, "/");
+    const joinedPath = normalizedFilename
+      ? (normalizedFolder && normalizedFolder !== "." && normalizedFolder.toLowerCase() !== "root"
+        ? `${normalizedFolder}/${normalizedFilename}`
+        : normalizedFilename)
+      : "";
+
+    const selector = docId || path || joinedPath || normalizedFilename;
+    if (!selector) continue;
+
+    const title = text(item.title);
+    const date = text(item.date);
+    const docType = text(item.docType) || text(item.doc_type);
 
     docs.push({
-      path,
+      path: selector, // Temporary selector container; canonicalized against the index before packet mode opens.
       title,
-      date: typeof item.date === "string" ? item.date : undefined,
-      docType: typeof item.docType === "string"
-        ? item.docType
-        : typeof item.doc_type === "string"
-          ? item.doc_type
-          : undefined,
+      date: date || undefined,
+      docType: docType || undefined,
       include: typeof item.include === "boolean" ? item.include : true,
     });
   }
   return docs;
+}
+
+function canonicalizePacketDocumentsFromIndex(
+  documents: EvidencePacketDocumentInput[],
+  indexData: any
+): {
+  documents: EvidencePacketDocumentInput[];
+  unresolvedSelectors: string[];
+} {
+  const docIdToPath = new Map<string, string>();
+  const normalizedPathToPath = new Map<string, string>();
+  const normalizedBasenameToPath = new Map<string, string>();
+  const pathMetadata = new Map<string, { title: string; date?: string; docType?: string }>();
+  const ambiguousBasenames = new Set<string>();
+  const folders = indexData?.folders || {};
+
+  for (const [folderName, folderData] of Object.entries(folders) as [string, any][]) {
+    const files = Array.isArray(folderData) ? folderData : folderData?.files || folderData?.documents || [];
+    for (const file of files) {
+      if (typeof file === "string") {
+        const canonicalPath = folderName === "." || !folderName ? file : `${folderName}/${file}`;
+        const docId = buildDocumentId(folderName, file);
+        docIdToPath.set(docId, canonicalPath);
+        pathMetadata.set(canonicalPath, { title: file });
+        const normalizedPath = normalizeRelativePathForLookup(canonicalPath);
+        const normalizedBasename = normalizeRelativePathForLookup(file);
+        if (normalizedPath && !normalizedPathToPath.has(normalizedPath)) {
+          normalizedPathToPath.set(normalizedPath, canonicalPath);
+        }
+        if (normalizedBasename) {
+          if (!normalizedBasenameToPath.has(normalizedBasename)) {
+            normalizedBasenameToPath.set(normalizedBasename, canonicalPath);
+          } else if (normalizedBasenameToPath.get(normalizedBasename) !== canonicalPath) {
+            ambiguousBasenames.add(normalizedBasename);
+          }
+        }
+        continue;
+      }
+      const fileName = typeof file?.filename === "string"
+        ? file.filename
+        : typeof file?.file === "string"
+          ? file.file
+          : "";
+      if (!fileName) continue;
+      const canonicalPath = folderName === "." || !folderName ? fileName : `${folderName}/${fileName}`;
+      const docId = typeof file?.doc_id === "string" && file.doc_id.trim()
+        ? file.doc_id.trim()
+        : buildDocumentId(folderName, fileName);
+      docIdToPath.set(docId, canonicalPath);
+      const rawTitle = typeof file?.title === "string" ? file.title.trim() : "";
+      const metadataTitle = !isPlaceholderDocumentTitle(rawTitle) ? rawTitle : fileName;
+      const metadataDate = typeof file?.date === "string" && file.date.trim() ? file.date.trim() : undefined;
+      const metadataDocType = typeof file?.type === "string" && file.type.trim() ? file.type.trim() : undefined;
+      pathMetadata.set(canonicalPath, {
+        title: metadataTitle,
+        date: metadataDate,
+        docType: metadataDocType,
+      });
+      const normalizedPath = normalizeRelativePathForLookup(canonicalPath);
+      const normalizedBasename = normalizeRelativePathForLookup(fileName);
+      if (normalizedPath && !normalizedPathToPath.has(normalizedPath)) {
+        normalizedPathToPath.set(normalizedPath, canonicalPath);
+      }
+      if (normalizedBasename) {
+        if (!normalizedBasenameToPath.has(normalizedBasename)) {
+          normalizedBasenameToPath.set(normalizedBasename, canonicalPath);
+        } else if (normalizedBasenameToPath.get(normalizedBasename) !== canonicalPath) {
+          ambiguousBasenames.add(normalizedBasename);
+        }
+      }
+    }
+  }
+
+  const resolved: EvidencePacketDocumentInput[] = [];
+  const unresolvedSelectors: string[] = [];
+
+  for (const doc of documents) {
+    const selector = doc.path.trim();
+    if (!selector) {
+      unresolvedSelectors.push(doc.path);
+      continue;
+    }
+    let canonicalPath = docIdToPath.get(selector);
+    if (!canonicalPath) {
+      const normalizedSelector = normalizeRelativePathForLookup(selector);
+      canonicalPath = normalizedPathToPath.get(normalizedSelector);
+      if (!canonicalPath) {
+        const basename = normalizeRelativePathForLookup(normalizedSelector.split("/").pop() || normalizedSelector);
+        if (basename && !ambiguousBasenames.has(basename)) {
+          canonicalPath = normalizedBasenameToPath.get(basename);
+        }
+      }
+    }
+    if (!canonicalPath) {
+      unresolvedSelectors.push(selector);
+      continue;
+    }
+
+    const metadata = pathMetadata.get(canonicalPath);
+    const incomingTitle = typeof doc.title === "string" ? doc.title.trim() : "";
+    const incomingDate = typeof doc.date === "string" && doc.date.trim() ? doc.date.trim() : undefined;
+    const incomingDocType = typeof doc.docType === "string" && doc.docType.trim() ? doc.docType.trim() : undefined;
+    const defaultTitle = canonicalPath.split("/").pop() || canonicalPath;
+    const resolvedTitle = !isPlaceholderDocumentTitle(incomingTitle)
+      ? incomingTitle
+      : metadata?.title || defaultTitle;
+
+    resolved.push({
+      ...doc,
+      path: canonicalPath,
+      title: resolvedTitle,
+      date: incomingDate || metadata?.date,
+      docType: incomingDocType || metadata?.docType,
+    });
+  }
+
+  return { documents: resolved, unresolvedSelectors };
 }
 
 async function buildPacketFromInputs(
@@ -1136,9 +1317,7 @@ async function saveIndexAndMap(
   index: Record<string, any>
 ): Promise<void> {
   await writeFile(indexPath, JSON.stringify(index, null, 2));
-  const caseMapPath = join(caseFolder, ".pi_tool", "case_map.json");
-  const caseMap = buildCaseMap(index);
-  await writeFile(caseMapPath, JSON.stringify(caseMap, null, 2));
+  await writeIndexDerivedFiles(caseFolder, index);
 }
 
 // Execute a tool and return result
@@ -1374,27 +1553,45 @@ async function executeTool(
         const indexData = JSON.parse(indexContent);
         const folders = indexData?.folders || {};
         let docCount = 0;
-        const proposedDocuments: Array<{ path: string; title: string; date: string | null; docType: string; fileName: string }> = [];
+        const proposedDocuments: Array<{
+          docId: string;
+          path: string;
+          title: string;
+          date: string | null;
+          docType: string;
+          fileName: string;
+          folder: string;
+        }> = [];
         for (const [folderName, folderData] of Object.entries(folders) as [string, any][]) {
           const files = Array.isArray(folderData) ? folderData : folderData?.files || folderData?.documents || [];
           docCount += files.length;
           for (const file of files) {
             if (typeof file === "string") {
+              const canonicalPath = folderName === "." || !folderName ? file : `${folderName}/${file}`;
               proposedDocuments.push({
-                path: folderName === "." || !folderName ? file : `${folderName}/${file}`,
+                docId: buildDocumentId(folderName, file),
+                path: canonicalPath,
                 title: file,
                 date: null,
                 docType: "",
                 fileName: file,
+                folder: folderName,
               });
             } else {
               const fileName = file.filename || file.file || "Unknown";
+              const canonicalPath = folderName === "." || !folderName ? fileName : `${folderName}/${fileName}`;
+              const existingDocId = typeof file.doc_id === "string" && file.doc_id.trim()
+                ? file.doc_id.trim()
+                : buildDocumentId(folderName, fileName);
+              const rawTitle = typeof file.title === "string" ? file.title.trim() : "";
               proposedDocuments.push({
-                path: folderName === "." || !folderName ? fileName : `${folderName}/${fileName}`,
-                title: file.title || fileName,
+                docId: existingDocId,
+                path: canonicalPath,
+                title: !isPlaceholderDocumentTitle(rawTitle) ? rawTitle : fileName,
                 date: file.date || null,
                 docType: file.type || "",
                 fileName,
+                folder: folderName,
               });
             }
           }
@@ -1420,8 +1617,9 @@ async function executeTool(
             "1. If a hearing number was provided, read the hearing notice to understand what this hearing is for.",
             "2. Search the document index (already in your context) for relevant documents — filter by hearing number, folder, doc type, etc.",
             "3. Check the EVIDENCE PACKET RULES section in your context for packet ordering rules.",
-            "4. Present the proposed ordered document list to the user for review. Show each document's path, title, and why it was included.",
-            "5. After the user confirms (or adjusts), call build_evidence_packet with the verified ordered list.",
+            "4. Present the proposed ordered document list to the user for review. Show title/fileName/folder and why each was included.",
+            "5. After the user confirms (or adjusts), call build_evidence_packet with the verified ordered list using doc_id for each document.",
+            "If doc_id is unavailable, pass exact filename + folder from the index (do not synthesize custom paths).",
             "Do NOT skip straight to build_evidence_packet without showing the user the proposed list first.",
           ].join("\n"),
         });
@@ -1432,11 +1630,19 @@ async function executeTool(
         const indexContent = await readFile(indexPath, "utf-8");
         const indexData = JSON.parse(indexContent);
 
-        const documents = normalizeDocumentsInput(toolInput.documents);
-        if (documents.length === 0) {
+        const requestedDocuments = normalizeDocumentsInput(toolInput.documents);
+        if (requestedDocuments.length === 0) {
           return JSON.stringify({
             success: false,
             error: "build_evidence_packet requires a non-empty documents[] ordered list.",
+          });
+        }
+        const { documents, unresolvedSelectors } = canonicalizePacketDocumentsFromIndex(requestedDocuments, indexData);
+        if (documents.length === 0) {
+          return JSON.stringify({
+            success: false,
+            error: "None of the selected documents matched indexed files (doc_id or path).",
+            invalidSelectors: unresolvedSelectors,
           });
         }
 
@@ -1461,6 +1667,7 @@ async function executeTool(
         const firstClaimNumber = Object.values(claimNumbers).find((v: unknown) => typeof v === "string") as string || "";
 
         const proposedDocuments = documents.map((doc) => ({
+          docId: buildDocumentIdFromPath(doc.path),
           path: doc.path,
           title: doc.title,
           date: doc.date,
@@ -1472,6 +1679,7 @@ async function executeTool(
           success: true,
           packetModeOpened: true,
           proposedDocuments,
+          invalidSelectors: unresolvedSelectors.length > 0 ? unresolvedSelectors : undefined,
           caption: {
             claimantName,
             claimNumber: firstClaimNumber,
@@ -1923,7 +2131,14 @@ async function executeTool(
         return `Unknown tool: ${toolName}`;
     }
   } catch (error) {
-    return `Error executing ${toolName}: ${error instanceof Error ? error.message : String(error)}`;
+    const message = error instanceof Error ? error.message : String(error);
+    if (toolName === "build_evidence_packet" || toolName === "create_evidence_packet" || toolName === "create_document_view") {
+      return JSON.stringify({
+        success: false,
+        error: `Error executing ${toolName}: ${message}`,
+      });
+    }
+    return `Error executing ${toolName}: ${message}`;
   }
 }
 
@@ -1942,80 +2157,56 @@ async function buildContext(caseFolder: string): Promise<string> {
   });
   parts.push(`TODAY'S DATE: ${dateStr}`);
 
-  // Load case index
+  // Load meta-index (or generate lazily from document_index.json)
   try {
     const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
-    const indexContent = await readFile(indexPath, "utf-8");
-    const indexData = JSON.parse(indexContent);
+    const metaIndexPath = join(caseFolder, ".pi_tool", "meta_index.json");
 
-    let caseMapData: Record<string, any>;
+    let metaIndexData: Record<string, any>;
     try {
-      const caseMapPath = join(caseFolder, ".pi_tool", "case_map.json");
-      const caseMapContent = await readFile(caseMapPath, "utf-8");
-      caseMapData = JSON.parse(caseMapContent);
+      const metaContent = await readFile(metaIndexPath, "utf-8");
+      metaIndexData = JSON.parse(metaContent);
     } catch {
-      caseMapData = buildCaseMap(indexData);
+      // Lazy migration: generate from canonical index
+      const indexContent = await readFile(indexPath, "utf-8");
+      const indexData = JSON.parse(indexContent);
+      await splitIndexToFolders(indexData, caseFolder);
+      metaIndexData = generateMetaIndex(indexData);
+      await writeFile(metaIndexPath, JSON.stringify(metaIndexData, null, 2));
     }
 
-    const caseMapView = buildCaseMapPromptView(caseMapData as any, 55000);
-    const mapNote = caseMapView.truncated
-      ? "\n[NOTE: case_map shown in truncated view; use read_index_slice for more detail.]"
-      : "";
-    parts.push(`\n## CASE MAP\n${caseMapView.text}${mapNote}`);
+    const metaIndexView = buildMetaIndexPromptView(metaIndexData as any);
+    parts.push(`\n${metaIndexView}`);
 
-    // Include an index preview for direct field lookups while keeping prompt bounded.
-    const trimmed = { ...indexData };
-    if (trimmed.folders) {
-      for (const [folderName, folderData] of Object.entries(trimmed.folders) as [string, any][]) {
-        const files = Array.isArray(folderData) ? folderData : folderData?.files;
-        if (!Array.isArray(files)) continue;
-        trimmed.folders[folderName] = {
-          files: files.slice(0, 120).map((file: any) => ({
-            filename: file.filename,
-            type: file.type,
-            date: file.date,
-            key_info: typeof file.key_info === "string" ? file.key_info.slice(0, 220) : file.key_info,
-          })),
-          truncated: files.length > 120,
-        };
+    // Load knowledge bank
+    try {
+      const knowledgePath = join(firmRoot, ".pi_tool", "knowledge", "manifest.json");
+      const manifest = JSON.parse(await readFile(knowledgePath, "utf-8"));
+      parts.push(`\n## PRACTICE KNOWLEDGE\nArea: ${manifest.practiceArea} (${manifest.jurisdiction})`);
+
+      // Load full knowledge sections for maximum legal context fidelity.
+      if (manifest.sections) {
+        const knowledgeSections: string[] = [];
+        for (const section of manifest.sections) {
+          try {
+            const sectionFilename = normalizeSectionFilename(section);
+            if (!sectionFilename) { continue; }
+            const sectionPath = join(firmRoot, ".pi_tool", "knowledge", sectionFilename);
+            const content = await readFile(sectionPath, "utf-8");
+            knowledgeSections.push(`### ${section.title}\n${content}`);
+          } catch (e) {
+            // Section file missing or unreadable
+          }
+        }
+        if (knowledgeSections.length > 0) {
+          parts.push(`\n## PRACTICE KNOWLEDGE (FULL)\n${knowledgeSections.join("\n\n---\n\n")}`);
+          }
       }
+    } catch (e) {
+      // No knowledge base for this firm
     }
-
-    let indexPreview = JSON.stringify(trimmed, null, 2);
-    if (indexPreview.length > 22000) {
-      indexPreview = `${indexPreview.slice(0, 22000)}\n...\n[NOTE: Index preview truncated. Use read_index_slice for more.]`;
-    }
-    parts.push(`\n## CASE INDEX PREVIEW\n${indexPreview}`);
   } catch {
     parts.push("\n## CASE INDEX\nNo case index found. Case may need to be indexed first.");
-  }
-
-  // Load knowledge bank
-  try {
-    const knowledgePath = join(firmRoot, ".pi_tool", "knowledge", "manifest.json");
-    const manifest = JSON.parse(await readFile(knowledgePath, "utf-8"));
-    parts.push(`\n## PRACTICE KNOWLEDGE\nArea: ${manifest.practiceArea} (${manifest.jurisdiction})`);
-
-    // Load full knowledge sections for maximum legal context fidelity.
-    if (manifest.sections) {
-      const knowledgeSections: string[] = [];
-      for (const section of manifest.sections) {
-        try {
-          const sectionFilename = normalizeSectionFilename(section);
-          if (!sectionFilename) continue;
-          const sectionPath = join(firmRoot, ".pi_tool", "knowledge", sectionFilename);
-          const content = await readFile(sectionPath, "utf-8");
-          knowledgeSections.push(`### ${section.title}\n${content}`);
-        } catch {
-          // Skip unreadable sections
-        }
-      }
-      if (knowledgeSections.length > 0) {
-        parts.push(`\n## PRACTICE KNOWLEDGE (FULL)\n${knowledgeSections.join("\n\n---\n\n")}`);
-      }
-    }
-  } catch {
-    // No knowledge base
   }
 
   // Load templates list
@@ -2036,6 +2227,7 @@ async function buildContext(caseFolder: string): Promise<string> {
 
   let context = parts.join("\n");
   if (context.length > CASE_CONTEXT_MAX_CHARS) {
+    console.log(`[buildContext] Context truncated from ${context.length} to ${CASE_CONTEXT_MAX_CHARS}`);
     context = `${context.slice(0, CASE_CONTEXT_MAX_CHARS)}\n...\n[NOTE: Context truncated to stay within prompt budget. Use read_index_slice for deep index access.]`;
   }
   return context;
@@ -2053,12 +2245,23 @@ const DOC_TYPE_NAMES: Record<DocumentType, string> = {
 // System prompt for direct chat (context gets appended)
 const BASE_SYSTEM_PROMPT = `You are a helpful legal assistant for a Nevada injury law firm (Personal Injury and Workers' Compensation). You help attorneys and staff with case management, document review, answering questions, and drafting documents.
 
+## NAVIGATING THE CASE INDEX
+
+Your context includes a meta-index with all case facts organized by folder. Each folder shows:
+- File count, document types, and date range
+- All filenames in that folder
+- Deduped facts extracted from the folder's documents
+
+For quick answers, use the facts in the meta-index directly.
+For full document details in any folder, use: read_file(".pi_tool/indexes/{FolderName}.json")
+For reading a specific document, use: read_file("{folder}/{filename}") or read_document for PDFs.
+
 ## YOUR CAPABILITIES
 
 1. **Answer Questions**: Use the case index and your knowledge to answer questions about cases, injuries, treatments, and PI law.
 
-2. **Read Files**: Use read_file for quick text lookups — reading case_map/index files, checking a text/JSON file, or grabbing a snippet. For PDFs this uses basic text extraction only.
-   For very large indexes, use read_index_slice to page through .pi_tool/document_index.json in chunks.
+2. **Read Files**: Use read_file for quick text lookups — reading per-folder index files, checking a text/JSON file, or grabbing a snippet. For PDFs this uses basic text extraction only.
+   For deep index detail, read per-folder files at .pi_tool/indexes/{FolderName}.json, or use read_index_slice to page through the full .pi_tool/document_index.json.
 
 2b. **Rebuild Case Map**: Use rebuild_case_map to regenerate .pi_tool/case_map.json from the current document_index.json when map data is missing or stale. This does NOT re-run document extraction.
 2c. **Re-run Hypergraph**: Use rerun_hypergraph to rebuild .pi_tool/hypergraph_analysis.json from the current index and refresh conflict detection without re-extraction.
@@ -2165,6 +2368,10 @@ Requirements:
 - ALWAYS start with create_evidence_packet — never skip straight to build_evidence_packet.
 - Use the evidence/hearing packet rules from knowledge to determine document order.
 - Present the proposed document list to the user and wait for confirmation before building.
+- Pass \`doc_id\` values into build_evidence_packet documents[].
+- If \`doc_id\` is unavailable, pass exact \`filename\` + \`folder\` from the index.
+- Compatibility: exact indexed \`path\` is accepted, but do not invent/synthesize paths.
+- Do NOT claim the Packet Creation UI opened unless build_evidence_packet returns \`success: true\`.
 - After build_evidence_packet succeeds, let the user know the Packet Creation interface has opened with their documents pre-loaded.
 
 ## DOCUMENT REVIEW MODE
@@ -2420,11 +2627,19 @@ export async function* directChat(
         if (toolUse.name === "build_evidence_packet") {
           const parsed = safeJsonParse<{
             success?: boolean;
-            proposedDocuments?: Array<{ path: string; title: string; date: string | null; docType: string; fileName: string }>;
+            packetModeOpened?: boolean;
+            proposedDocuments?: Array<{
+              docId: string;
+              path?: string;
+              title: string;
+              date: string | null;
+              docType: string;
+              fileName: string;
+            }>;
             caption?: { claimantName: string; claimNumber: string; hearingNumber?: string; hearingDateTime?: string; appearance?: string };
             service?: EvidencePacketServiceInfo;
           }>(result);
-          if (parsed?.success && parsed.proposedDocuments) {
+          if ((parsed?.success || parsed?.packetModeOpened) && Array.isArray(parsed.proposedDocuments)) {
             yield {
               type: "evidence_packet_plan",
               plan: {
