@@ -2221,110 +2221,73 @@ async function indexCase(
       return { success: false, error: "No files found in case folder" };
     }
 
-    // Step 2a: Pre-classify all files (fast, parallel, no LLM calls)
-    console.log(`\n========== PRE-CLASSIFYING ${files.length} FILES ==========`);
-    onProgress({ type: "status", caseName, message: `Classifying ${files.length} files...` });
-
-    const classifiedFiles: ClassifiedFile[] = [];
-    const CLASSIFY_BATCH_SIZE = 15;
-    const classifyBatches = Math.ceil(files.length / CLASSIFY_BATCH_SIZE);
-
-    for (let b = 0; b < classifyBatches; b++) {
-      const start = b * CLASSIFY_BATCH_SIZE;
-      const batch = files.slice(start, start + CLASSIFY_BATCH_SIZE);
-      const batchResults = await Promise.all(
-        batch.map((filePath) => classifyFile(caseFolder, filePath))
-      );
-      classifiedFiles.push(...batchResults);
-    }
-
-    // Step 2b: Split into text and vision buckets
-    const textFiles = classifiedFiles.filter(f => f.useText);
-    const visionFiles = classifiedFiles.filter(f => !f.useText);
-
-    console.log(`========== CLASSIFIED: ${textFiles.length} text, ${visionFiles.length} vision ==========`);
-    onProgress({ type: "status", caseName, message: `Extracting: ${textFiles.length} text (GPT-OSS) + ${visionFiles.length} vision (Scout/Maverick)` });
-
-    // Step 2c: Extract both buckets in parallel with independent concurrency
-    const TEXT_BATCH_SIZE = 15;
-    const VISION_BATCH_SIZE = 15;
+    // Step 2: Process files in a steady stream (max concurrent workers)
+    const CONCURRENCY_LIMIT = 15;
     const totalFiles = files.length;
     let completedCount = 0;
+    const extractions: FileExtraction[] = [];
+    let nextFileIndex = 0;
 
-    async function processInBatches<T>(
-      items: T[],
-      batchSize: number,
-      processor: (item: T, index: number) => Promise<FileExtraction>
-    ): Promise<FileExtraction[]> {
-      const results: FileExtraction[] = [];
-      const totalBatches = Math.ceil(items.length / batchSize);
+    console.log(`\n========== PROCESSING ${files.length} FILES (max concurrent: ${CONCURRENCY_LIMIT}) =========`);
+    onProgress({ type: "status", caseName, message: `Processing ${files.length} files (steady stream, max ${CONCURRENCY_LIMIT} concurrent)...` });
 
-      for (let batchNum = 0; batchNum < totalBatches; batchNum++) {
-        const start = batchNum * batchSize;
-        const end = Math.min(start + batchSize, items.length);
-        const batch = items.slice(start, end);
+    const processWorker = async () => {
+      while (nextFileIndex < totalFiles) {
+        const fileIndex = nextFileIndex++;
+        const filePath = files[fileIndex];
 
-        const batchResults = await Promise.all(
-          batch.map(async (item, batchIndex) => {
-            const globalIndex = start + batchIndex;
-            try {
-              return await processor(item, globalIndex);
-            } catch (err) {
-              const cf = item as any as ClassifiedFile;
-              console.error(`[${globalIndex + 1}/${totalFiles}] Unhandled error for ${cf.filename}:`, err);
-              return {
-                filename: cf.filename || 'unknown',
-                folder: cf.folder || 'root',
-                type: 'other' as const,
-                key_info: 'Failed to extract',
-                has_handwritten_data: false,
-                handwritten_fields: [],
-                error: err instanceof Error ? err.message : String(err),
-              };
-            }
-          })
-        );
+        try {
+          const classified = await classifyFile(caseFolder, filePath);
+          const extraction = classified.useText
+            ? await extractFileText(
+                classified,
+                fileIndex,
+                totalFiles,
+                options?.practiceArea,
+                (event) => { onProgress({ ...event, caseName }); }
+              )
+            : await extractFileVision(
+                classified,
+                fileIndex,
+                totalFiles,
+                options?.practiceArea,
+                (event) => { onProgress({ ...event, caseName }); }
+              );
 
-        results.push(...batchResults);
-        completedCount += batch.length;
-        console.log(`--- Progress: ${completedCount}/${totalFiles} files complete ---`);
+          extractions.push(extraction);
+        } catch (err) {
+          const fallbackFolder = dirname(filePath).replace(/\\/g, '/');
+          const fallbackFilename = filePath.split('/').pop() || filePath;
+          console.error(`[${fileIndex + 1}/${totalFiles}] Unhandled error for ${fallbackFilename}:`, err);
+          extractions.push({
+            filename: fallbackFilename,
+            folder: fallbackFolder || "root",
+            type: 'other' as const,
+            key_info: "Failed to extract",
+            has_handwritten_data: false,
+            handwritten_fields: [],
+            error: err instanceof Error ? err.message : String(err),
+          });
+        } finally {
+          completedCount += 1;
+          console.log(`--- Progress: ${completedCount}/${totalFiles} files complete ---`);
 
-        // Force garbage collection every 5 batches to prevent memory accumulation
-        if ((batchNum + 1) % 5 === 0 && typeof Bun !== 'undefined' && Bun.gc) {
-          Bun.gc(true);
-          console.log(`[gc] Forced garbage collection after ${completedCount} files`);
+          // Force garbage collection every 5 files to prevent memory accumulation
+          if (completedCount % 5 === 0 && typeof Bun !== 'undefined' && Bun.gc) {
+            Bun.gc(true);
+            console.log(`[gc] Forced garbage collection after ${completedCount} files`);
+          }
         }
       }
+    };
 
-      return results;
-    }
+    const workers = Array.from(
+      { length: Math.min(CONCURRENCY_LIMIT, totalFiles) },
+      () => processWorker()
+    );
 
-    const [textResults, visionResults] = await Promise.all([
-      processInBatches(
-        textFiles,
-        TEXT_BATCH_SIZE,
-        (classified, index) => extractFileText(
-          classified,
-          index,
-          totalFiles,
-          options?.practiceArea,
-          (event) => { onProgress({ ...event, caseName }); }
-        )
-      ),
-      processInBatches(
-        visionFiles,
-        VISION_BATCH_SIZE,
-        (classified, index) => extractFileVision(
-          classified,
-          index,
-          totalFiles,
-          options?.practiceArea,
-          (event) => { onProgress({ ...event, caseName }); }
-        )
-      ),
-    ]);
+    await Promise.all(workers);
 
-    const extractions: FileExtraction[] = [...textResults, ...visionResults];
 
     // Aggregate extraction usage with cache breakdown
     for (const extraction of extractions) {
