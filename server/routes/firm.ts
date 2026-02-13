@@ -1541,6 +1541,7 @@ interface ClassifiedFile {
   folder: string;
   fullPath: string;
   useText: boolean;       // true = text extraction (GPT-OSS), false = vision (Scout/Maverick)
+  isPdf: boolean;
   extractedText: string;  // pre-extracted text (only meaningful when useText=true)
   fileSizeMB: number;
 }
@@ -1550,6 +1551,7 @@ async function classifyFile(
   filePath: string,
 ): Promise<ClassifiedFile> {
   const filename = filePath.split('/').pop() || filePath;
+  const isPdf = filename.toLowerCase().endsWith(".pdf");
   const rawFolder = dirname(filePath).replace(/\\/g, '/');
   const folder = rawFolder === '.' ? '.' : rawFolder;
   const fullPath = join(caseFolder, filePath);
@@ -1560,7 +1562,16 @@ async function classifyFile(
     fileSizeMB = fileStats.size / (1024 * 1024);
   } catch {
     // File not found — will be caught during extraction
-    return { filePath, filename, folder, fullPath, useText: false, extractedText: '', fileSizeMB: 0 };
+    return {
+      filePath,
+      filename,
+      folder,
+      fullPath,
+      useText: false,
+      isPdf,
+      extractedText: '',
+      fileSizeMB: 0
+    };
   }
 
   // Try to extract text server-side
@@ -1581,7 +1592,7 @@ async function classifyFile(
     extractedText = extractedText.slice(0, MAX_CHARS) + '\n\n[... truncated ...]';
   }
 
-  return { filePath, filename, folder, fullPath, useText, extractedText, fileSizeMB };
+  return { filePath, filename, folder, fullPath, useText, isPdf, extractedText, fileSizeMB };
 }
 
 // ============================================================================
@@ -1676,10 +1687,30 @@ async function extractFileVision(
   practiceArea?: string,
   onProgress?: (event: { type: string; [key: string]: any }) => void,
 ): Promise<FileExtraction> {
-  const { filename, folder, fullPath } = classified;
+  const { filename, folder, fullPath, isPdf } = classified;
   const startTime = Date.now();
 
   onProgress?.({ type: "file_start", fileIndex, totalFiles, filename, folder });
+
+  const usage: UsageStats = {
+    inputTokens: 0,
+    inputTokensNew: 0,
+    inputTokensCacheWrite: 0,
+    inputTokensCacheRead: 0,
+    outputTokens: 0,
+    apiCalls: 0,
+    model: 'groq'
+  };
+
+  let result: FileExtraction = {
+    filename,
+    folder,
+    type: 'other',
+    key_info: 'Skipped: vision supports PDF files only',
+    has_handwritten_data: false,
+    handwritten_fields: [],
+    error: 'SKIPPED_NON_PDF',
+  };
 
   // Pre-flight: check file exists
   try {
@@ -1695,28 +1726,30 @@ async function extractFileVision(
       has_handwritten_data: false,
       handwritten_fields: [],
       error: `File not found: ${fullPath}`,
+      usage,
     };
   }
 
-  let result: FileExtraction = {
-    filename,
-    folder,
-    type: 'other',
-    key_info: '',
-    has_handwritten_data: false,
-    handwritten_fields: [],
-  };
-  const usage: UsageStats = {
-    inputTokens: 0,
-    inputTokensNew: 0,
-    inputTokensCacheWrite: 0,
-    inputTokensCacheRead: 0,
-    outputTokens: 0,
-    apiCalls: 0,
-    model: 'groq'
-  };
-
   console.log(`[${fileIndex + 1}/${totalFiles}] [groq-vision] ${filename}`);
+
+  if (!isPdf) {
+    console.log(`[Vision] Skipping ${filename}: not a PDF`);
+    result.usage = usage;
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`[${fileIndex + 1}/${totalFiles}] ✓ Done: ${filename} (${elapsed}s) - ${result.type} [groq-vision]`);
+    onProgress?.({
+      type: "file_done",
+      fileIndex,
+      totalFiles,
+      filename,
+      folder,
+      docType: result.type,
+      extractionMethod: 'groq-vision',
+      elapsed: parseFloat(elapsed),
+      skipped: true,
+    });
+    return result;
+  }
 
   try {
     const groqResult = await extractWithVision(
@@ -1943,10 +1976,6 @@ async function listCaseFiles(caseFolder: string): Promise<string[]> {
     for (const entry of entries) {
       // Skip .pi_tool entirely
       if (entry.name === '.pi_tool') continue;
-      // For directories, skip dot-prefixed ones (they're separate subcase folders)
-      if (entry.isDirectory() && entry.name.startsWith('.')) continue;
-      // For files, skip hidden files
-      if (!entry.isDirectory() && entry.name.startsWith('.')) continue;
 
       const fullPath = join(dir, entry.name);
       const relativePath = base ? `${base}/${entry.name}` : entry.name;
@@ -2246,13 +2275,21 @@ async function indexCase(
                 options?.practiceArea,
                 (event) => { onProgress({ ...event, caseName }); }
               )
-            : await extractFileVision(
-                classified,
-                fileIndex,
-                totalFiles,
-                options?.practiceArea,
-                (event) => { onProgress({ ...event, caseName }); }
-              );
+            : classified.isPdf
+              ? await extractFileVision(
+                  classified,
+                  fileIndex,
+                  totalFiles,
+                  options?.practiceArea,
+                  (event) => { onProgress({ ...event, caseName }); }
+                )
+              : await extractFileVision(
+                  classified,
+                  fileIndex,
+                  totalFiles,
+                  options?.practiceArea,
+                  (event) => { onProgress({ ...event, caseName }); }
+                );
 
           extractions.push(extraction);
         } catch (err) {
@@ -3031,7 +3068,7 @@ async function checkNeedsReindex(casePath: string, indexedAt: number): Promise<b
       const entries = await readdir(dir, { withFileTypes: true });
       const results = await Promise.all(
         entries
-          .filter(entry => entry.name !== ".pi_tool" && !entry.name.startsWith("."))
+          .filter(entry => entry.name !== ".pi_tool")
           .map(async (entry) => {
             const fullPath = join(dir, entry.name);
             if (entry.isDirectory()) {

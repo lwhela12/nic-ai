@@ -609,10 +609,6 @@ app.get("/index-status", async (c) => {
       const entries = await readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
         if (entry.name === ".pi_tool" || shouldIgnoreFile(entry.name)) continue;
-        // Keep status checks aligned with indexCase/listCaseFiles behavior.
-        // Dot-prefixed folders are linked subcases and are indexed separately.
-        if (entry.isDirectory() && entry.name.startsWith(".")) continue;
-        if (!entry.isDirectory() && entry.name.startsWith(".")) continue;
         const fullPath = join(dir, entry.name);
         const relativePath = (base ? join(base, entry.name) : entry.name).replace(/\\/g, "/");
 
