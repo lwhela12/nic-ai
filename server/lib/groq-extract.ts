@@ -44,6 +44,17 @@ const ESTIMATED_TEXT_TOKENS = 8_000;
 /** Conservative estimate of tokens per vision call (images are token-heavy) */
 const ESTIMATED_VISION_TOKENS = 20_000;
 
+/** Adaptive vision quality targets */
+const MAX_VISION_PAGES = 5;
+const VISION_DPI_HIGH = 200;
+const VISION_DPI_MEDIUM = 150;
+const VISION_DPI_LOW = 120;
+const SIZE_BASED_DPI_SAMPLES = [
+  { maxFileMB: 4, dpi: VISION_DPI_HIGH },
+  { maxFileMB: 10, dpi: VISION_DPI_MEDIUM },
+  { maxFileMB: 20, dpi: VISION_DPI_LOW },
+];
+
 /** Per-model rate limit state, updated from Groq response headers */
 const rateLimitState: Record<string, { remainingTokens: number; resetAt: number }> = {};
 
@@ -397,12 +408,13 @@ async function callVisionWithFallback(
 /**
  * Extract structured data from a scanned PDF using vision models.
  * Uses Scout as primary with Maverick fallback on rate limits.
- * Converts PDF pages to PNG images and processes in batches of 3 pages.
+ * Converts PDF pages to PNG images and processes once per PDF with a max of 5 pages.
  */
 export async function extractWithVision(
   pdfPath: string,
   filename: string,
   folder: string,
+  fileSizeMB: number = 0,
   systemPrompt: string
 ): Promise<{ result: ExtractionResult; usage: GroqUsage }> {
   const totalUsage: GroqUsage = { inputTokens: 0, outputTokens: 0 };
@@ -415,12 +427,22 @@ export async function extractWithVision(
     pageCount = 1;
   }
 
-  // Cap at 9 pages (3 batches of 3)
-  const maxPages = Math.min(pageCount, 9);
-  const PAGES_PER_BATCH = 3;
-  const batchCount = Math.ceil(maxPages / PAGES_PER_BATCH);
+  const pickVisionDpi = (sizeMB: number, pages: number): number => {
+    if (pages <= 2 && sizeMB <= 6) return VISION_DPI_HIGH;
+    if (!Number.isFinite(sizeMB) || sizeMB <= 0) return VISION_DPI_MEDIUM;
+    for (const tier of SIZE_BASED_DPI_SAMPLES) {
+      if (sizeMB <= tier.maxFileMB) return tier.dpi;
+    }
+    return VISION_DPI_LOW;
+  };
 
-  console.log(`[Vision] ${filename}: ${pageCount} pages, processing ${maxPages} (${batchCount} batch(es))`);
+  // Single API call per PDF, up to 5 pages
+  const maxPages = Math.min(pageCount, MAX_VISION_PAGES);
+  const PAGES_PER_BATCH = maxPages; // keep batching loop structure but this forces one batch per PDF
+  const batchCount = Math.ceil(maxPages / PAGES_PER_BATCH);
+  const chosenDpi = pickVisionDpi(fileSizeMB, maxPages);
+
+  console.log(`[Vision] ${filename}: ${pageCount} pages, processing ${maxPages} (${batchCount} batch(es)), using ${chosenDpi} DPI`);
 
   const batchResults: ExtractionResult[] = [];
 
@@ -428,18 +450,11 @@ export async function extractWithVision(
     const firstPage = batch * PAGES_PER_BATCH + 1;
     const lastPage = Math.min(firstPage + PAGES_PER_BATCH - 1, maxPages);
 
-    // Convert pages to images - try 200 DPI first, fall back to 150 if too large
-    let images: PdfPageImage[];
-    let dpi = 200;
-
-    images = await pdfToImages(pdfPath, firstPage, lastPage, dpi);
-
-    // Check if total base64 exceeds 3.5MB, if so retry at 150 DPI
+    // Convert pages to images once using adaptive quality.
+    const images = await pdfToImages(pdfPath, firstPage, lastPage, chosenDpi);
     const totalSize = images.reduce((sum, img) => sum + img.sizeBytes, 0);
     if (totalSize > 3.5 * 1024 * 1024) {
-      console.log(`[Vision] ${filename} batch ${batch + 1}: ${(totalSize / 1024 / 1024).toFixed(1)}MB at ${dpi} DPI, retrying at 150 DPI`);
-      dpi = 150;
-      images = await pdfToImages(pdfPath, firstPage, lastPage, dpi);
+      console.log(`[Vision] ${filename} batch ${batch + 1}: ${(totalSize / 1024 / 1024).toFixed(1)}MB at ${chosenDpi} DPI`);
     }
 
     // Build image content blocks for the message

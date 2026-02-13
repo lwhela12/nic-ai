@@ -1723,6 +1723,7 @@ async function extractFileVision(
       fullPath,
       filename,
       folder,
+      classified.fileSizeMB,
       getFileExtractionSystemPrompt(practiceArea)
     );
 
@@ -2246,7 +2247,7 @@ async function indexCase(
 
     // Step 2c: Extract both buckets in parallel with independent concurrency
     const TEXT_BATCH_SIZE = 15;
-    const VISION_BATCH_SIZE = 3;
+    const VISION_BATCH_SIZE = 15;
     const totalFiles = files.length;
     let completedCount = 0;
 
