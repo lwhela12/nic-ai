@@ -30,12 +30,17 @@ interface ExtractionResult {
 }
 
 // ============================================================================
-// Vision Models & Rate Limit Tracking
+// Model Constants & Rate Limit Tracking
 // ============================================================================
+
+const TEXT_PRIMARY = "openai/gpt-oss-120b";
+const TEXT_FALLBACK = "openai/gpt-oss-20b";
 
 const VISION_SCOUT = "meta-llama/llama-4-scout-17b-16e-instruct";
 const VISION_MAVERICK = "meta-llama/llama-4-maverick-17b-128e-instruct";
 
+/** Conservative estimate of tokens per text extraction call */
+const ESTIMATED_TEXT_TOKENS = 8_000;
 /** Conservative estimate of tokens per vision call (images are token-heavy) */
 const ESTIMATED_VISION_TOKENS = 20_000;
 
@@ -68,14 +73,14 @@ function parseResetDuration(value: string): number {
   return ms || 60_000;
 }
 
-function shouldUseFallback(model: string): boolean {
+function shouldUseFallback(model: string, estimatedTokens: number = ESTIMATED_VISION_TOKENS): boolean {
   const state = rateLimitState[model];
   if (!state) return false;
 
   // If the reset window has passed, state is stale — don't fallback
   if (Date.now() > state.resetAt) return false;
 
-  return state.remainingTokens < ESTIMATED_VISION_TOKENS;
+  return state.remainingTokens < estimatedTokens;
 }
 
 // ============================================================================
@@ -136,12 +141,103 @@ function buildVisionJsonSchema(): Record<string, any> {
 }
 
 // ============================================================================
-// Path 1: Text Extraction with GPT-OSS 120B
+// Path 1: Text Extraction with GPT-OSS 120B → 20B Fallback
 // ============================================================================
 
 /**
- * Extract structured data from pre-extracted document text using GPT-OSS 120B.
- * Uses json_object response format with schema embedded in the system prompt.
+ * Make a single GPT-OSS API call with a specific model.
+ * Returns the parsed response and updates rate limit state from headers.
+ */
+async function callTextModel(
+  modelId: string,
+  messages: any[],
+): Promise<{ content: string; usage: GroqUsage; model: string }> {
+  const groq = getGroqClient();
+
+  const { data: response, response: rawResponse } = await groq.chat.completions.create({
+    model: modelId,
+    temperature: 0.1,
+    max_tokens: 4000,
+    response_format: { type: "json_object" },
+    messages,
+  }).withResponse();
+
+  // Update rate limit state from response headers
+  updateRateLimitState(modelId, rawResponse.headers);
+
+  const modelShort = modelId.includes("120b") ? "120b" : "20b";
+  return {
+    content: response.choices[0]?.message?.content || "{}",
+    usage: {
+      inputTokens: response.usage?.prompt_tokens || 0,
+      outputTokens: response.usage?.completion_tokens || 0,
+    },
+    model: modelShort,
+  };
+}
+
+/**
+ * Make a GPT-OSS API call with 120B → 20B fallback.
+ * 1. If proactive check says 120B is low on tokens → go straight to 20B
+ * 2. Try 120B; on 429 → switch to 20B
+ * 3. Try 20B; on 429 → wait retry-after, then retry 20B once
+ * 4. On timeout → retry same model once
+ */
+async function callTextWithFallback(
+  messages: any[],
+  filename: string,
+): Promise<{ content: string; usage: GroqUsage; model: string }> {
+  // Proactive check: if 120B is known to be low, skip straight to 20B
+  const skip120b = shouldUseFallback(TEXT_PRIMARY, ESTIMATED_TEXT_TOKENS);
+  if (skip120b) {
+    console.log(`[GPT-OSS] ${filename}: 120B low on tokens, using 20B`);
+  }
+
+  const primaryModel = skip120b ? TEXT_FALLBACK : TEXT_PRIMARY;
+
+  try {
+    return await callTextModel(primaryModel, messages);
+  } catch (err: any) {
+    const status = err?.status || err?.statusCode;
+    const isTimeout = err?.name === "APIConnectionTimeoutError" || err?.code === "ETIMEDOUT" || err?.message?.includes("timed out");
+
+    // Timeout → retry same model once
+    if (isTimeout) {
+      console.log(`[GPT-OSS] ${filename}: ${primaryModel.includes("120b") ? "120B" : "20B"} timeout, retrying`);
+      await sleep(3000);
+      return await callTextModel(primaryModel, messages);
+    }
+
+    if (status !== 429) throw err; // non-rate-limit error — propagate
+
+    // If we already tried 20B, wait and retry once
+    if (primaryModel === TEXT_FALLBACK) {
+      const retryAfter = parseRetryAfter(err?.headers?.["retry-after"] ?? null);
+      console.log(`[GPT-OSS] ${filename}: 20B 429, waiting ${retryAfter}s`);
+      await sleep(retryAfter * 1000);
+      return await callTextModel(TEXT_FALLBACK, messages);
+    }
+
+    // 120B 429 → fall back to 20B
+    console.log(`[GPT-OSS] ${filename}: 120B 429, falling back to 20B`);
+    try {
+      return await callTextModel(TEXT_FALLBACK, messages);
+    } catch (fallbackErr: any) {
+      const fallbackStatus = fallbackErr?.status || fallbackErr?.statusCode;
+      if (fallbackStatus !== 429) throw fallbackErr;
+
+      // 20B also 429 → wait and retry once
+      const retryAfter = parseRetryAfter(fallbackErr?.headers?.["retry-after"] ?? null);
+      console.log(`[GPT-OSS] ${filename}: 20B also 429, waiting ${retryAfter}s`);
+      await sleep(retryAfter * 1000);
+      return await callTextModel(TEXT_FALLBACK, messages);
+    }
+  }
+}
+
+/**
+ * Extract structured data from pre-extracted document text using GPT-OSS.
+ * Uses 120B as primary with 20B fallback on rate limits.
  */
 export async function extractWithGptOss(
   text: string,
@@ -149,29 +245,22 @@ export async function extractWithGptOss(
   folder: string,
   systemPrompt: string
 ): Promise<{ result: ExtractionResult; usage: GroqUsage }> {
-  const groq = getGroqClient();
-
   const schemaDesc = buildExtractionSchemaDescription();
 
-  const response = await groq.chat.completions.create({
-    model: "openai/gpt-oss-120b",
-    temperature: 0.1,
-    max_tokens: 4000,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `${systemPrompt}
+  const messages = [
+    {
+      role: "system" as const,
+      content: `${systemPrompt}
 
 ## OUTPUT FORMAT
 
 You must respond with a single JSON object. No markdown, no explanation, no text outside the JSON.
 
 ${schemaDesc}`,
-      },
-      {
-        role: "user",
-        content: `Extract information from this document.
+    },
+    {
+      role: "user" as const,
+      content: `Extract information from this document.
 
 FILENAME: ${filename}
 FOLDER: ${folder}
@@ -186,11 +275,10 @@ CRITICAL:
 - Include handwritten_fields as non-signature extracted field names that are handwritten (use [] when none).
 
 Return the JSON extraction now.`,
-      },
-    ],
-  });
+    },
+  ];
 
-  const content = response.choices[0]?.message?.content || "{}";
+  const { content, usage } = await callTextWithFallback(messages, filename);
   const parsed = JSON.parse(content);
 
   return {
@@ -201,10 +289,7 @@ Return the JSON extraction now.`,
       handwritten_fields: Array.isArray(parsed.handwritten_fields) ? parsed.handwritten_fields : [],
       extracted_data: parsed.extracted_data || {},
     },
-    usage: {
-      inputTokens: response.usage?.prompt_tokens || 0,
-      outputTokens: response.usage?.completion_tokens || 0,
-    },
+    usage,
   };
 }
 
@@ -488,11 +573,12 @@ function mergeExtractions(results: ExtractionResult[], filename: string): Extrac
 }
 
 // ============================================================================
-// Hypergraph Generation with GPT-OSS 120B
+// Hypergraph Generation with GPT-OSS 120B → 20B Fallback
 // ============================================================================
 
 /**
- * Generate a hypergraph analysis chunk using GPT-OSS 120B.
+ * Generate a hypergraph analysis chunk using GPT-OSS.
+ * Uses 120B as primary with 20B fallback on rate limits.
  */
 export async function generateHypergraphWithGptOss(
   chunkJson: string,
@@ -507,32 +593,95 @@ export async function generateHypergraphWithGptOss(
   };
   usage: GroqUsage;
 }> {
-  const groq = getGroqClient();
-
-  const response = await groq.chat.completions.create({
-    model: "openai/gpt-oss-120b",
-    temperature: 0.1,
-    max_tokens: 8000,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `${systemPrompt}
+  const messages = [
+    {
+      role: "system" as const,
+      content: `${systemPrompt}
 
 You must respond with a single JSON object. No markdown, no explanation, no text outside the JSON.`,
-      },
-      {
-        role: "user",
-        content: `<document_index chunk="${chunkId}/${chunkCount}">
+    },
+    {
+      role: "user" as const,
+      content: `<document_index chunk="${chunkId}/${chunkCount}">
 ${chunkJson}
 </document_index>
 
 Return ONLY the JSON hypergraph for this chunk. No explanation, no planning - just the JSON object.`,
-      },
-    ],
-  });
+    },
+  ];
 
-  const content = response.choices[0]?.message?.content || "{}";
+  // Hypergraph uses higher max_tokens — use callTextModel directly with fallback logic
+  const label = `hypergraph-${chunkId}/${chunkCount}`;
+  const skip120b = shouldUseFallback(TEXT_PRIMARY, ESTIMATED_TEXT_TOKENS);
+  if (skip120b) {
+    console.log(`[Hypergraph] chunk ${chunkId}/${chunkCount}: 120B low on tokens, using 20B`);
+  }
+  const primaryModel = skip120b ? TEXT_FALLBACK : TEXT_PRIMARY;
+
+  const callWithModel = (model: string) => {
+    const groq = getGroqClient();
+    return groq.chat.completions.create({
+      model,
+      temperature: 0.1,
+      max_tokens: 8000,
+      response_format: { type: "json_object" },
+      messages,
+    }).withResponse();
+  };
+
+  let content: string;
+  let usage: GroqUsage;
+
+  try {
+    const { data: response, response: rawResponse } = await callWithModel(primaryModel);
+    updateRateLimitState(primaryModel, rawResponse.headers);
+    content = response.choices[0]?.message?.content || "{}";
+    usage = { inputTokens: response.usage?.prompt_tokens || 0, outputTokens: response.usage?.completion_tokens || 0 };
+  } catch (err: any) {
+    const status = err?.status || err?.statusCode;
+    const isTimeout = err?.name === "APIConnectionTimeoutError" || err?.code === "ETIMEDOUT" || err?.message?.includes("timed out");
+
+    if (isTimeout) {
+      console.log(`[Hypergraph] chunk ${chunkId}/${chunkCount}: timeout, retrying`);
+      await sleep(5000);
+      const { data: response, response: rawResponse } = await callWithModel(primaryModel);
+      updateRateLimitState(primaryModel, rawResponse.headers);
+      content = response.choices[0]?.message?.content || "{}";
+      usage = { inputTokens: response.usage?.prompt_tokens || 0, outputTokens: response.usage?.completion_tokens || 0 };
+    } else if (status === 429 && primaryModel === TEXT_PRIMARY) {
+      console.log(`[Hypergraph] chunk ${chunkId}/${chunkCount}: 120B 429, falling back to 20B`);
+      try {
+        const { data: response, response: rawResponse } = await callWithModel(TEXT_FALLBACK);
+        updateRateLimitState(TEXT_FALLBACK, rawResponse.headers);
+        content = response.choices[0]?.message?.content || "{}";
+        usage = { inputTokens: response.usage?.prompt_tokens || 0, outputTokens: response.usage?.completion_tokens || 0 };
+      } catch (fallbackErr: any) {
+        const fallbackStatus = fallbackErr?.status || fallbackErr?.statusCode;
+        if (fallbackStatus === 429) {
+          const retryAfter = parseRetryAfter(fallbackErr?.headers?.["retry-after"] ?? null);
+          console.log(`[Hypergraph] chunk ${chunkId}/${chunkCount}: 20B also 429, waiting ${retryAfter}s`);
+          await sleep(retryAfter * 1000);
+          const { data: response, response: rawResponse } = await callWithModel(TEXT_FALLBACK);
+          updateRateLimitState(TEXT_FALLBACK, rawResponse.headers);
+          content = response.choices[0]?.message?.content || "{}";
+          usage = { inputTokens: response.usage?.prompt_tokens || 0, outputTokens: response.usage?.completion_tokens || 0 };
+        } else {
+          throw fallbackErr;
+        }
+      }
+    } else if (status === 429) {
+      const retryAfter = parseRetryAfter(err?.headers?.["retry-after"] ?? null);
+      console.log(`[Hypergraph] chunk ${chunkId}/${chunkCount}: 20B 429, waiting ${retryAfter}s`);
+      await sleep(retryAfter * 1000);
+      const { data: response, response: rawResponse } = await callWithModel(TEXT_FALLBACK);
+      updateRateLimitState(TEXT_FALLBACK, rawResponse.headers);
+      content = response.choices[0]?.message?.content || "{}";
+      usage = { inputTokens: response.usage?.prompt_tokens || 0, outputTokens: response.usage?.completion_tokens || 0 };
+    } else {
+      throw err;
+    }
+  }
+
   const parsed = JSON.parse(content);
 
   return {
@@ -545,19 +694,17 @@ Return ONLY the JSON hypergraph for this chunk. No explanation, no planning - ju
         confidence_score: 0,
       },
     },
-    usage: {
-      inputTokens: response.usage?.prompt_tokens || 0,
-      outputTokens: response.usage?.completion_tokens || 0,
-    },
+    usage,
   };
 }
 
 // ============================================================================
-// Case Summary Generation with GPT-OSS 120B
+// Case Summary Generation with GPT-OSS 120B → 20B Fallback
 // ============================================================================
 
 /**
- * Generate case summary and phase using GPT-OSS 120B.
+ * Generate case summary and phase using GPT-OSS.
+ * Uses 120B as primary with 20B fallback on rate limits.
  */
 export async function generateCaseSummaryWithGptOss(
   condensedIndex: string,
@@ -567,17 +714,10 @@ export async function generateCaseSummaryWithGptOss(
   result: { case_summary: string; case_phase: string };
   usage: GroqUsage;
 }> {
-  const groq = getGroqClient();
-
-  const response = await groq.chat.completions.create({
-    model: "openai/gpt-oss-120b",
-    temperature: 0.1,
-    max_tokens: 2000,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `${systemPrompt}
+  const messages = [
+    {
+      role: "system" as const,
+      content: `${systemPrompt}
 
 ## OUTPUT FORMAT
 
@@ -586,15 +726,14 @@ You must respond with a single JSON object containing exactly these fields:
 - "case_phase" (string): Current lifecycle phase based on documents present.
 
 No markdown, no explanation, no text outside the JSON.`,
-      },
-      {
-        role: "user",
-        content: userPrompt,
-      },
-    ],
-  });
+    },
+    {
+      role: "user" as const,
+      content: userPrompt,
+    },
+  ];
 
-  const content = response.choices[0]?.message?.content || "{}";
+  const { content, usage } = await callTextWithFallback(messages, "case-summary");
   const parsed = JSON.parse(content);
 
   return {
@@ -602,9 +741,6 @@ No markdown, no explanation, no text outside the JSON.`,
       case_summary: parsed.case_summary || "Case summary generation failed.",
       case_phase: parsed.case_phase || "Intake",
     },
-    usage: {
-      inputTokens: response.usage?.prompt_tokens || 0,
-      outputTokens: response.usage?.completion_tokens || 0,
-    },
+    usage,
   };
 }

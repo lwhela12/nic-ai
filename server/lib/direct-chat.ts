@@ -1551,51 +1551,6 @@ async function executeTool(
         const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const indexData = JSON.parse(indexContent);
-        const folders = indexData?.folders || {};
-        let docCount = 0;
-        const proposedDocuments: Array<{
-          docId: string;
-          path: string;
-          title: string;
-          date: string | null;
-          docType: string;
-          fileName: string;
-          folder: string;
-        }> = [];
-        for (const [folderName, folderData] of Object.entries(folders) as [string, any][]) {
-          const files = Array.isArray(folderData) ? folderData : folderData?.files || folderData?.documents || [];
-          docCount += files.length;
-          for (const file of files) {
-            if (typeof file === "string") {
-              const canonicalPath = folderName === "." || !folderName ? file : `${folderName}/${file}`;
-              proposedDocuments.push({
-                docId: buildDocumentId(folderName, file),
-                path: canonicalPath,
-                title: file,
-                date: null,
-                docType: "",
-                fileName: file,
-                folder: folderName,
-              });
-            } else {
-              const fileName = file.filename || file.file || "Unknown";
-              const canonicalPath = folderName === "." || !folderName ? fileName : `${folderName}/${fileName}`;
-              const existingDocId = typeof file.doc_id === "string" && file.doc_id.trim()
-                ? file.doc_id.trim()
-                : buildDocumentId(folderName, fileName);
-              const rawTitle = typeof file.title === "string" ? file.title.trim() : "";
-              proposedDocuments.push({
-                docId: existingDocId,
-                path: canonicalPath,
-                title: !isPlaceholderDocumentTitle(rawTitle) ? rawTitle : fileName,
-                date: file.date || null,
-                docType: file.type || "",
-                fileName,
-                folder: folderName,
-              });
-            }
-          }
-        }
 
         const hearingNumber = typeof toolInput.hearing_number === "string"
           ? toolInput.hearing_number.trim()
@@ -1605,21 +1560,28 @@ async function executeTool(
         const claimNumbers = indexData?.summary?.claim_numbers || {};
         const firstClaimNumber = Object.values(claimNumbers).find((v: unknown) => typeof v === "string") as string || "";
 
+        // Count total documents for reference (without returning them all)
+        const folders = indexData?.folders || {};
+        let docCount = 0;
+        for (const [, folderData] of Object.entries(folders) as [string, any][]) {
+          const files = Array.isArray(folderData) ? folderData : folderData?.files || folderData?.documents || [];
+          docCount += files.length;
+        }
+
         return JSON.stringify({
           success: true,
           totalIndexedDocuments: docCount,
           hearingNumber: hearingNumber || null,
-          proposedDocuments,
           caption: { claimantName, claimNumber: firstClaimNumber },
           instruction: [
             "This is a PLANNING step only — no PDF has been generated yet.",
-            "You must now do the following before building the packet:",
-            "1. If a hearing number was provided, read the hearing notice to understand what this hearing is for.",
-            "2. Search the document index (already in your context) for relevant documents — filter by hearing number, folder, doc type, etc.",
-            "3. Check the EVIDENCE PACKET RULES section in your context for packet ordering rules.",
-            "4. Present the proposed ordered document list to the user for review. Show title/fileName/folder and why each was included.",
-            "5. After the user confirms (or adjusts), call build_evidence_packet with the verified ordered list using doc_id for each document.",
-            "If doc_id is unavailable, pass exact filename + folder from the index (do not synthesize custom paths).",
+            "Use the meta-index already in your context to identify relevant documents for this packet:",
+            "1. If a hearing number was provided, find and read the hearing notice using read_file or read_document to understand what this hearing is for.",
+            "2. Review the meta-index folders in your context — look at filenames, types, dates, and facts to identify which documents belong in the packet.",
+            "3. For folders with relevant documents, use read_file(\".pi_tool/indexes/{FolderName}.json\") to get doc_id values for the specific files you want to include.",
+            "4. Check the EVIDENCE PACKET RULES section in your context for packet ordering rules.",
+            "5. Present the proposed ordered document list to the user for review. Show title, folder, and why each was included.",
+            "6. After the user confirms (or adjusts), call build_evidence_packet with the verified ordered list using doc_id for each document.",
             "Do NOT skip straight to build_evidence_packet without showing the user the proposed list first.",
           ].join("\n"),
         });

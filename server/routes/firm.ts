@@ -2947,6 +2947,13 @@ app.post("/batch-index", async (c) => {
   }
 
   return streamSSE(c, async (stream) => {
+    // Heartbeat keeps SSE alive during long Groq API calls
+    const heartbeat = setInterval(async () => {
+      try {
+        await stream.writeSSE({ data: JSON.stringify({ type: "heartbeat" }) });
+      } catch { /* stream closed */ }
+    }, 30_000);
+
     try {
       await stream.writeSSE({
         data: JSON.stringify({
@@ -3024,6 +3031,8 @@ app.post("/batch-index", async (c) => {
           error: error instanceof Error ? error.message : String(error),
         })
       });
+    } finally {
+      clearInterval(heartbeat);
     }
   });
 });

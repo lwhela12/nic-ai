@@ -14,7 +14,7 @@ export function getGroqClient(): Groq {
     if (!apiKey) {
       throw new Error("GROQ_API_KEY environment variable is required");
     }
-    _groq = new Groq({ apiKey });
+    _groq = new Groq({ apiKey, timeout: 120_000 });
   }
   return _groq;
 }
