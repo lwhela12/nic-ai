@@ -15,7 +15,12 @@ import { loadPracticeGuide, loadSectionsByIds, clearKnowledgeCache } from "./kno
 import { extractTextFromFile } from "../lib/extract";
 import { generateCaseSummary } from "../lib/case-summary";
 import { mergeToIndex, diffIndexes, type HypergraphResult, type IndexDiff } from "../lib/merge-index";
-import { extractWithGptOss, extractWithVision, generateHypergraphWithGptOss } from "../lib/groq-extract";
+import { 
+  extractWithGptOss,
+  extractWithVision,
+  generateHypergraphWithGptOss,
+  generateHypergraphConflictReviewWithGptOss,
+} from "../lib/groq-extract";
 import { directFirmChat, type FirmChatScope } from "../lib/firm-chat";
 import { buildCaseMap } from "../lib/case-map";
 import { writeIndexDerivedFiles } from "../lib/meta-index";
@@ -2251,7 +2256,7 @@ async function indexCase(
     }
 
     // Step 2: Process files in a steady stream (max concurrent workers)
-    const CONCURRENCY_LIMIT = 15;
+    const CONCURRENCY_LIMIT = 30;
     const totalFiles = files.length;
     let completedCount = 0;
     const extractions: FileExtraction[] = [];
@@ -3109,20 +3114,40 @@ const HYPERGRAPH_FIELD_ALIASES: Record<string, string[]> = {
   client_address: ["client_address", "address", "claimant_address"],
   // PI-specific
   date_of_loss: ["date_of_loss", "dol"],
+  claim_number_1p: ["claim_number_1p", "claimant_1p", "claim_1p"],
+  claim_number_3p: ["claim_number_3p", "claimant_3p", "claim_3p"],
+  policy_limits_1p: ["policy_limits_1p", "policy_limit_1p", "policy_limits_1", "policy1p"],
+  policy_limits_3p: ["policy_limits_3p", "policy_limit_3p", "policy_limits_3", "policy3p", "insurance_3p_limits"],
+  adjuster_name_1p: ["adjuster_name_1p", "first_party_adjuster_name", "1p_adjuster_name"],
+  adjuster_phone_1p: ["adjuster_phone_1p", "first_party_adjuster_phone", "1p_adjuster_phone"],
+  adjuster_email_1p: ["adjuster_email_1p", "first_party_adjuster_email", "1p_adjuster_email"],
+  adjuster_name_3p: ["adjuster_name_3p", "third_party_adjuster_name", "3p_adjuster_name", "adjuster_name"],
+  adjuster_phone_3p: ["adjuster_phone_3p", "third_party_adjuster_phone", "3p_adjuster_phone", "adjuster_phone"],
+  adjuster_email_3p: ["adjuster_email_3p", "third_party_adjuster_email", "3p_adjuster_email", "adjuster_email"],
+  health_insurance: ["health_insurance"],
+  total_medical: ["total_medical", "total_medical_charges", "total_charges", "total_medical_cost"],
+  insurance_claim_numbers: ["insurance_claim_numbers"],
+  policy_limits: ["policy_limits"],
+  provider_balances: ["provider_balances", "provider_balance"],
   // WC-specific
   date_of_injury: ["date_of_injury", "doi"],
   employer_name: ["employer_name", "employer"],
   employer_address: ["employer_address"],
+  employer_phone: ["employer_phone"],
   job_title: ["job_title", "job_title_at_time_of_injury"],
   wc_carrier: ["wc_carrier", "wc_insurance_carrier", "carrier_name"],
-  claim_number: ["claim_number", "wc_claim_number"],
+  wc_claim_number: ["wc_claim_number", "claim_number", "claim"],
   tpa_name: ["tpa_name", "third_party_administrator"],
+  tpa: ["tpa"],
   adjuster_name: ["adjuster_name"],
   adjuster_phone: ["adjuster_phone"],
+  adjuster_email: ["adjuster_email"],
   disability_type: ["disability_type"],
   amw: ["amw", "average_monthly_wage", "aww"],
   compensation_rate: ["compensation_rate", "weekly_compensation_rate"],
   body_parts_injured: ["body_parts_injured", "body_parts"],
+  injury_description: ["injury_description", "mechanism_of_injury", "incident_description"],
+  providers: ["providers", "treating_physicians", "treating_providers"],
   mmi_date: ["mmi_date"],
   ppd_rating: ["ppd_rating"],
 };
@@ -3142,8 +3167,314 @@ function buildAliasReverseMap(): Map<string, string> {
 }
 
 /** Normalize a value for grouping: lowercase, collapse whitespace, trim */
+function normalizeDateForGrouping(value: string): string | null {
+  const compact = value.replace(/\s+/g, " ").trim();
+
+  const slashDate = compact.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (slashDate) {
+    const [, m, d, yRaw] = slashDate;
+    const yNum = yRaw.length === 2 ? Number(yRaw) + 2000 : Number(yRaw);
+    const mm = m.padStart(2, "0");
+    const dd = d.padStart(2, "0");
+    return `${yNum.toString().padStart(4, "0")}-${mm}-${dd}`;
+  }
+
+  const alphaDate = compact.match(/^(\w+)\s+(\d{1,2}),?\s+(\d{2,4})$/i);
+  if (alphaDate) {
+    const [, monthText, day, yearRaw] = alphaDate;
+    const months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec"];
+    const idx = months.indexOf(monthText.slice(0, 3).toLowerCase());
+    if (idx >= 0) {
+      const yNum = yearRaw.length === 2 ? Number(yearRaw) + 2000 : Number(yearRaw);
+      return `${yNum.toString()}-${String(idx + 1).padStart(2, "0")}-${String(Number(day)).padStart(2, "0")}`;
+    }
+  }
+
+  return null;
+}
+
+function normalizeMoneyForGrouping(value: string): string | null {
+  const compact = value.replace(/,/g, "").trim();
+  const moneyMatch = compact.match(/^\$?\s*(\d+(?:\.\d{1,2})?)$/);
+  if (!moneyMatch) return null;
+  const amount = Number(moneyMatch[1]);
+  if (Number.isNaN(amount)) return null;
+  return `$${amount.toFixed(2)}`;
+}
+
 function normalizeForGrouping(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, " ").trim();
+  const compact = value.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+
+  return (
+    normalizeDateForGrouping(compact)
+    || normalizeMoneyForGrouping(compact)
+    || compact
+  );
+}
+
+function normalizeScalarValue(rawValue: unknown): string[] {
+  if (typeof rawValue === "number") return [String(rawValue)];
+  if (typeof rawValue === "boolean") return [rawValue ? "true" : "false"];
+  if (typeof rawValue === "string") {
+    const trimmed = rawValue.trim();
+    return trimmed ? [trimmed] : [];
+  }
+  if (Array.isArray(rawValue)) {
+    return rawValue.flatMap((entry) => normalizeScalarValue(entry));
+  }
+  return [];
+}
+
+function addFieldValue(
+  fieldValues: Map<string, Map<string, { canonical: string; canonicalCount: Map<string, number>; sources: Set<string> }>>,
+  field: string,
+  rawValue: unknown,
+  filename: string
+): void {
+  for (const scalar of normalizeScalarValue(rawValue)) {
+    const normalized = normalizeForGrouping(scalar);
+    if (!normalized) continue;
+
+    if (!fieldValues.has(field)) {
+      fieldValues.set(field, new Map());
+    }
+    const values = fieldValues.get(field)!;
+    const entry = values.get(normalized) || {
+      canonical: scalar,
+      canonicalCount: new Map<string, number>(),
+      sources: new Set<string>([filename]),
+    };
+    const count = entry.canonicalCount.get(scalar) || 0;
+    entry.canonicalCount.set(scalar, count + 1);
+    entry.sources.add(filename);
+
+    let bestCasing = entry.canonical;
+    let bestCount = 0;
+    for (const [form, formCount] of entry.canonicalCount) {
+      if (formCount > bestCount) {
+        bestCount = formCount;
+        bestCasing = form;
+      }
+    }
+    entry.canonical = bestCasing;
+    values.set(normalized, entry);
+  }
+}
+
+function addInsuranceFields(
+  side: "1p" | "3p",
+  insuranceValue: Record<string, any>,
+  filename: string,
+  fieldValues: Map<string, Map<string, { canonical: string; canonicalCount: Map<string, number>; sources: Set<string> }>>,
+): void {
+  if (!insuranceValue || typeof insuranceValue !== "object") return;
+
+  const claimNumber = insuranceValue.claim_number || insuranceValue.policy_number || insuranceValue.claimNo;
+  if (claimNumber) {
+    addFieldValue(fieldValues, `claim_number_${side}`, claimNumber, filename);
+  }
+
+  const carrier = insuranceValue.carrier || insuranceValue.insurer || insuranceValue.insured_name;
+  if (carrier) {
+    addFieldValue(fieldValues, side === "1p" ? "wc_carrier" : "wc_carrier", carrier, filename);
+  }
+
+  const adjusterName = insuranceValue.adjuster_name || insuranceValue.adjuster;
+  if (adjusterName) {
+    addFieldValue(fieldValues, side === "1p" ? "adjuster_name_1p" : "adjuster_name_3p", adjusterName, filename);
+  }
+
+  const adjusterPhone = insuranceValue.adjuster_phone || insuranceValue.adjuster_phone_number;
+  if (adjusterPhone) {
+    addFieldValue(fieldValues, side === "1p" ? "adjuster_phone_1p" : "adjuster_phone_3p", adjusterPhone, filename);
+  }
+
+  const adjusterEmail = insuranceValue.adjuster_email || insuranceValue.adjuster_email_address;
+  if (adjusterEmail) {
+    addFieldValue(fieldValues, side === "1p" ? "adjuster_email_1p" : "adjuster_email_3p", adjusterEmail, filename);
+  }
+
+  if (carrier || insuranceValue.bodily_injury || insuranceValue.medical_payments || insuranceValue.um_uim || insuranceValue.property_damage) {
+    const policyPayload: Record<string, string> = {};
+    if (carrier) policyPayload.carrier = String(carrier).trim();
+    if (insuranceValue.bodily_injury) policyPayload.bodily_injury = String(insuranceValue.bodily_injury).trim();
+    if (insuranceValue.medical_payments) policyPayload.medical_payments = String(insuranceValue.medical_payments).trim();
+    if (insuranceValue.um_uim) policyPayload.um_uim = String(insuranceValue.um_uim).trim();
+    if (insuranceValue.property_damage) policyPayload.property_damage = String(insuranceValue.property_damage).trim();
+    if (insuranceValue.policy_number) policyPayload.policy_number = String(insuranceValue.policy_number).trim();
+    addFieldValue(fieldValues, side === "1p" ? "policy_limits_1p" : "policy_limits_3p", JSON.stringify(policyPayload), filename);
+  }
+}
+
+function buildDeterministicHypergraph(documentIndex: Record<string, any>): HypergraphResult {
+  const aliasMap = buildAliasReverseMap();
+  const fieldValues = new Map<string, Map<string, { canonical: string; canonicalCount: Map<string, number>; sources: Set<string> }>>();
+  const addField = (field: string, value: unknown, source: string) => addFieldValue(fieldValues, field, value, source);
+
+  const rawFolders = documentIndex.folders || {};
+  for (const [_folderName, folderData] of Object.entries(rawFolders) as [string, any][]) {
+    const files = Array.isArray(folderData) ? folderData : folderData?.files;
+    if (!Array.isArray(files)) continue;
+
+    for (const file of files) {
+      const filename = file?.filename || "unknown";
+      const extracted = file?.extracted_data;
+      if (!extracted || typeof extracted !== "object") continue;
+
+      for (const [key, rawValue] of Object.entries(extracted as Record<string, any>)) {
+        const hgField = aliasMap.get(key);
+
+        if (hgField) {
+          addField(hgField, rawValue, filename);
+        }
+
+        if (typeof key === "string" && (key.startsWith("charges:") || key.startsWith("provider_charges:"))) {
+          addField(key, rawValue, filename);
+          continue;
+        }
+
+        if (key === "insurance_1p") {
+          addInsuranceFields("1p", rawValue as Record<string, any>, filename, fieldValues);
+          continue;
+        }
+        if (key === "insurance_3p") {
+          addInsuranceFields("3p", rawValue as Record<string, any>, filename, fieldValues);
+          continue;
+        }
+
+        if (key === "charges" || key === "provider_charges") {
+          if (rawValue && typeof rawValue === "object" && !Array.isArray(rawValue)) {
+            for (const [provider, chargeValue] of Object.entries(rawValue)) {
+              if (provider) {
+                addField(`charges:${provider}`, chargeValue, filename);
+              }
+            }
+          }
+          continue;
+        }
+
+        if (key === "health_insurance" && rawValue && typeof rawValue === "object" && !Array.isArray(rawValue)) {
+          addField("health_insurance", JSON.stringify(rawValue), filename);
+          continue;
+        }
+
+        if (key === "provider_balances" && rawValue && typeof rawValue === "object" && !Array.isArray(rawValue)) {
+          for (const [provider, balanceValue] of Object.entries(rawValue)) {
+            addField(`provider_balances:${provider}`, balanceValue, filename);
+          }
+          continue;
+        }
+      }
+    }
+  }
+
+  const hypergraph: HypergraphResult["hypergraph"] = {};
+  const conflicts: HypergraphResult["conflicts"] = [];
+
+  for (const [field, valueMap] of fieldValues) {
+    const orderedValues = Array.from(valueMap.values()).map((entry) => ({
+      value: entry.canonical,
+      sources: Array.from(entry.sources),
+      count: entry.sources.size,
+    }));
+    orderedValues.sort((a, b) => b.count - a.count);
+
+    const totalMentions = orderedValues.reduce((sum, item) => sum + item.count, 0);
+    const topCount = orderedValues[0]?.count || 0;
+    const secondCount = orderedValues[1]?.count || 0;
+    const consensusValue = orderedValues.length > 1 && topCount === secondCount
+      ? "UNCERTAIN"
+      : (orderedValues[0]?.value || "");
+    const confidence = totalMentions > 0 && consensusValue !== "UNCERTAIN"
+      ? topCount / totalMentions
+      : 0;
+
+    hypergraph[field] = {
+      values: orderedValues,
+      consensus: consensusValue,
+      confidence,
+      has_conflict: orderedValues.length > 1,
+    };
+
+    if (orderedValues.length > 1) {
+      const consensusSources = consensusValue === "UNCERTAIN" ? [] : (orderedValues[0]?.sources || []);
+      for (let i = 0; i < orderedValues.length; i++) {
+        if (i > 0 || consensusValue === "UNCERTAIN") {
+          const candidate = orderedValues[i];
+          conflicts.push({
+            field,
+            consensus_value: consensusValue,
+            consensus_sources: [...consensusSources],
+            outlier_value: candidate.value,
+            outlier_sources: [...candidate.sources],
+          });
+        }
+      }
+    }
+  }
+
+  return {
+    hypergraph,
+    conflicts: conflicts.filter((item, idx, arr) => {
+      const key = `${item.field}|${item.consensus_value}|${item.outlier_value}`;
+      return arr.findIndex((other) => `${other.field}|${other.consensus_value}|${other.outlier_value}` === key) === idx;
+    }),
+    summary: {
+      total_fields_analyzed: Object.keys(hypergraph).length,
+      fields_with_conflicts: Object.keys(hypergraph).filter((field) => hypergraph[field]?.has_conflict).length,
+      confidence_score: Object.keys(hypergraph).length > 0
+        ? Object.values(hypergraph).reduce((sum, node) => sum + (node.confidence || 0), 0) / Object.keys(hypergraph).length
+        : 0,
+    },
+  };
+}
+
+function buildHypergraphReviewPayload(hypergraph: HypergraphResult["hypergraph"]) {
+  return {
+    reviewTargets: Object.entries(hypergraph)
+      .filter(([, node]) => node.has_conflict || node.consensus === "UNCERTAIN")
+      .map(([field, node]) => ({
+        field,
+        consensus: node.consensus,
+        confidence: node.confidence,
+        values: node.values,
+      })),
+  };
+}
+
+function annotateConflictReasons(
+  conflictMap: Map<string, HypergraphResult["conflicts"][number]>,
+  annotations: Array<{ field: string; likely_reason: string }>
+): void {
+  const byField = new Map<string, string>();
+  for (const item of annotations) {
+    const field = (item.field || "").trim();
+    if (!field || !item.likely_reason) continue;
+    byField.set(field, String(item.likely_reason).trim());
+  }
+
+  for (const conflict of conflictMap.values()) {
+    const reason = byField.get(conflict.field);
+    if (reason) {
+      conflict.likely_reason = reason;
+    }
+  }
+}
+
+// Backward-compat helper: preserve old post-LMM augmentation path if needed.
+// Keep existing augmentation helper for fallback-only scenarios and debugging.
+function deprecatedAugmentHypergraphFromExtractedData(
+  hypergraph: Record<string, {
+    values: Array<{ value: string; sources: string[]; count: number }>;
+    consensus: string;
+    confidence: number;
+    has_conflict: boolean;
+  }>,
+  conflictMap: Map<string, any>,
+  documentIndex: Record<string, any>
+): void {
+  augmentHypergraphFromExtractedData(hypergraph, conflictMap, documentIndex);
 }
 
 /**
@@ -3515,247 +3846,40 @@ async function generateHypergraph(
     model: 'groq'
   };
 
-  const HYPERGRAPH_CHUNK_MAX_CHARS = 55000;
+  const deterministic = buildDeterministicHypergraph(documentIndex);
+  const fields = Object.keys(deterministic.hypergraph);
+  const mergedHypergraph = deterministic.hypergraph;
 
-  const compactScalar = (value: unknown): unknown => {
-    if (value === null || value === undefined) return null;
-    if (typeof value === "string") {
-      const compact = value.trim().replace(/\s+/g, " ");
-      return compact.length > 280 ? `${compact.slice(0, 280)}...` : compact;
+  const conflictMap = new Map<string, HypergraphResult["conflicts"][number]>();
+  for (const conflict of deterministic.conflicts) {
+    const key = `${conflict.field}|${conflict.consensus_value}|${conflict.outlier_value}`;
+    if (!conflictMap.has(key)) {
+      conflictMap.set(key, { ...conflict });
     }
-    if (typeof value === "number" || typeof value === "boolean") return value;
-    return null;
-  };
-
-  const compactValue = (value: unknown, depth = 0): unknown => {
-    if (depth > 4) return compactScalar(value);
-    const scalar = compactScalar(value);
-    if (scalar !== null) return scalar;
-
-    if (Array.isArray(value)) {
-      return value.slice(0, 25).map((entry) => compactValue(entry, depth + 1));
-    }
-
-    if (value && typeof value === "object") {
-      const result: Record<string, unknown> = {};
-      let keyCount = 0;
-      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-        if (keyCount >= 40) break;
-        const lowered = key.toLowerCase();
-        if (
-          lowered.includes("text") ||
-          lowered.includes("content") ||
-          lowered.includes("ocr") ||
-          lowered.includes("raw")
-        ) {
-          continue;
-        }
-        result[key] = compactValue(child, depth + 1);
-        keyCount++;
-      }
-      return result;
-    }
-
-    return null;
-  };
-
-  const compactFolders: Record<string, { files: any[] }> = {};
-  for (const [folderName, folderData] of Object.entries(documentIndex.folders || {}) as [string, any][]) {
-    const files = Array.isArray(folderData) ? folderData : folderData?.files;
-    if (!Array.isArray(files)) continue;
-
-    compactFolders[folderName] = {
-      files: files.map((file: any) => {
-        const compact: Record<string, unknown> = {
-          filename: file?.filename,
-          type: file?.type,
-          date: file?.date,
-          key_info: typeof file?.key_info === "string" ? file.key_info.slice(0, 320) : file?.key_info,
-          has_handwritten_data: file?.has_handwritten_data,
-          handwritten_fields: Array.isArray(file?.handwritten_fields)
-            ? file.handwritten_fields.slice(0, 12)
-            : [],
-          issues: typeof file?.issues === "string" ? file.issues.slice(0, 220) : file?.issues,
-        };
-        if (file?.extracted_data) {
-          compact.extracted_data = compactValue(file.extracted_data);
-        }
-        return compact;
-      }),
-    };
   }
 
-  const buildChunkPayload = (foldersSubset: Record<string, { files: any[] }>) => ({
-    case_name: documentIndex.case_name,
-    case_phase: documentIndex.case_phase,
-    practice_area: documentIndex.practice_area,
-    folders: foldersSubset,
-  });
-
-  const chunkPayloads: Array<{ id: number; payload: Record<string, any> }> = [];
-  let currentFolders: Record<string, { files: any[] }> = {};
-
-  const currentLength = (candidate: Record<string, { files: any[] }>) =>
-    JSON.stringify(buildChunkPayload(candidate)).length;
-
-  const pushCurrentChunk = () => {
-    if (Object.keys(currentFolders).length === 0) return;
-    chunkPayloads.push({
-      id: chunkPayloads.length + 1,
-      payload: buildChunkPayload(currentFolders),
-    });
-    currentFolders = {};
-  };
-
-  for (const [folderName, folderData] of Object.entries(compactFolders)) {
-    const folderOnly = { [folderName]: folderData };
-    const mergedCandidate = { ...currentFolders, ...folderOnly };
-
-    if (currentLength(mergedCandidate) <= HYPERGRAPH_CHUNK_MAX_CHARS) {
-      currentFolders = mergedCandidate;
-      continue;
-    }
-
-    pushCurrentChunk();
-
-    // If a folder alone is too large, split by file batches.
-    if (currentLength(folderOnly) > HYPERGRAPH_CHUNK_MAX_CHARS) {
-      let runningFiles: any[] = [];
-      for (const file of folderData.files) {
-        const testFolders = { [folderName]: { files: [...runningFiles, file] } };
-        if (currentLength(testFolders) > HYPERGRAPH_CHUNK_MAX_CHARS && runningFiles.length > 0) {
-          chunkPayloads.push({
-            id: chunkPayloads.length + 1,
-            payload: buildChunkPayload({ [folderName]: { files: runningFiles } }),
-          });
-          runningFiles = [file];
-        } else {
-          runningFiles.push(file);
-        }
-      }
-      if (runningFiles.length > 0) {
-        chunkPayloads.push({
-          id: chunkPayloads.length + 1,
-          payload: buildChunkPayload({ [folderName]: { files: runningFiles } }),
-        });
-      }
-      continue;
-    }
-
-    currentFolders = folderOnly;
-  }
-  pushCurrentChunk();
-
-  const chunkCount = Math.max(1, chunkPayloads.length);
-  console.log(`[Hypergraph] Running ${chunkCount} chunk(s) with max ~${HYPERGRAPH_CHUNK_MAX_CHARS} chars per chunk`);
-
-  const chunkResults: HypergraphResult[] = [];
-
-  for (const chunk of chunkPayloads) {
-    const chunkJson = JSON.stringify(chunk.payload, null, 2);
-    console.log(`[Hypergraph] Chunk ${chunk.id}/${chunkCount} input length: ${chunkJson.length} chars`);
-
-    let chunkResult: HypergraphResult = {
-      hypergraph: {},
-      conflicts: [],
-      summary: {
-        total_fields_analyzed: 0,
-        fields_with_conflicts: 0,
-        confidence_score: 0,
-      },
-    };
-
+  const reviewTargets = buildHypergraphReviewPayload(mergedHypergraph);
+  if (reviewTargets.reviewTargets.length > 0) {
     try {
-      const groqResult = await generateHypergraphWithGptOss(
-        chunkJson,
-        chunk.id,
-        chunkCount,
-        getHypergraphPrompt(practiceArea)
-      );
-
-      chunkResult = groqResult.result;
-      usage.inputTokensNew += groqResult.usage.inputTokens;
-      usage.outputTokens += groqResult.usage.outputTokens;
+      const payloadJson = JSON.stringify(reviewTargets, null, 2);
+      const llmReview = await generateHypergraphConflictReviewWithGptOss(payloadJson);
+      usage.inputTokensNew += llmReview.usage.inputTokens;
+      usage.outputTokens += llmReview.usage.outputTokens;
       usage.apiCalls += 1;
-    } catch (e) {
-      console.error(`[Hypergraph] Failed to process chunk ${chunk.id}:`, e);
+      annotateConflictReasons(conflictMap, llmReview.result.annotations);
+      console.log(`[Hypergraph] Reviewed ${reviewTargets.reviewTargets.length} uncertain/conflict candidates with LLM`);
+    } catch (error) {
+      console.warn("[Hypergraph] Conflict review call failed; proceeding without generated reasons", error);
     }
-
-    chunkResults.push(chunkResult);
   }
 
   usage.inputTokens = usage.inputTokensNew + usage.inputTokensCacheWrite + usage.inputTokensCacheRead;
 
-  const mergedHypergraph: HypergraphResult["hypergraph"] = {};
-  const conflictMap = new Map<string, HypergraphResult["conflicts"][number]>();
-
-  for (const chunkResult of chunkResults) {
-    for (const [field, node] of Object.entries(chunkResult.hypergraph || {})) {
-      const existing = mergedHypergraph[field] || {
-        values: [],
-        consensus: "",
-        confidence: 0,
-        has_conflict: false,
-      };
-
-      const valueMap = new Map<string, { value: string; sources: Set<string> }>();
-      for (const prior of existing.values) {
-        valueMap.set(String(prior.value), {
-          value: String(prior.value),
-          sources: new Set(prior.sources || []),
-        });
-      }
-      for (const incoming of node.values || []) {
-        const key = String(incoming.value);
-        const item = valueMap.get(key) || { value: key, sources: new Set<string>() };
-        for (const source of incoming.sources || []) item.sources.add(source);
-        valueMap.set(key, item);
-      }
-
-      const mergedValues = Array.from(valueMap.values()).map((item) => ({
-        value: item.value,
-        sources: Array.from(item.sources),
-        count: item.sources.size,
-      }));
-      mergedValues.sort((a, b) => b.count - a.count);
-      const consensus = mergedValues[0]?.value || "";
-      const totalMentions = mergedValues.reduce((sum, item) => sum + item.count, 0);
-
-      mergedHypergraph[field] = {
-        values: mergedValues,
-        consensus,
-        confidence: totalMentions > 0 ? (mergedValues[0]?.count || 0) / totalMentions : 0,
-        has_conflict: mergedValues.length > 1,
-      };
-    }
-
-    for (const conflict of chunkResult.conflicts || []) {
-      const key = `${conflict.field}|${conflict.consensus_value}|${conflict.outlier_value}`;
-      if (!conflictMap.has(key)) {
-        conflictMap.set(key, conflict);
-      } else {
-        const existing = conflictMap.get(key)!;
-        existing.consensus_sources = Array.from(
-          new Set([...(existing.consensus_sources || []), ...(conflict.consensus_sources || [])])
-        );
-        existing.outlier_sources = Array.from(
-          new Set([...(existing.outlier_sources || []), ...(conflict.outlier_sources || [])])
-        );
-        if (!existing.likely_reason && conflict.likely_reason) {
-          existing.likely_reason = conflict.likely_reason;
-        }
-      }
-    }
+  // Optional fallback path for diagnostics
+  if (process.env.HYPERGRAPH_USE_LLm_AUGMENT === "true") {
+    deprecatedAugmentHypergraphFromExtractedData(mergedHypergraph, conflictMap, documentIndex);
   }
 
-  // ======================================================================
-  // Programmatic augmentation: scan ALL extracted_data across every
-  // document to ensure the hypergraph has accurate source counts.
-  // The LLM often misses values when the index is large/chunked.
-  // ======================================================================
-  augmentHypergraphFromExtractedData(mergedHypergraph, conflictMap, documentIndex);
-
-  const fields = Object.keys(mergedHypergraph);
   const fieldsWithConflicts = fields.filter((field) => mergedHypergraph[field].has_conflict).length;
   const avgConfidence = fields.length > 0
     ? fields.reduce((sum, field) => sum + (mergedHypergraph[field].confidence || 0), 0) / fields.length

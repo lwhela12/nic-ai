@@ -10,7 +10,7 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import { readFile, writeFile, mkdir } from "fs/promises";
+import { readFile, writeFile, mkdir, stat } from "fs/promises";
 import { join, dirname, resolve, sep } from "path";
 import { generateDocument, type DocumentType } from "./doc-agent";
 import { readDocument } from "./doc-reader";
@@ -77,6 +77,31 @@ interface AgentDocumentView {
 
 const CASE_CONTEXT_MAX_CHARS = 180000;
 const INDEX_SLICE_MAX_CHARS = 12000;
+const CONFLICT_BATCH_DEFAULT = 25;
+const CONFLICT_BATCH_MAX = 80;
+const KNOWLEDGE_PREVIEW_CHARS = 420;
+const KNOWLEDGE_META_INDEX_MAX_CHARS = 12000;
+const KNOWLEDGE_META_INDEX_PATH = ".pi_tool/knowledge/meta_index.json";
+
+interface MetaKnowledgeSection {
+  id?: string;
+  title: string;
+  filename: string;
+  path: string;
+  preview: string;
+  char_count: number;
+}
+
+interface MetaKnowledgeIndex {
+  indexed_at: string;
+  source: string;
+  practice_area?: string;
+  jurisdiction?: string;
+  section_count: number;
+  sections: MetaKnowledgeSection[];
+  source_mtime?: number;
+  section_mtimes?: Record<string, number>;
+}
 
 // Tool definitions
 const TOOLS: Anthropic.Tool[] = [
@@ -406,10 +431,19 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "get_conflicts",
-    description: "Get all document conflicts that need review. Returns all needs_review items with their conflicting values and sources. Use this when the user wants to review conflicts. After reviewing, present your recommendations in batches - group easy ones together, flag complex ones for individual review.",
+    description: "Get document conflicts that need review. Returns a paged set of needs_review items with their conflicting values and sources. Use this when the user wants to review conflicts in batches.",
     input_schema: {
       type: "object" as const,
-      properties: {},
+      properties: {
+        offset: {
+          type: "number",
+          description: "0-based conflict offset to start paging from."
+        },
+        limit: {
+          type: "number",
+          description: "Maximum items in this batch. Default 25, max 80."
+        }
+      },
       required: []
     }
   },
@@ -828,6 +862,234 @@ function normalizeDocumentViewSortDirection(value: any): "asc" | "desc" | undefi
     return normalized;
   }
   return undefined;
+}
+
+function truncateForIndex(value: string, max = KNOWLEDGE_PREVIEW_CHARS): string {
+  const normalized = (value || "").trim().replace(/\s+/g, " ");
+  if (!normalized) return "";
+  return normalized.length <= max ? normalized : `${normalized.slice(0, max)}...`;
+}
+
+function toMetaKnowledgePath(filename: string): string {
+  return `.pi_tool/knowledge/${filename}`;
+}
+
+async function getFileMtimeMs(filePath: string): Promise<number | null> {
+  try {
+    const stats = await stat(filePath);
+    return stats.mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+function getManifestSections(manifest: Record<string, any> | null): any[] {
+  if (!manifest || !Array.isArray(manifest.sections)) return [];
+  return manifest.sections.filter((section: any) => section && typeof section === "object");
+}
+
+async function buildMetaKnowledgeIndex(
+  firmRoot: string,
+  manifest?: Record<string, any>,
+  manifestMtimeMs?: number
+): Promise<MetaKnowledgeIndex | null> {
+  const knowledgeDir = join(firmRoot, ".pi_tool", "knowledge");
+  const manifestPath = join(knowledgeDir, "manifest.json");
+
+  try {
+    const loadedManifest = manifest
+      || safeJsonParse<Record<string, any>>(await readFile(manifestPath, "utf-8"));
+    if (!loadedManifest) return null;
+
+    const sectionsData = getManifestSections(loadedManifest);
+    const sectionMtimes: Record<string, number> = {};
+    const sections: MetaKnowledgeSection[] = [];
+    const seenFilenames = new Set<string>();
+
+    for (const section of sectionsData) {
+      const filename = normalizeSectionFilename(section) || "";
+      if (!filename || seenFilenames.has(filename)) {
+        continue;
+      }
+      seenFilenames.add(filename);
+
+      const title = typeof section.title === "string" && section.title.trim()
+        ? section.title.trim()
+        : typeof section.name === "string" && section.name.trim()
+          ? section.name.trim()
+          : filename;
+
+      let snippet = "";
+      let charCount = 0;
+      const sectionPath = join(knowledgeDir, filename);
+      const sectionMtime = await getFileMtimeMs(sectionPath);
+      if (sectionMtime !== null) {
+        sectionMtimes[filename] = sectionMtime;
+      }
+
+      if (sectionMtime !== null) {
+        try {
+          const sectionContent = await readFile(sectionPath, "utf-8");
+          charCount = sectionContent.length;
+          const firstLine = sectionContent.split(/\r?\n/)[0] || "";
+          const body = sectionContent.slice(firstLine.length).trim();
+          snippet = truncateForIndex(`${firstLine} ${body}`.trim());
+        } catch {
+          // Ignore unreadable sections
+        }
+      }
+
+      sections.push({
+        id: typeof section.id === "string" ? section.id : undefined,
+        title,
+        filename,
+        path: toMetaKnowledgePath(filename),
+        preview: snippet,
+        char_count: charCount,
+      } satisfies MetaKnowledgeSection);
+    }
+
+    return {
+      indexed_at: new Date().toISOString(),
+      source: ".pi_tool/knowledge/manifest.json",
+      source_mtime: manifestMtimeMs,
+      practice_area: typeof loadedManifest.practiceArea === "string"
+        ? loadedManifest.practiceArea
+        : typeof loadedManifest.practice_area === "string"
+          ? loadedManifest.practice_area
+          : undefined,
+      jurisdiction: typeof loadedManifest.jurisdiction === "string"
+        ? loadedManifest.jurisdiction
+        : typeof loadedManifest.jurisdiction_area === "string"
+          ? loadedManifest.jurisdiction_area
+          : undefined,
+      section_count: sections.length,
+      sections,
+      section_mtimes: sectionMtimes,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function getOrBuildMetaKnowledgeIndex(firmRoot: string): Promise<MetaKnowledgeIndex | null> {
+  const knowledgeDir = join(firmRoot, ".pi_tool", "knowledge");
+  const manifestPath = join(knowledgeDir, "manifest.json");
+  const cachePath = join(firmRoot, KNOWLEDGE_META_INDEX_PATH);
+
+  const manifestRaw = await readFile(manifestPath, "utf-8").catch(() => null);
+  if (!manifestRaw) return null;
+  const manifest = safeJsonParse<Record<string, any>>(manifestRaw);
+  if (!manifest) return null;
+
+  const sectionsData = getManifestSections(manifest);
+  const sourceMtime = await getFileMtimeMs(manifestPath);
+  if (sourceMtime === null) {
+    return buildMetaKnowledgeIndex(firmRoot, manifest, undefined);
+  }
+  const manifestPracticeArea = typeof manifest.practiceArea === "string"
+    ? manifest.practiceArea
+    : typeof manifest.practice_area === "string"
+      ? manifest.practice_area
+      : undefined;
+  const manifestJurisdiction = typeof manifest.jurisdiction === "string"
+    ? manifest.jurisdiction
+    : typeof manifest.jurisdiction_area === "string"
+      ? manifest.jurisdiction_area
+      : undefined;
+
+  const cachedRaw = await readFile(cachePath, "utf-8").catch(() => null);
+  const cached = safeJsonParse<MetaKnowledgeIndex>(cachedRaw || "");
+  if (
+    cached &&
+    cached.source === ".pi_tool/knowledge/manifest.json" &&
+    cached.section_count === sectionsData.length &&
+    cached.source_mtime === sourceMtime &&
+    cached.practice_area === manifestPracticeArea &&
+    cached.jurisdiction === manifestJurisdiction &&
+    cached.section_mtimes
+  ) {
+    let matches = true;
+    const seen = new Set<string>();
+
+    for (const section of sectionsData) {
+      const filename = normalizeSectionFilename(section) || "";
+      if (!filename || seen.has(filename)) {
+        continue;
+      }
+      seen.add(filename);
+
+      const currentMtime = await getFileMtimeMs(join(knowledgeDir, filename));
+      if (currentMtime === null || cached.section_mtimes[filename] !== currentMtime) {
+        matches = false;
+        break;
+      }
+    }
+
+    if (matches) {
+      const cachedFiles = Object.keys(cached.section_mtimes || {});
+      if (seen.size === cachedFiles.length && cachedFiles.every((file) => seen.has(file))) {
+        return cached;
+      }
+    }
+  }
+
+  const rebuilt = await buildMetaKnowledgeIndex(firmRoot, manifest, sourceMtime);
+  if (!rebuilt) return null;
+
+  await writeFile(cachePath, JSON.stringify(rebuilt, null, 2)).catch(() => {});
+  return rebuilt;
+}
+
+function buildMetaKnowledgeIndexText(index: MetaKnowledgeIndex | null): string {
+  if (!index) {
+    return "## PRACTICE KNOWLEDGE (META INDEX)\nNo knowledge index available in this case folder.\n";
+  }
+
+  const lines: string[] = [
+    "## PRACTICE KNOWLEDGE (META INDEX)",
+    `Source: ${index.source}`,
+    `Jurisdiction: ${index.jurisdiction || "not specified"} | Practice Area: ${index.practice_area || "not specified"}`,
+    `Indexed: ${index.indexed_at}`,
+    `Sections: ${index.section_count}`,
+  ];
+
+  if (index.sections.length > 0) {
+    lines.push("");
+    for (const section of index.sections) {
+      const header = section.id ? `${section.title} (${section.id})` : section.title;
+      lines.push(`- ${header}: ${section.path} (${section.char_count} chars)`);
+      if (section.preview) lines.push(`  Preview: ${section.preview}`);
+    }
+    lines.push(
+      "Use read_file(\".pi_tool/knowledge/<filename>\") to load any section you need for full context."
+    );
+  }
+
+  const rendered = lines.join("\n");
+  if (rendered.length <= KNOWLEDGE_META_INDEX_MAX_CHARS) {
+    return rendered;
+  }
+  return `${rendered.slice(0, KNOWLEDGE_META_INDEX_MAX_CHARS)}...`;
+}
+
+function buildMetaToolIndexText(): string {
+  const toolHints = [
+    "read_file — Use for case data and indexed artifacts (document_index.json, case_map.json, meta_index.json, per-folder indexes, and .pi_tool/knowledge/meta_index.json).",
+    "read_index_slice — Bounded reads of .pi_tool/document_index.json for deep conflict/data review.",
+    "rebuild_case_map — Regenerates .pi_tool/case_map.json from document_index.json.",
+    "rerun_hypergraph — Re-runs hypergraph from document_index.json and can refresh needs_review.",
+    "update_index / update_case_summary / update_file_entry — Write into document_index.json fields and conflict decisions.",
+    "generate_document — Delegates formal document drafting to the doc agent.",
+    "create_document_view / get_conflicts / batch_resolve_conflicts / resolve_conflict — Review/resolve needs_review items in the same session.",
+  ];
+
+  return [
+    "## TOOL INDEX (META)",
+    "Core tools and where to use them:",
+    ...toolHints.map((hint) => `- ${hint}`),
+    "For full tool metadata, use the direct tool schema in this message context.",
+  ].join("\n");
 }
 
 function extractFirstJsonCodeFence(content: string): Record<string, any> | null {
@@ -1787,12 +2049,27 @@ async function executeTool(
 
         const rawNeedsReview: any[] = index.needs_review || [];
         const needsReview: any[] = dedupeNeedsReviewEntries(rawNeedsReview);
+        const offsetRaw = Number(toolInput.offset);
+        const limitRaw = Number(toolInput.limit);
+        const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0
+          ? Math.floor(offsetRaw)
+          : 0;
+        const limit = Number.isFinite(limitRaw) && limitRaw > 0
+          ? Math.min(Math.floor(limitRaw), CONFLICT_BATCH_MAX)
+          : CONFLICT_BATCH_DEFAULT;
+        const clampedOffset = Math.min(offset, needsReview.length);
+        const end = Math.min(clampedOffset + limit, needsReview.length);
 
         if (needsReview.length === 0) {
           return JSON.stringify({
             status: "all_done",
             message: "All conflicts have been resolved! No more items to review.",
             count: 0,
+            returned: 0,
+            offset: 0,
+            limit: 0,
+            has_more: false,
+            next_offset: null,
             items: []
           });
         }
@@ -1810,8 +2087,8 @@ async function executeTool(
           }
         }
 
-        // Return ALL items with resolved sources
-        const items = needsReview.map((item, idx) => {
+        // Return requested page with resolved sources
+        const items = needsReview.slice(clampedOffset, end).map((item, batchIndex) => {
           const resolvedSources = (item.sources || []).map((source: string) => {
             const match = source.match(/^([^(]+)/);
             const filename = match ? match[1].trim() : source.trim();
@@ -1823,7 +2100,7 @@ async function executeTool(
           });
 
           return {
-            index: idx + 1,
+            index: clampedOffset + batchIndex + 1,
             field: item.field,
             conflicting_values: item.conflicting_values,
             sources: item.sources,
@@ -1835,6 +2112,11 @@ async function executeTool(
         return JSON.stringify({
           status: "conflicts_found",
           count: needsReview.length,
+          returned: items.length,
+          offset: clampedOffset,
+          limit,
+          has_more: end < needsReview.length,
+          next_offset: end < needsReview.length ? end : null,
           items
         });
       }
@@ -2139,31 +2421,12 @@ async function buildContext(caseFolder: string): Promise<string> {
 
     const metaIndexView = buildMetaIndexPromptView(metaIndexData as any);
     parts.push(`\n${metaIndexView}`);
+    parts.push(`\n${buildMetaToolIndexText()}`);
 
-    // Load knowledge bank
     try {
-      const knowledgePath = join(firmRoot, ".pi_tool", "knowledge", "manifest.json");
-      const manifest = JSON.parse(await readFile(knowledgePath, "utf-8"));
-      parts.push(`\n## PRACTICE KNOWLEDGE\nArea: ${manifest.practiceArea} (${manifest.jurisdiction})`);
-
-      // Load full knowledge sections for maximum legal context fidelity.
-      if (manifest.sections) {
-        const knowledgeSections: string[] = [];
-        for (const section of manifest.sections) {
-          try {
-            const sectionFilename = normalizeSectionFilename(section);
-            if (!sectionFilename) { continue; }
-            const sectionPath = join(firmRoot, ".pi_tool", "knowledge", sectionFilename);
-            const content = await readFile(sectionPath, "utf-8");
-            knowledgeSections.push(`### ${section.title}\n${content}`);
-          } catch (e) {
-            // Section file missing or unreadable
-          }
-        }
-        if (knowledgeSections.length > 0) {
-          parts.push(`\n## PRACTICE KNOWLEDGE (FULL)\n${knowledgeSections.join("\n\n---\n\n")}`);
-          }
-      }
+      // Load contracted knowledge index (meta + on-demand read_file)
+      const knowledgeIndex = await getOrBuildMetaKnowledgeIndex(firmRoot);
+      parts.push(`\n${buildMetaKnowledgeIndexText(knowledgeIndex)}`);
     } catch (e) {
       // No knowledge base for this firm
     }
@@ -2314,7 +2577,7 @@ Requirements:
 - Set sort_by / sort_direction when the user requests ordering (e.g., chronological).
 - After creating the view, explain what you selected and why in normal chat text.
 
-7. **Review Document Conflicts**: When the user wants to review conflicts, use get_conflicts to get all items, analyze them, make recommendations, and present them in batches for approval.
+7. **Review Document Conflicts**: When the user wants to review conflicts, use get_conflicts in paginated batches and resolve one batch at a time.
 
 8. **Build Hearing Evidence Packets**: Use create_evidence_packet to plan, then build_evidence_packet to generate. Always review the document list with the user before building.
 
@@ -2345,7 +2608,7 @@ Use this when the user says things like:
 
 ### How to conduct a batch review:
 
-1. **Get all conflicts** - Call get_conflicts to retrieve everything
+1. **Get first batch** - Call get_conflicts with defaults (offset 0, limit 25) to retrieve the first batch.
 
 2. **Analyze and categorize** - Group conflicts by:
    - **Auto-resolve** (high confidence): OCR errors, formatting differences, clear typos
@@ -2364,7 +2627,10 @@ Use this when the user says things like:
 
 4. **Batch resolve** - When user approves, call batch_resolve_conflicts with all approved resolutions at once
 
-5. **Verify and continue** - After batch_resolve_conflicts, if any conflicts remain (check the "remaining" count in the response), call get_conflicts again and resolve them. Do NOT report completion until remaining is 0. Keep going until every conflict is resolved or explicitly deferred by the user.
+5. **Verify and continue** - After batch_resolve_conflicts, if any conflicts remain:
+   - Use the response "has_more" / "next_offset" fields from get_conflicts for pagination.
+   - Call get_conflicts again with offset=next_offset until has_more is false.
+   - Do NOT report completion until remaining is 0 or the user explicitly defers unresolved items.
 
 ### Example flow:
 

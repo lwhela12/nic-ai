@@ -713,6 +713,53 @@ Return ONLY the JSON hypergraph for this chunk. No explanation, no planning - ju
   };
 }
 
+/**
+ * Generate concise conflict annotations for deterministic hypergraph review.
+ *
+ * Called after deterministic conflict detection to add lightweight context on
+ * what to investigate (e.g., duplicate IDs, stale values, partial billing).
+ */
+export async function generateHypergraphConflictReviewWithGptOss(
+  reviewPayload: string
+): Promise<{ result: { annotations: Array<{ field: string; likely_reason: string }> }; usage: GroqUsage }> {
+  const messages = [
+    {
+      role: "system" as const,
+      content: `You are a legal case data consistency reviewer.
+
+Only reason over the provided hypergraph candidates.
+
+Return a single JSON object with this exact shape and no extra text:
+{
+  "annotations": [
+    {
+      "field": "<field_name>",
+      "likely_reason": "<short likely explanation for why values conflict>"
+    }
+  ]
+}
+
+If you cannot infer a reason, return the field with a concise best-effort reason.
+You can use wording like "signature date vs. loss date", "partial vs. full amount", or "source document typo".
+`,
+    },
+    {
+      role: "user" as const,
+      content: reviewPayload,
+    },
+  ];
+
+  const { content, usage } = await callTextWithFallback(messages, "hypergraph-review");
+  const parsed = JSON.parse(content);
+
+  return {
+    result: {
+      annotations: Array.isArray(parsed.annotations) ? parsed.annotations : [],
+    },
+    usage,
+  };
+}
+
 // ============================================================================
 // Case Summary Generation with GPT-OSS 120B → 20B Fallback
 // ============================================================================
