@@ -46,9 +46,9 @@ const ESTIMATED_VISION_TOKENS = 20_000;
 
 /** Adaptive vision quality targets */
 const MAX_VISION_PAGES = 5;
-const VISION_DPI_HIGH = 200;
-const VISION_DPI_MEDIUM = 150;
-const VISION_DPI_LOW = 120;
+const VISION_DPI_HIGH = 150;
+const VISION_DPI_MEDIUM = 120;
+const VISION_DPI_LOW = 100;
 const SIZE_BASED_DPI_SAMPLES = [
   { maxFileMB: 4, dpi: VISION_DPI_HIGH },
   { maxFileMB: 10, dpi: VISION_DPI_MEDIUM },
@@ -464,7 +464,7 @@ export async function extractWithVision(
       imageBlocks.push({
         type: "image_url" as const,
         image_url: {
-          url: `data:image/png;base64,${images[i].base64}`,
+          url: `data:image/jpeg;base64,${images[i].base64}`,
         },
       });
       (images[i] as any).base64 = ''; // Release original base64 immediately

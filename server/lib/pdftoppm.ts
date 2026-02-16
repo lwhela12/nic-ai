@@ -1,5 +1,8 @@
 /**
- * PDF-to-PNG conversion using poppler's pdftoppm/pdfinfo.
+ * PDF-to-JPEG conversion using poppler's pdftoppm/pdfinfo.
+ *
+ * Uses JPEG instead of PNG for 5-10x smaller file sizes on scanned documents,
+ * which dramatically reduces memory pressure during vision API calls.
  *
  * Follows the same binary resolution pattern as pdftotext.ts.
  */
@@ -15,7 +18,7 @@ const execFileAsync = promisify(execFile);
 
 export interface PdfPageImage {
   page: number;
-  base64: string; // PNG data as base64
+  base64: string; // JPEG data as base64
   sizeBytes: number;
 }
 
@@ -86,13 +89,13 @@ export async function getPdfPageCount(pdfPath: string): Promise<number> {
 }
 
 /**
- * Convert PDF pages to PNG images using pdftoppm.
+ * Convert PDF pages to JPEG images using pdftoppm.
  *
  * @param pdfPath  Absolute path to the PDF
  * @param firstPage  First page to convert (1-based)
  * @param lastPage   Last page to convert (1-based, inclusive)
  * @param dpi        Resolution (default 200)
- * @returns Array of PdfPageImage with base64-encoded PNG data
+ * @returns Array of PdfPageImage with base64-encoded JPEG data
  */
 export async function pdfToImages(
   pdfPath: string,
@@ -106,7 +109,7 @@ export async function pdfToImages(
     await execFileAsync(
       resolvePdftoppmCommand(),
       [
-        "-png",
+        "-jpeg",
         "-r", String(dpi),
         "-f", String(firstPage),
         "-l", String(lastPage),
@@ -122,12 +125,12 @@ export async function pdfToImages(
 
     const images: PdfPageImage[] = [];
     for (let page = firstPage; page <= lastPage; page++) {
-      // pdftoppm names files like prefix-01.png, prefix-02.png, etc.
-      // The number of digits depends on total pages: could be -1.png, -01.png, -001.png
+      // pdftoppm names files like prefix-01.jpg, prefix-02.jpg, etc.
+      // The number of digits depends on total pages: could be -1.jpg, -01.jpg, -001.jpg
       const candidates = [
-        `${prefix}-${page}.png`,
-        `${prefix}-${String(page).padStart(2, "0")}.png`,
-        `${prefix}-${String(page).padStart(3, "0")}.png`,
+        `${prefix}-${page}.jpg`,
+        `${prefix}-${String(page).padStart(2, "0")}.jpg`,
+        `${prefix}-${String(page).padStart(3, "0")}.jpg`,
       ];
 
       let found = false;
@@ -136,7 +139,7 @@ export async function pdfToImages(
           let buf: Buffer | null = await readFile(candidate);
           const b64 = buf.toString("base64");
           const size = buf.length;
-          buf = null; // Release raw PNG buffer immediately
+          buf = null; // Release raw JPEG buffer immediately
           images.push({ page, base64: b64, sizeBytes: size });
           // Clean up temp file
           await unlink(candidate).catch(() => {});
@@ -155,9 +158,9 @@ export async function pdfToImages(
     // Clean up any temp files on error
     for (let page = firstPage; page <= lastPage; page++) {
       for (const suffix of [
-        `${page}.png`,
-        `${String(page).padStart(2, "0")}.png`,
-        `${String(page).padStart(3, "0")}.png`,
+        `${page}.jpg`,
+        `${String(page).padStart(2, "0")}.jpg`,
+        `${String(page).padStart(3, "0")}.jpg`,
       ]) {
         await unlink(`${prefix}-${suffix}`).catch(() => {});
       }
