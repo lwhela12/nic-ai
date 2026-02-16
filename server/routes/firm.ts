@@ -2250,103 +2250,16 @@ async function indexCase(
     }
 
     // Step 2: Process files in a steady stream (max concurrent workers)
+    // Accumulators are declared here so workers can build results incrementally,
+    // allowing each extraction to be GC'd immediately after processing.
     const CONCURRENCY_LIMIT = 10;
     const totalFiles = files.length;
     let completedCount = 0;
-    const extractions: FileExtraction[] = [];
+    let successCount = 0;
+    let failCount = 0;
     let nextFileIndex = 0;
 
-    console.log(`\n========== PROCESSING ${files.length} FILES (max concurrent: ${CONCURRENCY_LIMIT}) =========`);
-    onProgress({ type: "status", caseName, message: `Processing ${files.length} files (steady stream, max ${CONCURRENCY_LIMIT} concurrent)...` });
-
-    const processWorker = async () => {
-      while (nextFileIndex < totalFiles) {
-        const fileIndex = nextFileIndex++;
-        const filePath = files[fileIndex];
-
-        try {
-          const classified = await classifyFile(caseFolder, filePath);
-          const extraction = classified.useText
-            ? await extractFileText(
-                classified,
-                fileIndex,
-                totalFiles,
-                options?.practiceArea,
-                (event) => { onProgress({ ...event, caseName }); }
-              )
-            : classified.isPdf
-              ? await extractFileVision(
-                  classified,
-                  fileIndex,
-                  totalFiles,
-                  options?.practiceArea,
-                  (event) => { onProgress({ ...event, caseName }); }
-                )
-              : await extractFileVision(
-                  classified,
-                  fileIndex,
-                  totalFiles,
-                  options?.practiceArea,
-                  (event) => { onProgress({ ...event, caseName }); }
-                );
-
-          extractions.push(extraction);
-        } catch (err) {
-          const fallbackFolder = dirname(filePath).replace(/\\/g, '/');
-          const fallbackFilename = filePath.split('/').pop() || filePath;
-          console.error(`[${fileIndex + 1}/${totalFiles}] Unhandled error for ${fallbackFilename}:`, err);
-          extractions.push({
-            filename: fallbackFilename,
-            folder: fallbackFolder || "root",
-            type: 'other' as const,
-            key_info: "Failed to extract",
-            has_handwritten_data: false,
-            handwritten_fields: [],
-            error: err instanceof Error ? err.message : String(err),
-          });
-        } finally {
-          completedCount += 1;
-          console.log(`--- Progress: ${completedCount}/${totalFiles} files complete ---`);
-
-          // Force garbage collection every 5 files to prevent memory accumulation
-          if (completedCount % 5 === 0 && typeof Bun !== 'undefined' && Bun.gc) {
-            Bun.gc(true);
-            console.log(`[gc] Forced garbage collection after ${completedCount} files`);
-          }
-        }
-      }
-    };
-
-    const workers = Array.from(
-      { length: Math.min(CONCURRENCY_LIMIT, totalFiles) },
-      () => processWorker()
-    );
-
-    await Promise.all(workers);
-
-
-    // Aggregate extraction usage with cache breakdown
-    for (const extraction of extractions) {
-      if (extraction.usage) {
-        totalUsage.groq.inputTokens += extraction.usage.inputTokens;
-        totalUsage.groq.inputTokensNew += extraction.usage.inputTokensNew || 0;
-        totalUsage.groq.inputTokensCacheWrite += extraction.usage.inputTokensCacheWrite || 0;
-        totalUsage.groq.inputTokensCacheRead += extraction.usage.inputTokensCacheRead || 0;
-        totalUsage.groq.outputTokens += extraction.usage.outputTokens;
-        totalUsage.groq.apiCalls += extraction.usage.apiCalls;
-      }
-    }
-
-    const successfulExtractions = extractions.filter(e => !e.error);
-    onProgress({
-      type: "extractions_complete",
-      caseName,
-      successful: successfulExtractions.length,
-      failed: extractions.length - successfulExtractions.length
-    });
-
-    // Step 3: Build preliminary index for hypergraph analysis
-    // For incremental mode, start with existing folders and merge new extractions
+    // Incremental folder building — populated inside workers, no extractions[] array needed
     const folders: Record<string, { files: Array<{
       doc_id?: string;
       filename: string;
@@ -2360,66 +2273,156 @@ async function indexCase(
     }> }> =
       isIncremental && existingIndex?.folders ? normalizeFolders(existingIndex.folders) : {};
     const runIssues: string[] = [];
+    const failedFiles: Array<{ filename: string; folder: string; error: string | undefined; failed_at: string }> = [];
 
-    for (const extraction of extractions) {
-      if (!folders[extraction.folder]) {
-        folders[extraction.folder] = { files: [] };
-      }
+    console.log(`\n========== PROCESSING ${files.length} FILES (max concurrent: ${CONCURRENCY_LIMIT}) =========`);
+    onProgress({ type: "status", caseName, message: `Processing ${files.length} files (steady stream, max ${CONCURRENCY_LIMIT} concurrent)...` });
 
-      // For incremental: remove existing entry for this file if it exists (update scenario)
-      if (isIncremental) {
-        folders[extraction.folder].files = folders[extraction.folder].files.filter(
-          (f: any) => f.filename !== extraction.filename
-        );
-      }
+    const processWorker = async () => {
+      while (nextFileIndex < totalFiles) {
+        const fileIndex = nextFileIndex++;
+        const filePath = files[fileIndex];
 
-      const fileEntry: {
-        doc_id?: string;
-        filename: string;
-        type: string;
-        key_info: string;
-        date?: string;
-        issues?: string;
-        has_handwritten_data: boolean;
-        handwritten_fields: string[];
-        extracted_data?: Record<string, any>;
-      } = {
-        doc_id: buildDocumentId(extraction.folder, extraction.filename),
-        filename: extraction.filename,
-        type: extraction.type,
-        key_info: extraction.key_info,
-        has_handwritten_data: false,
-        handwritten_fields: [],
-        extracted_data: extraction.extracted_data,
-      };
+        let extraction: FileExtraction | null = null;
+        try {
+          let classified: ClassifiedFile | null = await classifyFile(caseFolder, filePath);
+          extraction = classified.useText
+            ? await extractFileText(
+                classified,
+                fileIndex,
+                totalFiles,
+                options?.practiceArea,
+                (event) => { onProgress({ ...event, caseName }); }
+              )
+            : await extractFileVision(
+                classified,
+                fileIndex,
+                totalFiles,
+                options?.practiceArea,
+                (event) => { onProgress({ ...event, caseName }); }
+              );
+          classified = null; // Release classified (including extractedText) immediately
+        } catch (err) {
+          const fallbackFolder = dirname(filePath).replace(/\\/g, '/');
+          const fallbackFilename = filePath.split('/').pop() || filePath;
+          console.error(`[${fileIndex + 1}/${totalFiles}] Unhandled error for ${fallbackFilename}:`, err);
+          extraction = {
+            filename: fallbackFilename,
+            folder: fallbackFolder || "root",
+            type: 'other' as const,
+            key_info: "Failed to extract",
+            has_handwritten_data: false,
+            handwritten_fields: [],
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
 
-      const dateResolution = resolveDocumentDate(extraction);
-      const handwritingResolution = resolveHandwritingMetadata(extraction);
-      if (dateResolution.date) {
-        fileEntry.date = dateResolution.date;
-      }
-      fileEntry.has_handwritten_data = handwritingResolution.hasHandwrittenData;
-      fileEntry.handwritten_fields = handwritingResolution.handwrittenFields;
-      if (dateResolution.issue) {
-        fileEntry.issues = dateResolution.issue;
-        runIssues.push(`[Document Date] ${extraction.folder}/${extraction.filename}: ${dateResolution.issue}`);
-      }
-      if (handwritingResolution.issue) {
-        fileEntry.issues = fileEntry.issues
-          ? `${fileEntry.issues} ${handwritingResolution.issue}`
-          : handwritingResolution.issue;
-        runIssues.push(`[Handwriting] ${extraction.folder}/${extraction.filename}: ${handwritingResolution.issue}`);
-      }
-      if (extraction.error) {
-        const extractionIssue = `Extraction failed: ${extraction.error}`;
-        fileEntry.issues = fileEntry.issues
-          ? `${fileEntry.issues} ${extractionIssue}`
-          : extractionIssue;
-        runIssues.push(`[Extraction] ${extraction.folder}/${extraction.filename}: ${extraction.error}`);
-      }
+        // Aggregate usage incrementally
+        if (extraction!.usage) {
+          totalUsage.groq.inputTokens += extraction!.usage.inputTokens;
+          totalUsage.groq.inputTokensNew += extraction!.usage.inputTokensNew || 0;
+          totalUsage.groq.inputTokensCacheWrite += extraction!.usage.inputTokensCacheWrite || 0;
+          totalUsage.groq.inputTokensCacheRead += extraction!.usage.inputTokensCacheRead || 0;
+          totalUsage.groq.outputTokens += extraction!.usage.outputTokens;
+          totalUsage.groq.apiCalls += extraction!.usage.apiCalls;
+        }
 
-      folders[extraction.folder].files.push(fileEntry);
-    }
+        // Build folder entry incrementally
+        if (!folders[extraction!.folder]) {
+          folders[extraction!.folder] = { files: [] };
+        }
+        if (isIncremental) {
+          folders[extraction!.folder].files = folders[extraction!.folder].files.filter(
+            (f: any) => f.filename !== extraction!.filename
+          );
+        }
+
+        const fileEntry: {
+          doc_id?: string;
+          filename: string;
+          type: string;
+          key_info: string;
+          date?: string;
+          issues?: string;
+          has_handwritten_data: boolean;
+          handwritten_fields: string[];
+          extracted_data?: Record<string, any>;
+        } = {
+          doc_id: buildDocumentId(extraction!.folder, extraction!.filename),
+          filename: extraction!.filename,
+          type: extraction!.type,
+          key_info: extraction!.key_info,
+          has_handwritten_data: false,
+          handwritten_fields: [],
+          extracted_data: extraction!.extracted_data,
+        };
+
+        const dateResolution = resolveDocumentDate(extraction!);
+        const handwritingResolution = resolveHandwritingMetadata(extraction!);
+        if (dateResolution.date) {
+          fileEntry.date = dateResolution.date;
+        }
+        fileEntry.has_handwritten_data = handwritingResolution.hasHandwrittenData;
+        fileEntry.handwritten_fields = handwritingResolution.handwrittenFields;
+        if (dateResolution.issue) {
+          fileEntry.issues = dateResolution.issue;
+          runIssues.push(`[Document Date] ${extraction!.folder}/${extraction!.filename}: ${dateResolution.issue}`);
+        }
+        if (handwritingResolution.issue) {
+          fileEntry.issues = fileEntry.issues
+            ? `${fileEntry.issues} ${handwritingResolution.issue}`
+            : handwritingResolution.issue;
+          runIssues.push(`[Handwriting] ${extraction!.folder}/${extraction!.filename}: ${handwritingResolution.issue}`);
+        }
+        if (extraction!.error) {
+          const extractionIssue = `Extraction failed: ${extraction!.error}`;
+          fileEntry.issues = fileEntry.issues
+            ? `${fileEntry.issues} ${extractionIssue}`
+            : extractionIssue;
+          runIssues.push(`[Extraction] ${extraction!.folder}/${extraction!.filename}: ${extraction!.error}`);
+          failedFiles.push({
+            filename: extraction!.filename,
+            folder: extraction!.folder,
+            error: extraction!.error,
+            failed_at: new Date().toISOString(),
+          });
+          failCount++;
+        } else {
+          successCount++;
+        }
+
+        folders[extraction!.folder].files.push(fileEntry);
+
+        // Release extraction — its data has been transferred to folders/accumulators
+        extraction = null;
+
+        completedCount += 1;
+        console.log(`--- Progress: ${completedCount}/${totalFiles} files complete ---`);
+
+        // Force garbage collection every 5 files
+        if (completedCount % 5 === 0 && typeof Bun !== 'undefined' && Bun.gc) {
+          Bun.gc(true);
+          console.log(`[gc] Forced garbage collection after ${completedCount} files`);
+        }
+      }
+    };
+
+    const workers = Array.from(
+      { length: Math.min(CONCURRENCY_LIMIT, totalFiles) },
+      () => processWorker()
+    );
+
+    await Promise.all(workers);
+
+    onProgress({
+      type: "extractions_complete",
+      caseName,
+      successful: successCount,
+      failed: failCount
+    });
+
+    // Step 3: Build preliminary index for hypergraph analysis
+    // Folders were built incrementally during extraction above.
 
     // Step 4: Write initial document_index.json (before hypergraph/Sonnet)
     await mkdir(indexDir, { recursive: true });
@@ -2437,15 +2440,6 @@ async function indexCase(
       claim_numbers: {},
       case_summary: '',
     };
-
-    // Track failed files so users can retry them later
-    const failedExtractions = extractions.filter(e => !!e.error);
-    const failedFiles = failedExtractions.map(e => ({
-      filename: e.filename,
-      folder: e.folder,
-      error: e.error,
-      failed_at: new Date().toISOString(),
-    }));
 
     const existingIssues = Array.isArray(existingIndex?.issues_found)
       ? existingIndex.issues_found.filter((issue: unknown): issue is string => typeof issue === "string")

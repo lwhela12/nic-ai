@@ -451,24 +451,30 @@ export async function extractWithVision(
     const lastPage = Math.min(firstPage + PAGES_PER_BATCH - 1, maxPages);
 
     // Convert pages to images once using adaptive quality.
-    const images = await pdfToImages(pdfPath, firstPage, lastPage, chosenDpi);
+    let images: PdfPageImage[] | null = await pdfToImages(pdfPath, firstPage, lastPage, chosenDpi);
     const totalSize = images.reduce((sum, img) => sum + img.sizeBytes, 0);
     if (totalSize > 3.5 * 1024 * 1024) {
       console.log(`[Vision] ${filename} batch ${batch + 1}: ${(totalSize / 1024 / 1024).toFixed(1)}MB at ${chosenDpi} DPI`);
     }
 
-    // Build image content blocks for the message
-    const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = images.map((img) => ({
-      type: "image_url" as const,
-      image_url: {
-        url: `data:image/png;base64,${img.base64}`,
-      },
-    }));
+    // Build image content blocks, clearing base64 from each image as we go
+    // to avoid holding two copies of the same data simultaneously
+    let imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> | null = [];
+    for (let i = 0; i < images.length; i++) {
+      imageBlocks.push({
+        type: "image_url" as const,
+        image_url: {
+          url: `data:image/png;base64,${images[i].base64}`,
+        },
+      });
+      (images[i] as any).base64 = ''; // Release original base64 immediately
+    }
+    images = null; // Release images array
 
     const pageRange = firstPage === lastPage ? `page ${firstPage}` : `pages ${firstPage}-${lastPage}`;
     const batchLabel = `batch ${batch + 1}/${batchCount}`;
 
-    const messages = [
+    let messages: any[] | null = [
       {
         role: "system",
         content: `${systemPrompt}
@@ -498,9 +504,15 @@ Return the JSON extraction now.`,
         ],
       },
     ];
+    imageBlocks = null; // Release imageBlocks after building messages
 
     try {
       const visionResult = await callVisionWithFallback(messages, filename, batchLabel);
+      messages = null; // Release messages immediately after API call
+
+      // Signal GC that significant memory was freed
+      if (typeof Bun !== 'undefined' && Bun.gc) Bun.gc(false);
+
       const parsed = JSON.parse(visionResult.content);
 
       console.log(`[Vision] ${filename} ${batchLabel}: done [groq-${visionResult.model}]`);
@@ -516,6 +528,11 @@ Return the JSON extraction now.`,
       totalUsage.inputTokens += visionResult.usage.inputTokens;
       totalUsage.outputTokens += visionResult.usage.outputTokens;
     } catch (err) {
+      messages = null; // Release messages on error path too
+
+      // Signal GC that significant memory was freed
+      if (typeof Bun !== 'undefined' && Bun.gc) Bun.gc(false);
+
       console.error(`[Vision] ${filename} ${batchLabel} failed:`, err);
       // Continue with remaining batches
     }
