@@ -2179,16 +2179,20 @@ const _visionQueue: Array<() => void> = [];
 function acquireVisionSlot(): Promise<void> {
   if (_activeVision < VISION_CONCURRENCY) {
     _activeVision++;
+    console.log(`[vision-sem] Acquired slot (${_activeVision}/${VISION_CONCURRENCY} active, ${_visionQueue.length} queued)`);
     return Promise.resolve();
   }
+  console.log(`[vision-sem] Queuing — all ${VISION_CONCURRENCY} slots busy (${_visionQueue.length + 1} will be queued)`);
   return new Promise(resolve => _visionQueue.push(() => {
     _activeVision++;
+    console.log(`[vision-sem] Dequeued into slot (${_activeVision}/${VISION_CONCURRENCY} active, ${_visionQueue.length} queued)`);
     resolve();
   }));
 }
 
 function releaseVisionSlot(): void {
   _activeVision--;
+  console.log(`[vision-sem] Released slot (${_activeVision}/${VISION_CONCURRENCY} active, ${_visionQueue.length} queued)`);
   if (_visionQueue.length > 0) {
     _visionQueue.shift()!();
   }
@@ -2428,15 +2432,10 @@ async function indexCase(
         // Release extraction — its data has been transferred to folders/accumulators
         extraction = null;
 
-        // Force GC after every vision file (large base64 garbage), every 5 for text
-        if (isVision) {
-          if (typeof Bun !== 'undefined' && Bun.gc) Bun.gc(true);
-        }
-
         completedCount += 1;
         console.log(`--- Progress: ${completedCount}/${totalFiles} files complete ---`);
 
-        // Safety-net GC every 5 files for text-heavy cases
+        // Force garbage collection every 5 files (same cadence as before)
         if (completedCount % 5 === 0 && typeof Bun !== 'undefined' && Bun.gc) {
           Bun.gc(true);
           console.log(`[gc] Forced garbage collection after ${completedCount} files`);
