@@ -115,7 +115,7 @@ export async function pdfToImages(
       ],
       {
         timeout: 60000,
-        maxBuffer: 50 * 1024 * 1024,
+        maxBuffer: 5 * 1024 * 1024,
         windowsHide: true,
       }
     );
@@ -133,12 +133,11 @@ export async function pdfToImages(
       let found = false;
       for (const candidate of candidates) {
         if (existsSync(candidate)) {
-          const buf = await readFile(candidate);
-          images.push({
-            page,
-            base64: buf.toString("base64"),
-            sizeBytes: buf.length,
-          });
+          let buf: Buffer | null = await readFile(candidate);
+          const b64 = buf.toString("base64");
+          const size = buf.length;
+          buf = null; // Release raw PNG buffer immediately
+          images.push({ page, base64: b64, sizeBytes: size });
           // Clean up temp file
           await unlink(candidate).catch(() => {});
           found = true;

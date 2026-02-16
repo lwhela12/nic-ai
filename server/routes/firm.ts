@@ -2171,6 +2171,29 @@ async function discoverSubcases(casePath: string): Promise<string[]> {
   return subcases;
 }
 
+// Semaphore to limit concurrent vision extractions (heavy subprocess memory)
+const VISION_CONCURRENCY = 2;
+let _activeVision = 0;
+const _visionQueue: Array<() => void> = [];
+
+function acquireVisionSlot(): Promise<void> {
+  if (_activeVision < VISION_CONCURRENCY) {
+    _activeVision++;
+    return Promise.resolve();
+  }
+  return new Promise(resolve => _visionQueue.push(() => {
+    _activeVision++;
+    resolve();
+  }));
+}
+
+function releaseVisionSlot(): void {
+  _activeVision--;
+  if (_visionQueue.length > 0) {
+    _visionQueue.shift()!();
+  }
+}
+
 // Index a single case using file-by-file extraction
 async function indexCase(
   caseFolder: string,
@@ -2284,8 +2307,10 @@ async function indexCase(
         const filePath = files[fileIndex];
 
         let extraction: FileExtraction | null = null;
+        let isVision = false;
         try {
           let classified: ClassifiedFile | null = await classifyFile(caseFolder, filePath);
+          isVision = !classified.useText;
           extraction = classified.useText
             ? await extractFileText(
                 classified,
@@ -2294,13 +2319,20 @@ async function indexCase(
                 options?.practiceArea,
                 (event) => { onProgress({ ...event, caseName }); }
               )
-            : await extractFileVision(
-                classified,
-                fileIndex,
-                totalFiles,
-                options?.practiceArea,
-                (event) => { onProgress({ ...event, caseName }); }
-              );
+            : await (async () => {
+                await acquireVisionSlot();
+                try {
+                  return await extractFileVision(
+                    classified!,
+                    fileIndex,
+                    totalFiles,
+                    options?.practiceArea,
+                    (event) => { onProgress({ ...event, caseName }); }
+                  );
+                } finally {
+                  releaseVisionSlot();
+                }
+              })();
           classified = null; // Release classified (including extractedText) immediately
         } catch (err) {
           const fallbackFolder = dirname(filePath).replace(/\\/g, '/');
@@ -2396,10 +2428,15 @@ async function indexCase(
         // Release extraction — its data has been transferred to folders/accumulators
         extraction = null;
 
+        // Force GC after every vision file (large base64 garbage), every 5 for text
+        if (isVision) {
+          if (typeof Bun !== 'undefined' && Bun.gc) Bun.gc(true);
+        }
+
         completedCount += 1;
         console.log(`--- Progress: ${completedCount}/${totalFiles} files complete ---`);
 
-        // Force garbage collection every 5 files
+        // Safety-net GC every 5 files for text-heavy cases
         if (completedCount % 5 === 0 && typeof Bun !== 'undefined' && Bun.gc) {
           Bun.gc(true);
           console.log(`[gc] Forced garbage collection after ${completedCount} files`);
