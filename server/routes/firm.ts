@@ -22,7 +22,6 @@ import {
   generateHypergraphConflictReviewWithGptOss,
 } from "../lib/groq-extract";
 import { directFirmChat, type FirmChatScope } from "../lib/firm-chat";
-import { buildCaseMap } from "../lib/case-map";
 import { writeIndexDerivedFiles } from "../lib/meta-index";
 import {
   normalizeIndex,
@@ -112,11 +111,6 @@ function getClient(): Anthropic {
 
 const app = new Hono();
 
-async function writeCaseMap(caseFolder: string, index: Record<string, any>): Promise<void> {
-  const caseMapPath = join(caseFolder, ".pi_tool", "case_map.json");
-  const caseMap = buildCaseMap(index);
-  await writeFile(caseMapPath, JSON.stringify(caseMap, null, 2));
-}
 
 // Practice guide loading now handled by knowledge.ts
 
@@ -1956,7 +1950,7 @@ Analyze the case and use the case_synthesis tool to return your synthesis.`
     }
 
     await writeFile(indexPath, JSON.stringify(merged, null, 2));
-    await writeCaseMap(caseFolder, merged);
+    await writeIndexDerivedFiles(caseFolder, merged);
     console.log(`[Sonnet] Wrote merged index to ${indexPath}`);
 
   } catch (err) {
@@ -2688,7 +2682,7 @@ async function indexCase(
 
         parentIndex.related_cases = relatedCases;
         await writeFile(parentIndexPath, JSON.stringify(parentIndex, null, 2));
-        await writeCaseMap(options.parentCase.path, parentIndex);
+        await writeIndexDerivedFiles(options.parentCase.path, parentIndex);
         console.log(`[Index] Updated parent index with related_cases`);
       } catch (parentErr) {
         // Parent index may not exist yet - that's ok
@@ -2706,7 +2700,7 @@ async function indexCase(
         await writeFile(indexPath, previousIndexContent);
         try {
           const restored = JSON.parse(previousIndexContent);
-          await writeCaseMap(caseFolder, restored);
+          await writeIndexDerivedFiles(caseFolder, restored);
         } catch {
           // best effort only
         }

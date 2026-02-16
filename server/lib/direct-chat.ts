@@ -25,7 +25,7 @@ import {
 import { loadFirmInfo } from "./export";
 import { applyResolvedFieldToSummary } from "./index-summary-sync";
 import { extractPdfText } from "./pdftotext";
-import { buildCaseMap } from "./case-map";
+import { extractTextFromDocx } from "./extract";
 import { generateMetaIndex, splitIndexToFolders, buildMetaIndexPromptView, writeIndexDerivedFiles } from "./meta-index";
 import { generateHypergraph } from "../routes/firm";
 import { buildDocumentId, buildDocumentIdFromPath } from "./document-id";
@@ -107,13 +107,13 @@ interface MetaKnowledgeIndex {
 const TOOLS: Anthropic.Tool[] = [
   {
     name: "read_file",
-    description: "Read the contents of a file in the case folder. Use for detailed document review or checking specific files.",
+    description: "Read the contents of a file in the case folder. Use for text documents, DOCX files, PDFs when OCR/text extraction is sufficient, JSON, and indexed artifacts.",
     input_schema: {
       type: "object" as const,
       properties: {
         path: {
           type: "string",
-          description: "Relative path from case folder (e.g., 'Intake/Intake.pdf' or '.pi_tool/document_index.json')"
+          description: "Relative path from case folder (e.g., 'Intake/Intake.pdf', 'Intake/Notice.docx', or '.pi_tool/document_index.json')"
         }
       },
       required: ["path"]
@@ -121,7 +121,7 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "read_index_slice",
-    description: "Read a bounded slice of .pi_tool/document_index.json for very large cases. Use this when you need more detail than the case map provides.",
+    description: "Read a bounded slice of .pi_tool/document_index.json for very large cases. Use this when you need more detail than the meta-index provides.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -135,20 +135,6 @@ const TOOLS: Anthropic.Tool[] = [
         }
       },
       required: ["offset"]
-    }
-  },
-  {
-    name: "rebuild_case_map",
-    description: "Rebuild .pi_tool/case_map.json from existing .pi_tool/document_index.json without re-running extraction.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        note: {
-          type: "string",
-          description: "Optional note explaining why the case map is being rebuilt."
-        }
-      },
-      required: []
     }
   },
   {
@@ -251,13 +237,13 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "read_document",
-    description: "Read a document with full vision support, especially useful for PDFs. Spawns a specialist that can see rendered pages (forms, tables, handwriting, images) not just extracted text. Use this when you need to analyze a specific document in detail — especially PDFs with complex layouts, medical forms, billing statements, or scanned documents. Do NOT use for simple text/JSON file lookups (use read_file for those).",
+    description: "Read a PDF with vision support, especially useful for scanned/complex PDFs where layout matters. Spawns a specialist that can see rendered pages (forms, tables, handwriting, images) not just extracted text. Use this only for PDF documents, not DOCX.",
     input_schema: {
       type: "object" as const,
       properties: {
         path: {
           type: "string",
-          description: "Relative path from case folder (e.g., 'Intake/Intake.pdf', 'Medical/MRI_Report.pdf')"
+          description: "Relative path from case folder (PDF only), e.g., 'Intake/Intake.pdf', 'Medical/MRI_Report.pdf'"
         },
         question: {
           type: "string",
@@ -498,7 +484,6 @@ const WRITE_TOOLS = new Set([
   "write_file",
   "update_index",
   "update_file_entry",
-  "rebuild_case_map",
   "rerun_hypergraph",
   "generate_document",
   "build_evidence_packet",
@@ -1075,9 +1060,8 @@ function buildMetaKnowledgeIndexText(index: MetaKnowledgeIndex | null): string {
 
 function buildMetaToolIndexText(): string {
   const toolHints = [
-    "read_file — Use for case data and indexed artifacts (document_index.json, case_map.json, meta_index.json, per-folder indexes, and .pi_tool/knowledge/meta_index.json).",
+    "read_file — Use for case data and indexed artifacts (document_index.json, meta_index.json, per-folder indexes, and .pi_tool/knowledge/meta_index.json).",
     "read_index_slice — Bounded reads of .pi_tool/document_index.json for deep conflict/data review.",
-    "rebuild_case_map — Regenerates .pi_tool/case_map.json from document_index.json.",
     "rerun_hypergraph — Re-runs hypergraph from document_index.json and can refresh needs_review.",
     "update_index / update_case_summary / update_file_entry — Write into document_index.json fields and conflict decisions.",
     "generate_document — Delegates formal document drafting to the doc agent.",
@@ -1597,7 +1581,8 @@ async function executeTool(
           return "Error: Cannot read files outside the case folder";
         }
 
-        // Handle PDFs specially
+        // Handle DOCX and PDFs as non-text binaries
+        const normalizedPath = toolInput.path.toLowerCase();
         if (toolInput.path.toLowerCase().endsWith('.pdf')) {
           try {
             const text = await extractPdfText(filePath, {
@@ -1608,6 +1593,14 @@ async function executeTool(
             return text.slice(0, 10000); // Limit output
           } catch {
             return "Error: Could not extract text from PDF";
+          }
+        }
+        if (normalizedPath.endsWith('.docx')) {
+          try {
+            const text = await extractTextFromDocx(filePath);
+            return text.slice(0, 10000); // Limit output
+          } catch {
+            return "Error: Could not extract text from DOCX";
           }
         }
 
@@ -1635,35 +1628,6 @@ async function executeTool(
           has_more: end < content.length,
           next_offset: end < content.length ? end : null,
           slice,
-        });
-      }
-
-      case "rebuild_case_map": {
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
-        const content = await readFile(indexPath, "utf-8");
-        const index = JSON.parse(content);
-        const mapPath = join(caseFolder, ".pi_tool", "case_map.json");
-        const caseMap = buildCaseMap(index);
-        await writeFile(mapPath, JSON.stringify(caseMap, null, 2));
-
-        if (!Array.isArray(index.case_notes)) {
-          index.case_notes = [];
-        }
-        index.case_notes.push({
-          id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          content: toolInput.note || "Rebuilt case_map.json from existing document_index.json",
-          field_updated: ".pi_tool/case_map.json",
-          source: "case_map_rebuild",
-          createdAt: new Date().toISOString(),
-        });
-        await saveIndexAndMap(caseFolder, indexPath, index);
-
-        return JSON.stringify({
-          success: true,
-          case_map_path: ".pi_tool/case_map.json",
-          total_documents: caseMap.overview.total_documents,
-          total_facts: caseMap.overview.total_facts,
-          conflict_count: caseMap.overview.conflict_count,
         });
       }
 
@@ -2074,38 +2038,44 @@ async function executeTool(
           });
         }
 
-        // Build filename -> path lookup from folders
-        const filePathMap: Record<string, string> = {};
-        if (index.folders) {
-          for (const [folderName, folderData] of Object.entries(index.folders)) {
-            const files: any[] = Array.isArray(folderData) ? folderData : (folderData as any)?.files || [];
-            for (const file of files) {
-              if (file.filename) {
-                filePathMap[file.filename] = `${folderName}/${file.filename}`;
-              }
-            }
+        // Try to load hypergraph for value→count data (much more compact than raw sources)
+        let hypergraph: Record<string, any> | null = null;
+        try {
+          const hgPath = join(caseFolder, ".pi_tool", "hypergraph_analysis.json");
+          const hgContent = await readFile(hgPath, "utf-8");
+          const hgData = JSON.parse(hgContent);
+          if (hgData.hypergraph && typeof hgData.hypergraph === "object") {
+            hypergraph = hgData.hypergraph;
           }
+        } catch {
+          // No hypergraph file — fall back to needs_review data only
         }
 
-        // Return requested page with resolved sources
+        // Return compact items with value→count from hypergraph
         const items = needsReview.slice(clampedOffset, end).map((item, batchIndex) => {
-          const resolvedSources = (item.sources || []).map((source: string) => {
-            const match = source.match(/^([^(]+)/);
-            const filename = match ? match[1].trim() : source.trim();
-            return {
-              original: source,
-              filename,
-              path: filePathMap[filename] || null
-            };
-          });
+          const fieldData = hypergraph?.[item.field];
 
+          if (fieldData?.values && Array.isArray(fieldData.values)) {
+            // Hypergraph path: compact value→count pairs
+            return {
+              index: clampedOffset + batchIndex + 1,
+              field: item.field,
+              values: fieldData.values.map((v: any) => ({
+                value: v.value,
+                count: v.count,
+              })),
+              consensus: fieldData.consensus,
+              confidence: fieldData.confidence,
+              reason: item.reason,
+            };
+          }
+
+          // Fallback: no hypergraph data for this field — return without sources
           return {
             index: clampedOffset + batchIndex + 1,
             field: item.field,
             conflicting_values: item.conflicting_values,
-            sources: item.sources,
-            resolved_sources: resolvedSources,
-            reason: item.reason
+            reason: item.reason,
           };
         });
 
@@ -2479,17 +2449,18 @@ Your context includes a meta-index with all case facts organized by folder. Each
 
 For quick answers, use the facts in the meta-index directly.
 For full document details in any folder, use: read_file(".pi_tool/indexes/{FolderName}.json")
-For reading a specific document, use: read_file("{folder}/{filename}") or read_document for PDFs.
+For reading a specific document:
+- Use read_file for DOCX and text-like files (including .pdf when OCR/text extraction is sufficient): read_file("{folder}/{filename}")
+- Use read_document only for PDFs where you need vision (scanned pages, handwriting, complex layout): read_document("{folder}/{filename}.pdf", "...").
 
 ## YOUR CAPABILITIES
 
 1. **Answer Questions**: Use the case index and your knowledge to answer questions about cases, injuries, treatments, and PI law.
 
-2. **Read Files**: Use read_file for quick text lookups — reading per-folder index files, checking a text/JSON file, or grabbing a snippet. For PDFs this uses basic text extraction only.
+2. **Read Files**: Use read_file for quick text lookups — reading per-folder index files, checking a text/JSON file, DOCX files, or grabbing a snippet. For PDFs this uses basic text extraction only.
    For deep index detail, read per-folder files at .pi_tool/indexes/{FolderName}.json, or use read_index_slice to page through the full .pi_tool/document_index.json.
 
-2b. **Rebuild Case Map**: Use rebuild_case_map to regenerate .pi_tool/case_map.json from the current document_index.json when map data is missing or stale. This does NOT re-run document extraction.
-2c. **Re-run Hypergraph**: Use rerun_hypergraph to rebuild .pi_tool/hypergraph_analysis.json from the current index and refresh conflict detection without re-extraction.
+2b. **Re-run Hypergraph**: Use rerun_hypergraph to rebuild .pi_tool/hypergraph_analysis.json from the current index and refresh conflict detection without re-extraction.
 
 3. **Update Case Data**: Use update_index when the user provides corrections or new information about top-level case fields (e.g., client name, DOB, case phase, policy limits).
    Use update_case_summary when updating the narrative case summary.
@@ -2512,24 +2483,23 @@ Do NOT use it for:
 - Reviewing existing documents
 - Simple notes or quick responses
 
-5. **Read Documents with Vision**: Use read_document to analyze specific documents in detail, especially PDFs. This spawns a vision-capable reader that sees rendered pages — form layouts, tables, handwriting, checkboxes, images — not just extracted text. Much better than read_file for PDFs with complex formatting.
+5. **Read Documents with Vision**: Use read_document for PDFs in detail, especially scanned or layout-heavy PDFs. This spawns a vision-capable reader that sees rendered pages — form layouts, tables, handwriting, checkboxes, images — not just extracted text. Much better than read_file for PDFs with complex formatting.
 
 ## WHEN TO USE read_document
 
-Use read_document when the user asks about a specific document's contents, especially PDFs:
+Use read_document only when the user asks about a specific PDF and layout/context is needed, especially:
 - "What does the MRI report say?"
 - "What are the charges on the billing statement?"
 - "What injuries are listed in the intake form?"
 - "Can you read the police report?"
 
-Use read_file instead for:
-- Reading case map (.pi_tool/case_map.json) or small index files
+Use read_file for:
+- DOCX files
+- Non-PDF files
+- Per-folder indexes (.pi_tool/indexes/{FolderName}.json) or small index files
 - Quick lookups on text or JSON files
-- Files you already know are simple text
 
-Use rebuild_case_map when:
-- A legacy case has no .pi_tool/case_map.json
-- The case map appears stale after major index changes
+Do not call read_document on DOCX or other non-PDF files; use read_file instead.
 
 Use rerun_hypergraph when:
 - A legacy case never completed hypergraph/conflict reconciliation
@@ -2540,7 +2510,7 @@ Use rerun_hypergraph when:
 Use this tool when the user asks you to re-read a document and update the index with the new extraction. The typical flow:
 
 1. User says "read DWC D-8 Wages.pdf" or "re-extract the intake form"
-2. You call read_document to read the file with vision
+2. If it's a PDF, call read_document to read the file with vision; otherwise call read_file.
 3. You present what you found to the user
 4. User says "update the file", "looks good, save it", or "update the index"
 5. You call update_file_entry with the folder name, filename, and updated fields
@@ -2606,24 +2576,45 @@ Use this when the user says things like:
 - "Go through the needs_review items"
 - "Review document issues"
 
+### Data shape from get_conflicts
+
+Each conflict item includes value→count pairs from the hypergraph plus consensus/confidence:
+\`\`\`json
+{
+  "field": "client_name",
+  "values": [
+    { "value": "Jomo Henderson", "count": 89 },
+    { "value": "Joma Henderson", "count": 1 }
+  ],
+  "consensus": "Jomo Henderson",
+  "confidence": 0.61,
+  "reason": "..."
+}
+\`\`\`
+
+Use the count ratios and confidence to guide categorization:
+- **High count ratio + high confidence** → auto-resolve to consensus value
+- **Low confidence / UNCERTAIN consensus** → needs user discussion
+- **Similar counts** → genuinely ambiguous, ask user
+
 ### How to conduct a batch review:
 
 1. **Get first batch** - Call get_conflicts with defaults (offset 0, limit 25) to retrieve the first batch.
 
 2. **Analyze and categorize** - Group conflicts by:
-   - **Auto-resolve** (high confidence): OCR errors, formatting differences, clear typos
-   - **Recommend** (medium confidence): One source more authoritative than another
-   - **Needs discussion** (low confidence): Genuinely ambiguous, need user input
+   - **Auto-resolve** (high confidence): One value dominates (e.g. 89 vs 1), OCR errors, formatting differences
+   - **Recommend** (medium confidence): Clear majority but worth confirming
+   - **Needs discussion** (low confidence or UNCERTAIN consensus): Genuinely ambiguous, need user input
 
 3. **Present in batches** - Show your recommendations grouped like:
 
    **Quick Fixes (I recommend these)**
-   1. Date of Loss: "06/25/2023" (typo in one document shows 05/25)
-   2. Claim Number format: "03-52P5-85B" (just formatting difference)
+   1. client_name: "Jomo Henderson" (89 docs) vs "Joma Henderson" (1 doc) → clearly a typo
+   2. date_of_loss: "06/25/2023" (12 docs) vs "05/25/2023" (1 doc) → OCR error
    Approve these? (yes/no/edit)
 
    **Need Your Input**
-   3. Charges for Spinal Rehab: $6,558 vs $10,558 - which invoice is correct?
+   3. Charges for Spinal Rehab: $6,558 (3 docs) vs $10,558 (2 docs) - which invoice is correct?
 
 4. **Batch resolve** - When user approves, call batch_resolve_conflicts with all approved resolutions at once
 
@@ -2638,26 +2629,26 @@ User: "Let's review the conflicts"
 
 You: [call get_conflicts]
 
-You: "I found 26 conflicts. After analyzing them, here's my breakdown:
+You: "I found 23 conflicts. After analyzing them, here's my breakdown:
 
 **Ready to Auto-Resolve (15 items):**
-These are formatting differences, OCR errors, or clear typos where I'm confident about the correct value:
-- Date of Loss: 06/25/2023 (not 05/25 - typo in radiology doc)
-- DOB: 06/27/1984 (not 1949 or 1964 - HIPAA form errors)
-- Client name: Brenda Boerdam-Madrid (with hyphen)
+These have a clear dominant value (high document count vs 1-2 outliers):
+- client_name: "Jomo Henderson" (89 docs) vs "Joma Henderson" (1 doc) → OCR typo
+- date_of_birth: "06/27/1984" (45 docs) vs "1949" (1 doc) → HIPAA form error
+- client_name: "Brenda Boerdam-Madrid" (30 docs) vs "Boerdam Madrid" (2 docs) → formatting
 [... etc]
 
-**Need Your Review (11 items):**
-- Spinal Rehab charges: $6,558 vs $10,558 - genuinely different amounts
-- Balance fields: Several show $0 vs original amount (may depend on payment timing)
+**Need Your Review (8 items):**
+- rehab_charges: $6,558 (3 docs) vs $10,558 (2 docs) - genuinely different amounts
+- balance_due: Several with $0 vs original amount (similar counts)
 
-Want me to apply the 15 auto-resolutions? Then we can discuss the remaining 11."
+Want me to apply the 15 auto-resolutions? Then we can discuss the remaining 8."
 
 User: "Yes, apply them"
 
 You: [call batch_resolve_conflicts with the 15 resolutions]
 
-You: "Done! 15 resolved. Now let's look at the remaining 11..."
+You: "Done! 15 resolved. Now let's look at the remaining 8..."
 
 ## GUIDELINES
 
@@ -2821,6 +2812,15 @@ export async function* directChat(
         // Handle read_document - spawns Agent SDK agent with Read tool for vision
         const docPath = toolUse.input.path as string;
         const question = toolUse.input.question as string;
+        const normalizedDocPath = (docPath || "").toLowerCase();
+        if (!normalizedDocPath.endsWith(".pdf")) {
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: "Error: read_document is PDF-only. Use read_file for DOCX and other non-PDF documents.",
+          });
+          continue;
+        }
 
         yield { type: "delegating", content: `Reading ${docPath} with vision...` };
 

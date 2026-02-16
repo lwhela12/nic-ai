@@ -12,7 +12,8 @@ import { join, dirname, relative as pathRelative } from "path";
 import { execSync } from "child_process";
 import { loadSectionsByIds } from "../routes/knowledge";
 import { extractPdfText } from "./pdftotext";
-import { buildCaseMap, buildCaseMapPromptView } from "./case-map";
+import { extractTextFromDocx } from "./extract";
+import { generateMetaIndex, buildMetaIndexPromptView } from "./meta-index";
 
 // Lazy client creation - API key is set by auth middleware before requests
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -62,7 +63,7 @@ const DOC_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "read_index_slice",
-    description: "Read a bounded slice of .pi_tool/document_index.json for large cases. Use this for deeper detail when case map/index preview is not enough.",
+    description: "Read a bounded slice of .pi_tool/document_index.json for large cases. Use this when you need more detail than the meta-index provides.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -172,23 +173,23 @@ async function loadCaseIndex(caseFolder: string): Promise<Record<string, any>> {
 
 /**
  * Build a bounded prompt view of case context for document generation.
- * Uses case_map first, then includes a compact index preview.
+ * Uses meta_index for a compact navigable summary, plus a trimmed index preview.
  */
 async function buildCasePromptContext(
   caseFolder: string,
   caseIndex: Record<string, any>
 ): Promise<string> {
-  let caseMapData: Record<string, any>;
+  let metaIndexData: Record<string, any>;
   try {
-    const caseMapPath = join(caseFolder, ".pi_tool", "case_map.json");
-    const content = await readFile(caseMapPath, "utf-8");
-    caseMapData = JSON.parse(content);
+    const metaIndexPath = join(caseFolder, ".pi_tool", "meta_index.json");
+    const content = await readFile(metaIndexPath, "utf-8");
+    metaIndexData = JSON.parse(content);
   } catch {
-    caseMapData = buildCaseMap(caseIndex);
+    metaIndexData = generateMetaIndex(caseIndex);
   }
 
-  const mapView = buildCaseMapPromptView(caseMapData as any, 50000);
-  const mapBlock = `CASE MAP:\n${mapView.text}${mapView.truncated ? "\n[NOTE: case_map truncated; use read_index_slice for deeper details.]" : ""}`;
+  const metaView = buildMetaIndexPromptView(metaIndexData as any);
+  const metaBlock = `${metaView}\n[For full folder details, use read_file(".pi_tool/indexes/{FolderName}.json"). For deep index access, use read_index_slice.]`;
 
   const preview = { ...caseIndex };
   if (preview.folders) {
@@ -212,7 +213,7 @@ async function buildCasePromptContext(
     previewJson = `${previewJson.slice(0, 22000)}\n...\n[NOTE: Index preview truncated; use read_index_slice for exact details.]`;
   }
 
-  return `${mapBlock}\n\nCASE INDEX PREVIEW:\n${previewJson}`;
+  return `${metaBlock}\n\nCASE INDEX PREVIEW:\n${previewJson}`;
 }
 
 /**
@@ -340,8 +341,10 @@ async function executeTool(
           return { result: "Error: Cannot read files outside the case/firm folder" };
         }
 
-        // Handle PDFs
-        if (toolInput.path.toLowerCase().endsWith('.pdf')) {
+        const normalizedPath = toolInput.path.toLowerCase();
+
+        // Handle PDFs and DOCX as binary documents
+        if (normalizedPath.endsWith('.pdf')) {
           try {
             const text = await extractPdfText(filePath, {
               layout: false,
@@ -351,6 +354,14 @@ async function executeTool(
             return { result: text.slice(0, 20000) };
           } catch {
             return { result: "Error: Could not extract text from PDF" };
+          }
+        }
+        if (normalizedPath.endsWith('.docx')) {
+          try {
+            const text = await extractTextFromDocx(filePath);
+            return { result: text.slice(0, 20000) };
+          } catch {
+            return { result: "Error: Could not extract text from DOCX" };
           }
         }
 
@@ -606,7 +617,7 @@ ${templates}
 
 ## INSTRUCTIONS
 
-1. First, review the case map/index preview to understand the case
+1. First, review the meta-index/index preview to understand the case
 2. If you need deeper detail from document_index.json, use read_index_slice in chunks
 3. If you need more detail on specific documents, use read_file to review them
 4. Select the most appropriate template for this document

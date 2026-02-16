@@ -217,13 +217,11 @@ const MessageItem = memo(function MessageItem({ msg, onShowFile }: { msg: Messag
   )
 })
 
-// Summarize conversation when messages exceed this threshold
-const MESSAGE_THRESHOLD = 8
 // Keep this many recent messages after summarization
 const KEEP_RECENT = 2
 
 // Context usage thresholds
-const CONTEXT_DANGER_PERCENT = 55   // Red warning, trigger auto-summarize (lowered for earlier prevention)
+const CONTEXT_DANGER_PERCENT = 55   // Red warning, trigger auto-summarize
 
 export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onEvidencePacketGenerated, onShowFile, onDocumentView, onIndexStatusChange, onStartReindex, isReindexing, onEvidencePacketPlanned }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
@@ -519,7 +517,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
 
   // Summarize older messages to reduce context size
   const summarizeConversation = async (currentMessages: Message[]) => {
-    if (currentMessages.length <= MESSAGE_THRESHOLD) return
+    if (currentMessages.length <= KEEP_RECENT) return
 
     setIsSummarizing(true)
 
@@ -824,14 +822,10 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
         })
       }
 
-      // Check if we need to summarize based on message count OR context usage
+      // Check if we need to summarize based on context usage
       setMessages((currentMessages) => {
-        const shouldSummarizeByCount = currentMessages.length > MESSAGE_THRESHOLD
-        const shouldSummarizeByContext = contextUsage && contextUsage.percent >= CONTEXT_DANGER_PERCENT
-
-        if (shouldSummarizeByCount || shouldSummarizeByContext) {
-          // Trigger summarization asynchronously
-          console.log(`Triggering summarization: messages=${currentMessages.length}, context=${contextUsage?.percent}%`)
+        if (contextUsage && contextUsage.percent >= CONTEXT_DANGER_PERCENT) {
+          console.log(`Triggering summarization: messages=${currentMessages.length}, context=${contextUsage.percent}%`)
           setTimeout(() => summarizeConversation(currentMessages), 100)
         }
         return currentMessages

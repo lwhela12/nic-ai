@@ -4,7 +4,6 @@ import { join, dirname, resolve, sep } from "path";
 import { homedir } from "os";
 import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
 import { applyResolvedFieldToSummary } from "../lib/index-summary-sync";
-import { buildCaseMap } from "../lib/case-map";
 import { writeIndexDerivedFiles } from "../lib/meta-index";
 
 // System/temporary files to ignore during file enumeration
@@ -102,27 +101,6 @@ function dedupeNeedsReviewEntries(needsReview: any[]): any[] {
 }
 
 const app = new Hono();
-
-async function ensureCaseMapExists(
-  caseFolder: string,
-  index: Record<string, any>
-): Promise<void> {
-  const mapPath = join(caseFolder, ".pi_tool", "case_map.json");
-  try {
-    await readFile(mapPath, "utf-8");
-    return; // Already exists
-  } catch {
-    // Missing/unreadable map - rebuild from existing index.
-  }
-
-  try {
-    const caseMap = buildCaseMap(index);
-    await writeFile(mapPath, JSON.stringify(caseMap, null, 2));
-    console.log(`[CaseMap] Generated missing case_map.json for ${caseFolder}`);
-  } catch (error) {
-    console.warn(`[CaseMap] Failed to generate case_map.json for ${caseFolder}:`, error);
-  }
-}
 
 function normalizePath(value: string): string {
   return value
@@ -343,7 +321,7 @@ app.get("/index", async (c) => {
     if (Array.isArray(index.needs_review)) {
       index.needs_review = dedupeNeedsReviewEntries(index.needs_review);
     }
-    await ensureCaseMapExists(caseFolder, index);
+
     return c.json(index);
   } catch (error) {
     return c.json({ error: "No document index found. Run /init-case first." }, 404);
@@ -659,7 +637,7 @@ app.get("/index-status", async (c) => {
   try {
     const content = await readFile(indexPath, "utf-8");
     index = JSON.parse(content);
-    await ensureCaseMapExists(caseFolder, index);
+
 
     // Use the index FILE's mtime as the reliable timestamp (not the JSON date which can be wrong)
     const indexStats = await stat(indexPath);

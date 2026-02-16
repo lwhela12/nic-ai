@@ -10,6 +10,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { readFile, writeFile, readdir, mkdir } from "fs/promises";
 import { join } from "path";
 import { formatDateMMDDYYYY, formatDateYYYYMMDD, parseFlexibleDate } from "./date-format";
+import { extractTextFromDocx } from "./extract";
 
 // Lazy client creation - API key is set by auth middleware before requests
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -255,6 +256,15 @@ async function executeTool(
         // Security check - ensure path is within firm root
         if (!filePath.startsWith(firmRoot)) {
           return "Error: Cannot read files outside the firm folder";
+        }
+        const normalizedPath = toolInput.path.toLowerCase();
+        if (normalizedPath.endsWith(".docx")) {
+          try {
+            const text = await extractTextFromDocx(filePath);
+            return text.slice(0, 15000);
+          } catch {
+            return "Error: Could not extract text from DOCX";
+          }
         }
         const content = await readFile(filePath, "utf-8");
         return content.slice(0, 15000); // Limit output to avoid context overflow

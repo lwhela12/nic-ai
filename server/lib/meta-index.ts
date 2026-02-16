@@ -9,7 +9,6 @@
 
 import { writeFile, mkdir } from "fs/promises";
 import { join } from "path";
-import { buildCaseMap } from "./case-map";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -206,17 +205,14 @@ export async function splitIndexToFolders(
 
 /**
  * Regenerate all derived views from the canonical document_index.json.
- * Call this after any write to document_index.json so that case_map,
- * per-folder indexes, and meta_index stay in sync.
+ * Call this after any write to document_index.json so that
+ * per-folder indexes and meta_index stay in sync.
  */
 export async function writeIndexDerivedFiles(
   caseFolder: string,
   index: Record<string, any>
 ): Promise<void> {
   const piToolDir = join(caseFolder, ".pi_tool");
-  // Case map
-  const caseMap = buildCaseMap(index);
-  await writeFile(join(piToolDir, "case_map.json"), JSON.stringify(caseMap, null, 2));
   // Meta-index + per-folder files
   await splitIndexToFolders(index, caseFolder);
   const metaIndex = generateMetaIndex(index);
@@ -289,10 +285,9 @@ export function buildMetaIndexPromptView(
     for (const item of metaIndex.needs_review) {
       if (item.field && item.conflicting_values) {
         const values = item.conflicting_values.map((v: any) => flattenValue(v)).join(" vs ");
-        const sources = item.sources
-          ? ` (${item.sources.map((s: any) => typeof s === "string" ? s : s?.file || s?.filename || "unknown").join(" vs ")})`
-          : "";
-        parts.push(`- ${item.field}: ${values}${sources}`);
+        const valCount = item.conflicting_values.length;
+        const srcCount = item.sources?.length || 0;
+        parts.push(`- ${item.field}: ${values} (${valCount} values, ${srcCount} sources)`);
       } else if (item.field) {
         parts.push(`- ${item.field}: ${flattenValue(item)}`);
       }
