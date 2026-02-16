@@ -2250,7 +2250,7 @@ async function indexCase(
     }
 
     // Step 2: Process files in a steady stream (max concurrent workers)
-    const CONCURRENCY_LIMIT = 30;
+    const CONCURRENCY_LIMIT = 10;
     const totalFiles = files.length;
     let completedCount = 0;
     const extractions: FileExtraction[] = [];
