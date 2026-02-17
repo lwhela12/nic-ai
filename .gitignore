@@ -64,5 +64,9 @@ subscription-server/data/
 *.db
 *.sqlite
 
+# Poppler binaries (downloaded at build time)
+tools/pdftotext/*.dll
+tools/pdftotext/*.exe
+
 # User config directory (local machine)
 ~/.claude-pi/
