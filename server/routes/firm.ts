@@ -2279,7 +2279,7 @@ async function indexCase(
     // Step 2: Process files in a steady stream (max concurrent workers)
     // Accumulators are declared here so workers can build results incrementally,
     // allowing each extraction to be GC'd immediately after processing.
-    const CONCURRENCY_LIMIT = 10;
+    const CONCURRENCY_LIMIT = 3;
     const totalFiles = files.length;
     let completedCount = 0;
     let successCount = 0;
@@ -2302,6 +2302,7 @@ async function indexCase(
     const runIssues: string[] = [];
     const failedFiles: Array<{ filename: string; folder: string; error: string | undefined; failed_at: string }> = [];
 
+    const indexStartTime = Date.now();
     console.log(`\n========== PROCESSING ${files.length} FILES (max concurrent: ${CONCURRENCY_LIMIT}) =========`);
     onProgress({ type: "status", caseName, message: `Processing ${files.length} files (steady stream, max ${CONCURRENCY_LIMIT} concurrent)...` });
 
@@ -2433,6 +2434,14 @@ async function indexCase(
         extraction = null;
 
         completedCount += 1;
+
+        // Log memory every 5 files to track leak pattern
+        if (completedCount % 5 === 0) {
+          const mem = process.memoryUsage();
+          const elapsed = ((Date.now() - indexStartTime) / 1000).toFixed(0);
+          console.log(`[mem] ${completedCount}/${totalFiles} @ ${elapsed}s | RSS: ${(mem.rss / 1024 / 1024).toFixed(0)}MB | Heap: ${(mem.heapUsed / 1024 / 1024).toFixed(0)}/${(mem.heapTotal / 1024 / 1024).toFixed(0)}MB | External: ${(mem.external / 1024 / 1024).toFixed(0)}MB | ArrayBuf: ${((mem.arrayBuffers || 0) / 1024 / 1024).toFixed(0)}MB`);
+        }
+
         console.log(`--- Progress: ${completedCount}/${totalFiles} files complete ---`);
 
         // Force garbage collection every 5 files (same cadence as before)
