@@ -750,7 +750,7 @@ app.get("/cases", async (c) => {
 
     // Process all case directories in parallel for speed
     const casePromises = entries
-      .filter(entry => entry.isDirectory() && entry.name !== ".pi_tool" && !entry.name.startsWith('.'))
+      .filter(entry => entry.isDirectory() && entry.name !== ".pi_tool")
       .map(async (entry) => {
         const casePath = join(root, entry.name);
         const results: CaseSummary[] = [];
@@ -2908,7 +2908,7 @@ app.post("/batch-index", async (c) => {
       const entries = await readdir(root, { withFileTypes: true });
       for (const entry of entries) {
         if (!entry.isDirectory() || entry.name === ".pi_tool") continue;
-        if (entry.name.startsWith('.')) continue; // Skip dot-prefixed at root
+
 
         const casePath = join(root, entry.name);
 
