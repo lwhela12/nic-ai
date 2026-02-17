@@ -4,6 +4,45 @@ import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
 import { extractPdfText } from "./pdftotext";
 
+const BINARY_FILE_EXTENSIONS = new Set([
+  "avi",
+  "mp4",
+  "mov",
+  "m4v",
+  "wmv",
+  "flv",
+  "mkv",
+  "webm",
+  "mpeg",
+  "mpg",
+  "m4a",
+  "mp3",
+  "wav",
+  "aac",
+  "flac",
+  "ogg",
+  "jpg",
+  "jpeg",
+  "png",
+  "tif",
+  "tiff",
+  "bmp",
+  "gif",
+  "webp",
+  "zip",
+  "rar",
+  "7z",
+  "tar",
+  "gz",
+  "exe",
+  "dll",
+  "pkg",
+]);
+
+function isBinaryFileByExtension(ext: string | undefined): boolean {
+  return !!ext && BINARY_FILE_EXTENSIONS.has(ext.toLowerCase());
+}
+
 /**
  * Extracted style information from a DOCX file.
  */
@@ -80,6 +119,9 @@ export async function extractTextFromDocx(filePath: string): Promise<string> {
  */
 export async function extractTextFromFile(filePath: string): Promise<string> {
   const ext = filePath.toLowerCase().split(".").pop();
+  if (isBinaryFileByExtension(ext)) {
+    return `[Binary file: ${ext}]`;
+  }
 
   switch (ext) {
     case "pdf":

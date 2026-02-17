@@ -54,6 +54,7 @@ const SIZE_BASED_DPI_SAMPLES = [
   { maxFileMB: 10, dpi: VISION_DPI_MEDIUM },
   { maxFileMB: 20, dpi: VISION_DPI_LOW },
 ];
+const VISION_DPI_STEPS = [200, 150, 120, 100, 80];
 
 /** Per-model rate limit state, updated from Groq response headers */
 const rateLimitState: Record<string, { remainingTokens: number; resetAt: number }> = {};
@@ -405,6 +406,143 @@ async function callVisionWithFallback(
   }
 }
 
+function getNextLowerVisionDpi(currentDpi: number): number | null {
+  const sortedSteps = [...VISION_DPI_STEPS].sort((a, b) => b - a);
+  for (const step of sortedSteps) {
+    if (step < currentDpi) {
+      return step;
+    }
+  }
+  return null;
+}
+
+function isImageTooLargeError(error: unknown): boolean {
+  const message = typeof error === "object" && error !== null && "message" in error
+    ? String((error as { message?: unknown }).message ?? "")
+    : "";
+  return message.toLowerCase().includes("image too large");
+}
+
+async function extractVisionRangeWithAdaptiveRetry(
+  pdfPath: string,
+  filename: string,
+  folder: string,
+  systemPrompt: string,
+  firstPage: number,
+  lastPage: number,
+  dpi: number,
+  batchLabel: string,
+  totalUsage: GroqUsage,
+): Promise<ExtractionResult[]> {
+  let images: PdfPageImage[] = [];
+  let messages: any[] | null = null;
+  try {
+    images = await pdfToImages(pdfPath, firstPage, lastPage, dpi);
+    const totalSize = images.reduce((sum, img) => sum + img.sizeBytes, 0);
+    if (totalSize > 3.5 * 1024 * 1024) {
+      console.log(`[Vision] ${filename} ${batchLabel}: ${(totalSize / 1024 / 1024).toFixed(1)}MB at ${dpi} DPI`);
+    }
+
+    const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = [];
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i];
+      imageBlocks.push({
+        type: "image_url" as const,
+        image_url: {
+          url: `data:image/jpeg;base64,${img.base64}`,
+        },
+      });
+      img.base64 = "";
+    }
+    images = [];
+
+    const pageRange = firstPage === lastPage ? `page ${firstPage}` : `pages ${firstPage}-${lastPage}`;
+    messages = [
+      {
+        role: "system",
+        content: `${systemPrompt}\n\nYou must respond with a single JSON object. No markdown, no explanation.\nRequired fields: type, key_info, has_handwritten_data, handwritten_fields, extracted_data.`,
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text" as const,
+            text: `Extract information from ${pageRange} of this document.\n\nFILENAME: ${filename}\nFOLDER: ${folder}\n\nCRITICAL:\n- Include extracted_data.document_date for this specific document's own date.\n- If multiple dates appear, include extracted_data.document_date_confidence and extracted_data.document_date_reason.\n- Set has_handwritten_data to true only for substantive handwritten extracted values.\n- Include handwritten_fields as non-signature extracted field names that are handwritten (use [] when none).\n\nReturn the JSON extraction now.`,
+          },
+          ...imageBlocks,
+        ],
+      },
+    ];
+
+    const visionResult = await callVisionWithFallback(messages, filename, batchLabel);
+    messages = null;
+    const parsed = JSON.parse(visionResult.content);
+
+    console.log(`[Vision] ${filename} ${batchLabel}: done [groq-${visionResult.model}]`);
+    totalUsage.inputTokens += visionResult.usage.inputTokens;
+    totalUsage.outputTokens += visionResult.usage.outputTokens;
+    return [{
+      type: parsed.type || "other",
+      key_info: parsed.key_info || "",
+      has_handwritten_data: parsed.has_handwritten_data === true,
+      handwritten_fields: Array.isArray(parsed.handwritten_fields) ? parsed.handwritten_fields : [],
+      extracted_data: parsed.extracted_data || {},
+    }];
+  } catch (err) {
+    if (isImageTooLargeError(err)) {
+      const fallbackDpi = getNextLowerVisionDpi(dpi);
+      if (fallbackDpi !== null) {
+        console.log(`[Vision] ${filename} ${batchLabel}: image too large at ${dpi} DPI, retrying at ${fallbackDpi} DPI`);
+        return extractVisionRangeWithAdaptiveRetry(
+          pdfPath,
+          filename,
+          folder,
+          systemPrompt,
+          firstPage,
+          lastPage,
+          fallbackDpi,
+          batchLabel,
+          totalUsage
+        );
+      }
+
+      if (firstPage < lastPage) {
+        const midPage = Math.floor((firstPage + lastPage) / 2);
+        console.log(`[Vision] ${filename} ${batchLabel}: splitting ${firstPage}-${lastPage} into ${firstPage}-${midPage} and ${midPage + 1}-${lastPage}`);
+        const firstHalf = await extractVisionRangeWithAdaptiveRetry(
+          pdfPath,
+          filename,
+          folder,
+          systemPrompt,
+          firstPage,
+          midPage,
+          dpi,
+          `${batchLabel} (1/2)`,
+          totalUsage
+        );
+        const secondHalf = await extractVisionRangeWithAdaptiveRetry(
+          pdfPath,
+          filename,
+          folder,
+          systemPrompt,
+          midPage + 1,
+          lastPage,
+          dpi,
+          `${batchLabel} (2/2)`,
+          totalUsage
+        );
+        return [...firstHalf, ...secondHalf];
+      }
+    }
+
+    console.error(`[Vision] ${filename} ${batchLabel} failed:`, err);
+    return [];
+  } finally {
+    messages = null;
+    images = [];
+  }
+}
+
 /**
  * Extract structured data from a scanned PDF using vision models.
  * Uses Scout as primary with Maverick fallback on rate limits.
@@ -449,93 +587,21 @@ export async function extractWithVision(
   for (let batch = 0; batch < batchCount; batch++) {
     const firstPage = batch * PAGES_PER_BATCH + 1;
     const lastPage = Math.min(firstPage + PAGES_PER_BATCH - 1, maxPages);
-
-    // Convert pages to images once using adaptive quality.
-    let images: PdfPageImage[] | null = await pdfToImages(pdfPath, firstPage, lastPage, chosenDpi);
-    const totalSize = images.reduce((sum, img) => sum + img.sizeBytes, 0);
-    if (totalSize > 3.5 * 1024 * 1024) {
-      console.log(`[Vision] ${filename} batch ${batch + 1}: ${(totalSize / 1024 / 1024).toFixed(1)}MB at ${chosenDpi} DPI`);
-    }
-
-    // Build image content blocks, clearing base64 from each image as we go
-    // to avoid holding two copies of the same data simultaneously
-    let imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> | null = [];
-    for (let i = 0; i < images.length; i++) {
-      imageBlocks.push({
-        type: "image_url" as const,
-        image_url: {
-          url: `data:image/jpeg;base64,${images[i].base64}`,
-        },
-      });
-      (images[i] as any).base64 = ''; // Release original base64 immediately
-    }
-    images = null; // Release images array
-
-    const pageRange = firstPage === lastPage ? `page ${firstPage}` : `pages ${firstPage}-${lastPage}`;
     const batchLabel = `batch ${batch + 1}/${batchCount}`;
 
-    let messages: any[] | null = [
-      {
-        role: "system",
-        content: `${systemPrompt}
+    const batchPartialResults = await extractVisionRangeWithAdaptiveRetry(
+      pdfPath,
+      filename,
+      folder,
+      systemPrompt,
+      firstPage,
+      lastPage,
+      chosenDpi,
+      batchLabel,
+      totalUsage
+    );
 
-You must respond with a single JSON object. No markdown, no explanation.
-Required fields: type, key_info, has_handwritten_data, handwritten_fields, extracted_data.`,
-      },
-      {
-        role: "user",
-        content: [
-          {
-            type: "text" as const,
-            text: `Extract information from ${pageRange} of this document.
-
-FILENAME: ${filename}
-FOLDER: ${folder}
-
-CRITICAL:
-- Include extracted_data.document_date for this specific document's own date.
-- If multiple dates appear, include extracted_data.document_date_confidence and extracted_data.document_date_reason.
-- Set has_handwritten_data to true only for substantive handwritten extracted values.
-- Include handwritten_fields as non-signature extracted field names that are handwritten (use [] when none).
-
-Return the JSON extraction now.`,
-          },
-          ...imageBlocks,
-        ],
-      },
-    ];
-    imageBlocks = null; // Release imageBlocks after building messages
-
-    try {
-      const visionResult = await callVisionWithFallback(messages, filename, batchLabel);
-      messages = null; // Release messages immediately after API call
-
-      // Signal GC that significant memory was freed
-      if (typeof Bun !== 'undefined' && Bun.gc) Bun.gc(false);
-
-      const parsed = JSON.parse(visionResult.content);
-
-      console.log(`[Vision] ${filename} ${batchLabel}: done [groq-${visionResult.model}]`);
-
-      batchResults.push({
-        type: parsed.type || "other",
-        key_info: parsed.key_info || "",
-        has_handwritten_data: parsed.has_handwritten_data === true,
-        handwritten_fields: Array.isArray(parsed.handwritten_fields) ? parsed.handwritten_fields : [],
-        extracted_data: parsed.extracted_data || {},
-      });
-
-      totalUsage.inputTokens += visionResult.usage.inputTokens;
-      totalUsage.outputTokens += visionResult.usage.outputTokens;
-    } catch (err) {
-      messages = null; // Release messages on error path too
-
-      // Signal GC that significant memory was freed
-      if (typeof Bun !== 'undefined' && Bun.gc) Bun.gc(false);
-
-      console.error(`[Vision] ${filename} ${batchLabel} failed:`, err);
-      // Continue with remaining batches
-    }
+    batchResults.push(...batchPartialResults);
   }
 
   // Merge batch results
