@@ -29,7 +29,7 @@ app.get("/list", async (c) => {
     return access.response;
   }
 
-  const notesPath = join(caseFolder, ".pi_tool", "notes.json");
+  const notesPath = join(caseFolder, ".ai_tool", "notes.json");
 
   try {
     const content = await readFile(notesPath, "utf-8");
@@ -53,7 +53,7 @@ app.post("/save", async (c) => {
     return access.response;
   }
 
-  const piToolDir = join(caseFolder, ".pi_tool");
+  const piToolDir = join(caseFolder, ".ai_tool");
   const notesPath = join(piToolDir, "notes.json");
 
   // Load existing notes

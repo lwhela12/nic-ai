@@ -68,7 +68,7 @@ claude-pi/
 
 1. Place case files in a folder structure (e.g., `Intake/`, `1P/`, `3P/`, `Records and Bills/`)
 2. Click "Re-index" in the case view
-3. The agent reads all documents and creates `.pi_tool/document_index.json`
+3. The agent reads all documents and creates `.ai_tool/document_index.json`
 4. Index tracks: client info, dates, providers, charges, policy limits, and issues found
 
 ### Parallel Processing

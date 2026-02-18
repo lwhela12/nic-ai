@@ -27,7 +27,7 @@ React App → Hono Server → Agent SDK query() → Anthropic API
 - Session management for conversation continuity
 
 ### Session Management (`server/sessions.ts`)
-- Stores session IDs per case in `.pi_tool/session.json`
+- Stores session IDs per case in `.ai_tool/session.json`
 - Enables multi-turn conversations that remember context
 
 ### Frontend (`app/src/components/Chat.tsx`)

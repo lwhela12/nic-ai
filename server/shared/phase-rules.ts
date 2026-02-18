@@ -100,7 +100,7 @@ export function buildPhasePrompt(practiceArea?: string): string {
     .map((ind, i) => `${i + 1}. ${ind.check} → at least ${ind.phase} phase`)
     .join("\n");
 
-  return `Read .pi_tool/document_index.json and determine the case phase based on these markers.
+  return `Read .ai_tool/document_index.json and determine the case phase based on these markers.
 
 **Practice Area:** ${practiceAreaName}
 
@@ -110,5 +110,5 @@ ${rulesSection}
 **Check the folders object for these indicator files:**
 ${indicatorsSection}
 
-Read the index, determine the phase, update the "case_phase" field, and write the updated index back to .pi_tool/document_index.json.`;
+Read the index, determine the phase, update the "case_phase" field, and write the updated index back to .ai_tool/document_index.json.`;
 }

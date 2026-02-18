@@ -12,6 +12,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { readFile, writeFile, mkdir, stat } from "fs/promises";
 import { join, dirname, resolve, sep } from "path";
+import { resolveFirmRoot } from "./year-mode";
 import { generateDocument, type DocumentType } from "./doc-agent";
 import { readDocument } from "./doc-reader";
 import { acquireCaseLock, releaseCaseLock } from "./case-lock";
@@ -81,7 +82,7 @@ const CONFLICT_BATCH_DEFAULT = 25;
 const CONFLICT_BATCH_MAX = 80;
 const KNOWLEDGE_PREVIEW_CHARS = 420;
 const KNOWLEDGE_META_INDEX_MAX_CHARS = 12000;
-const KNOWLEDGE_META_INDEX_PATH = ".pi_tool/knowledge/meta_index.json";
+const KNOWLEDGE_META_INDEX_PATH = ".ai_tool/knowledge/meta_index.json";
 
 interface MetaKnowledgeSection {
   id?: string;
@@ -113,7 +114,7 @@ const TOOLS: Anthropic.Tool[] = [
       properties: {
         path: {
           type: "string",
-          description: "Relative path from case folder (e.g., 'Intake/Intake.pdf', 'Intake/Notice.docx', or '.pi_tool/document_index.json')"
+          description: "Relative path from case folder (e.g., 'Intake/Intake.pdf', 'Intake/Notice.docx', or '.ai_tool/document_index.json')"
         }
       },
       required: ["path"]
@@ -121,13 +122,13 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "read_index_slice",
-    description: "Read a bounded slice of .pi_tool/document_index.json for very large cases. Use this when you need more detail than the meta-index provides.",
+    description: "Read a bounded slice of .ai_tool/document_index.json for very large cases. Use this when you need more detail than the meta-index provides.",
     input_schema: {
       type: "object" as const,
       properties: {
         offset: {
           type: "number",
-          description: "Character offset into .pi_tool/document_index.json (0-based)."
+          description: "Character offset into .ai_tool/document_index.json (0-based)."
         },
         length: {
           type: "number",
@@ -139,7 +140,7 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "rerun_hypergraph",
-    description: "Re-run hypergraph analysis from existing document_index.json (no extraction). Writes .pi_tool/hypergraph_analysis.json and can refresh needs_review.",
+    description: "Re-run hypergraph analysis from existing document_index.json (no extraction). Writes .ai_tool/hypergraph_analysis.json and can refresh needs_review.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -856,7 +857,7 @@ function truncateForIndex(value: string, max = KNOWLEDGE_PREVIEW_CHARS): string 
 }
 
 function toMetaKnowledgePath(filename: string): string {
-  return `.pi_tool/knowledge/${filename}`;
+  return `.ai_tool/knowledge/${filename}`;
 }
 
 async function getFileMtimeMs(filePath: string): Promise<number | null> {
@@ -878,7 +879,7 @@ async function buildMetaKnowledgeIndex(
   manifest?: Record<string, any>,
   manifestMtimeMs?: number
 ): Promise<MetaKnowledgeIndex | null> {
-  const knowledgeDir = join(firmRoot, ".pi_tool", "knowledge");
+  const knowledgeDir = join(firmRoot, ".ai_tool", "knowledge");
   const manifestPath = join(knowledgeDir, "manifest.json");
 
   try {
@@ -936,7 +937,7 @@ async function buildMetaKnowledgeIndex(
 
     return {
       indexed_at: new Date().toISOString(),
-      source: ".pi_tool/knowledge/manifest.json",
+      source: ".ai_tool/knowledge/manifest.json",
       source_mtime: manifestMtimeMs,
       practice_area: typeof loadedManifest.practiceArea === "string"
         ? loadedManifest.practiceArea
@@ -958,7 +959,7 @@ async function buildMetaKnowledgeIndex(
 }
 
 async function getOrBuildMetaKnowledgeIndex(firmRoot: string): Promise<MetaKnowledgeIndex | null> {
-  const knowledgeDir = join(firmRoot, ".pi_tool", "knowledge");
+  const knowledgeDir = join(firmRoot, ".ai_tool", "knowledge");
   const manifestPath = join(knowledgeDir, "manifest.json");
   const cachePath = join(firmRoot, KNOWLEDGE_META_INDEX_PATH);
 
@@ -987,7 +988,7 @@ async function getOrBuildMetaKnowledgeIndex(firmRoot: string): Promise<MetaKnowl
   const cached = safeJsonParse<MetaKnowledgeIndex>(cachedRaw || "");
   if (
     cached &&
-    cached.source === ".pi_tool/knowledge/manifest.json" &&
+    cached.source === ".ai_tool/knowledge/manifest.json" &&
     cached.section_count === sectionsData.length &&
     cached.source_mtime === sourceMtime &&
     cached.practice_area === manifestPracticeArea &&
@@ -1047,7 +1048,7 @@ function buildMetaKnowledgeIndexText(index: MetaKnowledgeIndex | null): string {
       if (section.preview) lines.push(`  Preview: ${section.preview}`);
     }
     lines.push(
-      "Use read_file(\".pi_tool/knowledge/<filename>\") to load any section you need for full context."
+      "Use read_file(\".ai_tool/knowledge/<filename>\") to load any section you need for full context."
     );
   }
 
@@ -1060,8 +1061,8 @@ function buildMetaKnowledgeIndexText(index: MetaKnowledgeIndex | null): string {
 
 function buildMetaToolIndexText(): string {
   const toolHints = [
-    "read_file — Use for case data and indexed artifacts (document_index.json, meta_index.json, per-folder indexes, and .pi_tool/knowledge/meta_index.json).",
-    "read_index_slice — Bounded reads of .pi_tool/document_index.json for deep conflict/data review.",
+    "read_file — Use for case data and indexed artifacts (document_index.json, meta_index.json, per-folder indexes, and .ai_tool/knowledge/meta_index.json).",
+    "read_index_slice — Bounded reads of .ai_tool/document_index.json for deep conflict/data review.",
     "rerun_hypergraph — Re-runs hypergraph from document_index.json and can refresh needs_review.",
     "update_index / update_case_summary / update_file_entry — Write into document_index.json fields and conflict decisions.",
     "generate_document — Delegates formal document drafting to the doc agent.",
@@ -1145,7 +1146,7 @@ function summarizeCommonFolder(paths: string[]): string | null {
 }
 
 async function loadKnowledgeEvidencePacketConfig(firmRoot: string): Promise<LoadedKnowledgePacketConfig> {
-  const explicitPath = join(firmRoot, ".pi_tool", "knowledge", "evidence-packet-rules.json");
+  const explicitPath = join(firmRoot, ".ai_tool", "knowledge", "evidence-packet-rules.json");
   try {
     const explicitContent = await readFile(explicitPath, "utf-8");
     const explicitJson = safeJsonParse<Record<string, any>>(explicitContent);
@@ -1153,13 +1154,13 @@ async function loadKnowledgeEvidencePacketConfig(firmRoot: string): Promise<Load
     if (normalized) {
       return {
         config: normalized,
-        source: ".pi_tool/knowledge/evidence-packet-rules.json",
+        source: ".ai_tool/knowledge/evidence-packet-rules.json",
         rawText: explicitContent,
       };
     }
     return {
       config: null,
-      source: ".pi_tool/knowledge/evidence-packet-rules.json",
+      source: ".ai_tool/knowledge/evidence-packet-rules.json",
       rawText: explicitContent,
     };
   } catch {
@@ -1168,7 +1169,7 @@ async function loadKnowledgeEvidencePacketConfig(firmRoot: string): Promise<Load
 
   let firstRelevantText: { source: string; rawText: string } | null = null;
   try {
-    const manifestPath = join(firmRoot, ".pi_tool", "knowledge", "manifest.json");
+    const manifestPath = join(firmRoot, ".ai_tool", "knowledge", "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
     for (const section of manifest.sections || []) {
       const label = `${section?.id || ""} ${section?.title || ""}`.toLowerCase();
@@ -1176,7 +1177,7 @@ async function loadKnowledgeEvidencePacketConfig(firmRoot: string): Promise<Load
       if (!sectionFile) continue;
 
       try {
-        const content = await readFile(join(firmRoot, ".pi_tool", "knowledge", sectionFile), "utf-8");
+        const content = await readFile(join(firmRoot, ".ai_tool", "knowledge", sectionFile), "utf-8");
         const contentSnippet = content.slice(0, 4000).toLowerCase();
         const isPacketSection =
           /evidence|hearing|packet|exhibit|document index/.test(label) ||
@@ -1184,7 +1185,7 @@ async function loadKnowledgeEvidencePacketConfig(firmRoot: string): Promise<Load
         if (!isPacketSection) continue;
 
         if (!firstRelevantText) {
-          firstRelevantText = { source: `.pi_tool/knowledge/${sectionFile}`, rawText: content };
+          firstRelevantText = { source: `.ai_tool/knowledge/${sectionFile}`, rawText: content };
         }
         const parsedWhole = safeJsonParse<Record<string, any>>(content);
         const parsedFenced = parsedWhole || extractFirstJsonCodeFence(content);
@@ -1192,7 +1193,7 @@ async function loadKnowledgeEvidencePacketConfig(firmRoot: string): Promise<Load
         if (normalized) {
           return {
             config: normalized,
-            source: `.pi_tool/knowledge/${sectionFile}`,
+            source: `.ai_tool/knowledge/${sectionFile}`,
             rawText: content,
           };
         }
@@ -1609,7 +1610,7 @@ async function executeTool(
       }
 
       case "read_index_slice": {
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
         const content = await readFile(indexPath, "utf-8");
 
         const offsetRaw = Number(toolInput.offset);
@@ -1632,14 +1633,14 @@ async function executeTool(
       }
 
       case "rerun_hypergraph": {
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const index = JSON.parse(indexContent);
         const practiceArea = typeof index.practice_area === "string" ? index.practice_area : undefined;
         const applyToIndex = toolInput.apply_to_index !== false;
 
         const hypergraphResult = await generateHypergraph(caseFolder, index, practiceArea);
-        const hypergraphPath = join(caseFolder, ".pi_tool", "hypergraph_analysis.json");
+        const hypergraphPath = join(caseFolder, ".ai_tool", "hypergraph_analysis.json");
         await writeFile(hypergraphPath, JSON.stringify(hypergraphResult, null, 2));
 
         if (applyToIndex) {
@@ -1678,7 +1679,7 @@ async function executeTool(
 
         return JSON.stringify({
           success: true,
-          hypergraph_path: ".pi_tool/hypergraph_analysis.json",
+          hypergraph_path: ".ai_tool/hypergraph_analysis.json",
           conflicts_found: hypergraphResult.conflicts?.length || 0,
           fields_analyzed: hypergraphResult.summary?.total_fields_analyzed || 0,
           index_updated: applyToIndex,
@@ -1696,7 +1697,7 @@ async function executeTool(
       }
 
       case "create_document_view": {
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const indexData = JSON.parse(indexContent);
         const indexedPathMap = collectIndexedDocumentPathMap(indexData);
@@ -1774,7 +1775,7 @@ async function executeTool(
       }
 
       case "create_evidence_packet": {
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const indexData = JSON.parse(indexContent);
 
@@ -1804,7 +1805,7 @@ async function executeTool(
             "Use the meta-index already in your context to identify relevant documents for this packet:",
             "1. If a hearing number was provided, find and read the hearing notice using read_file or read_document to understand what this hearing is for.",
             "2. Review the meta-index folders in your context — look at filenames, types, dates, and facts to identify which documents belong in the packet.",
-            "3. For folders with relevant documents, use read_file(\".pi_tool/indexes/{FolderName}.json\") to get doc_id values for the specific files you want to include.",
+            "3. For folders with relevant documents, use read_file(\".ai_tool/indexes/{FolderName}.json\") to get doc_id values for the specific files you want to include.",
             "4. Check the EVIDENCE PACKET RULES section in your context for packet ordering rules.",
             "5. Present the proposed ordered document list to the user for review. Show title, folder, and why each was included.",
             "6. After the user confirms (or adjusts), call build_evidence_packet with the verified ordered list using doc_id for each document.",
@@ -1814,7 +1815,7 @@ async function executeTool(
       }
 
       case "build_evidence_packet": {
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const indexData = JSON.parse(indexContent);
 
@@ -1881,7 +1882,7 @@ async function executeTool(
       }
 
       case "update_index": {
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const index = JSON.parse(indexContent);
 
@@ -1916,7 +1917,7 @@ async function executeTool(
       }
 
       case "update_case_summary": {
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const index = JSON.parse(indexContent);
 
@@ -1951,7 +1952,7 @@ async function executeTool(
       }
 
       case "update_file_entry": {
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const index = JSON.parse(indexContent);
 
@@ -2007,7 +2008,7 @@ async function executeTool(
       }
 
       case "get_conflicts": {
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const index = JSON.parse(indexContent);
 
@@ -2041,7 +2042,7 @@ async function executeTool(
         // Try to load hypergraph for value→count data (much more compact than raw sources)
         let hypergraph: Record<string, any> | null = null;
         try {
-          const hgPath = join(caseFolder, ".pi_tool", "hypergraph_analysis.json");
+          const hgPath = join(caseFolder, ".ai_tool", "hypergraph_analysis.json");
           const hgContent = await readFile(hgPath, "utf-8");
           const hgData = JSON.parse(hgContent);
           if (hgData.hypergraph && typeof hgData.hypergraph === "object") {
@@ -2097,7 +2098,7 @@ async function executeTool(
           return JSON.stringify({ success: false, error: "No resolutions provided" });
         }
 
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const index = JSON.parse(indexContent);
 
@@ -2214,7 +2215,7 @@ async function executeTool(
 
       case "resolve_conflict": {
         const { field, resolved_value, evidence } = toolInput;
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
         const indexContent = await readFile(indexPath, "utf-8");
         const index = JSON.parse(indexContent);
 
@@ -2359,7 +2360,7 @@ async function executeTool(
 // Build context from case folder
 async function buildContext(caseFolder: string): Promise<string> {
   const parts: string[] = [];
-  const firmRoot = dirname(caseFolder);
+  const firmRoot = resolveFirmRoot(caseFolder);
 
   // Current date
   const now = new Date();
@@ -2373,8 +2374,8 @@ async function buildContext(caseFolder: string): Promise<string> {
 
   // Load meta-index (or generate lazily from document_index.json)
   try {
-    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
-    const metaIndexPath = join(caseFolder, ".pi_tool", "meta_index.json");
+    const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+    const metaIndexPath = join(caseFolder, ".ai_tool", "meta_index.json");
 
     let metaIndexData: Record<string, any>;
     try {
@@ -2406,7 +2407,7 @@ async function buildContext(caseFolder: string): Promise<string> {
 
   // Load templates list
   try {
-    const templatesPath = join(firmRoot, ".pi_tool", "templates", "templates.json");
+    const templatesPath = join(firmRoot, ".ai_tool", "templates", "templates.json");
     const templatesData = JSON.parse(await readFile(templatesPath, "utf-8"));
     if (templatesData.templates?.length > 0) {
       const templateList = templatesData.templates
@@ -2448,7 +2449,7 @@ Your context includes a meta-index with all case facts organized by folder. Each
 - Deduped facts extracted from the folder's documents
 
 For quick answers, use the facts in the meta-index directly.
-For full document details in any folder, use: read_file(".pi_tool/indexes/{FolderName}.json")
+For full document details in any folder, use: read_file(".ai_tool/indexes/{FolderName}.json")
 For reading a specific document:
 - Use read_file for DOCX and text-like files (including .pdf when OCR/text extraction is sufficient): read_file("{folder}/{filename}")
 - Use read_document only for PDFs where you need vision (scanned pages, handwriting, complex layout): read_document("{folder}/{filename}.pdf", "...").
@@ -2458,9 +2459,9 @@ For reading a specific document:
 1. **Answer Questions**: Use the case index and your knowledge to answer questions about cases, injuries, treatments, and PI law.
 
 2. **Read Files**: Use read_file for quick text lookups — reading per-folder index files, checking a text/JSON file, DOCX files, or grabbing a snippet. For PDFs this uses basic text extraction only.
-   For deep index detail, read per-folder files at .pi_tool/indexes/{FolderName}.json, or use read_index_slice to page through the full .pi_tool/document_index.json.
+   For deep index detail, read per-folder files at .ai_tool/indexes/{FolderName}.json, or use read_index_slice to page through the full .ai_tool/document_index.json.
 
-2b. **Re-run Hypergraph**: Use rerun_hypergraph to rebuild .pi_tool/hypergraph_analysis.json from the current index and refresh conflict detection without re-extraction.
+2b. **Re-run Hypergraph**: Use rerun_hypergraph to rebuild .ai_tool/hypergraph_analysis.json from the current index and refresh conflict detection without re-extraction.
 
 3. **Update Case Data**: Use update_index when the user provides corrections or new information about top-level case fields (e.g., client name, DOB, case phase, policy limits).
    Use update_case_summary when updating the narrative case summary.
@@ -2496,7 +2497,7 @@ Use read_document only when the user asks about a specific PDF and layout/contex
 Use read_file for:
 - DOCX files
 - Non-PDF files
-- Per-folder indexes (.pi_tool/indexes/{FolderName}.json) or small index files
+- Per-folder indexes (.ai_tool/indexes/{FolderName}.json) or small index files
 - Quick lookups on text or JSON files
 
 Do not call read_document on DOCX or other non-PDF files; use read_file instead.
@@ -2542,7 +2543,7 @@ Use this tool when the user asks for commands like:
 - "Show me only recent treatment records"
 
 Requirements:
-- Use explicit documents[].path values that exist in .pi_tool/document_index.json.
+- Use explicit documents[].path values that exist in .ai_tool/document_index.json.
 - Prefer meaningful name and a short description.
 - Set sort_by / sort_direction when the user requests ordering (e.g., chronological).
 - After creating the view, explain what you selected and why in normal chat text.

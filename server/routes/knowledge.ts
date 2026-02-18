@@ -103,7 +103,7 @@ app.post("/init", async (c) => {
   }
 
   const templateDir = join(templatesDir, templateId);
-  const knowledgeDir = join(root, ".pi_tool", "knowledge");
+  const knowledgeDir = join(root, ".ai_tool", "knowledge");
 
   try {
     // Verify template exists
@@ -124,7 +124,7 @@ app.post("/init", async (c) => {
     }
 
     // Create default firm-config.json if it doesn't exist
-    const firmConfigPath = join(root, ".pi_tool", "firm-config.json");
+    const firmConfigPath = join(root, ".ai_tool", "firm-config.json");
     try {
       await stat(firmConfigPath);
     } catch {
@@ -163,7 +163,7 @@ app.get("/manifest", async (c) => {
   if (!root) return c.json({ error: "root query param required" }, 400);
 
   try {
-    const manifestPath = join(root, ".pi_tool", "knowledge", "manifest.json");
+    const manifestPath = join(root, ".ai_tool", "knowledge", "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
     return c.json(manifest);
   } catch (error) {
@@ -181,7 +181,7 @@ app.get("/section/:id", async (c) => {
   if (!root) return c.json({ error: "root query param required" }, 400);
 
   try {
-    const manifestPath = join(root, ".pi_tool", "knowledge", "manifest.json");
+    const manifestPath = join(root, ".ai_tool", "knowledge", "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
     const section = manifest.sections.find((s: any) => s.id === sectionId);
 
@@ -190,7 +190,7 @@ app.get("/section/:id", async (c) => {
     }
 
     const content = await readFile(
-      join(root, ".pi_tool", "knowledge", section.filename),
+      join(root, ".ai_tool", "knowledge", section.filename),
       "utf-8"
     );
 
@@ -209,7 +209,7 @@ app.put("/section/:id", async (c) => {
   }
 
   try {
-    const knowledgeDir = join(root, ".pi_tool", "knowledge");
+    const knowledgeDir = join(root, ".ai_tool", "knowledge");
     const manifestPath = join(knowledgeDir, "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
     const section = manifest.sections.find((s: any) => s.id === sectionId);
@@ -252,7 +252,7 @@ app.post("/section", async (c) => {
   }
 
   try {
-    const knowledgeDir = join(root, ".pi_tool", "knowledge");
+    const knowledgeDir = join(root, ".ai_tool", "knowledge");
     const manifestPath = join(knowledgeDir, "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
 
@@ -283,7 +283,7 @@ app.delete("/section/:id", async (c) => {
   if (!root) return c.json({ error: "root query param required" }, 400);
 
   try {
-    const knowledgeDir = join(root, ".pi_tool", "knowledge");
+    const knowledgeDir = join(root, ".ai_tool", "knowledge");
     const manifestPath = join(knowledgeDir, "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
     const sectionIdx = manifest.sections.findIndex((s: any) => s.id === sectionId);
@@ -328,7 +328,7 @@ app.post("/chat", async (c) => {
   // Load all knowledge sections as context
   let knowledgeContext = "";
   try {
-    const knowledgeDir = join(root, ".pi_tool", "knowledge");
+    const knowledgeDir = join(root, ".ai_tool", "knowledge");
     const manifestPath = join(knowledgeDir, "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
 
@@ -418,7 +418,7 @@ app.post("/apply-edit", async (c) => {
   }
 
   try {
-    const knowledgeDir = join(root, ".pi_tool", "knowledge");
+    const knowledgeDir = join(root, ".ai_tool", "knowledge");
     const manifestPath = join(knowledgeDir, "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
     const section = manifest.sections.find((s: any) => s.id === section_id);
@@ -477,7 +477,7 @@ app.post("/firm-logo/upload", async (c) => {
       return c.json({ error: "Only PNG and JPG images are supported" }, 400);
     }
 
-    const piToolDir = join(root, ".pi_tool");
+    const piToolDir = join(root, ".ai_tool");
     await mkdir(piToolDir, { recursive: true });
 
     // Delete any existing logo first
@@ -508,7 +508,7 @@ app.get("/firm-logo", async (c) => {
   const root = c.req.query("root");
   if (!root) return c.json({ error: "root query param required" }, 400);
 
-  const piToolDir = join(root, ".pi_tool");
+  const piToolDir = join(root, ".ai_tool");
 
   // Check for logo with any supported extension
   for (const ext of [".png", ".jpg", ".jpeg"]) {
@@ -538,7 +538,7 @@ app.delete("/firm-logo", async (c) => {
   const root = c.req.query("root");
   if (!root) return c.json({ error: "root query param required" }, 400);
 
-  const piToolDir = join(root, ".pi_tool");
+  const piToolDir = join(root, ".ai_tool");
   let deleted = false;
 
   // Delete logo with any supported extension
@@ -566,7 +566,7 @@ app.get("/firm-config", async (c) => {
   if (!root) return c.json({ error: "root query param required" }, 400);
 
   try {
-    const configPath = join(root, ".pi_tool", "firm-config.json");
+    const configPath = join(root, ".ai_tool", "firm-config.json");
     const config = JSON.parse(await readFile(configPath, "utf-8"));
     return c.json(config);
   } catch (error) {
@@ -592,7 +592,7 @@ app.put("/firm-config", async (c) => {
   if (!root) return c.json({ error: "root required" }, 400);
 
   try {
-    const piToolDir = join(root, ".pi_tool");
+    const piToolDir = join(root, ".ai_tool");
     await mkdir(piToolDir, { recursive: true });
     const configPath = join(piToolDir, "firm-config.json");
     await writeFile(configPath, JSON.stringify(config, null, 2));
@@ -614,7 +614,7 @@ export async function loadPracticeGuide(firmRoot?: string): Promise<string> {
     if (knowledgeCache.has(cacheKey)) return knowledgeCache.get(cacheKey)!;
 
     try {
-      const knowledgeDir = join(firmRoot, ".pi_tool", "knowledge");
+      const knowledgeDir = join(firmRoot, ".ai_tool", "knowledge");
       const manifestPath = join(knowledgeDir, "manifest.json");
       const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
 
@@ -670,7 +670,7 @@ export async function loadSectionsByIds(
   }
 
   try {
-    const knowledgeDir = join(firmRoot, ".pi_tool", "knowledge");
+    const knowledgeDir = join(firmRoot, ".ai_tool", "knowledge");
     const manifestPath = join(knowledgeDir, "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
 
@@ -722,7 +722,7 @@ app.get("/doc-templates", async (c) => {
   const root = c.req.query("root");
   if (!root) return c.json({ error: "root query param required" }, 400);
 
-  const templatesDir = join(root, ".pi_tool", "templates");
+  const templatesDir = join(root, ".ai_tool", "templates");
   const sourceDir = join(templatesDir, "source");
   const parsedDir = join(templatesDir, "parsed");
   const indexPath = join(templatesDir, "templates.json");
@@ -800,7 +800,7 @@ app.post("/doc-templates/upload", async (c) => {
   const root = c.req.query("root");
   if (!root) return c.json({ error: "root query param required" }, 400);
 
-  const templatesDir = join(root, ".pi_tool", "templates");
+  const templatesDir = join(root, ".ai_tool", "templates");
   const sourceDir = join(templatesDir, "source");
 
   try {
@@ -850,7 +850,7 @@ app.post("/doc-templates/:id/parse", async (c) => {
   const templateId = c.req.param("id");
   if (!root) return c.json({ error: "root query param required" }, 400);
 
-  const templatesDir = join(root, ".pi_tool", "templates");
+  const templatesDir = join(root, ".ai_tool", "templates");
   const sourceDir = join(templatesDir, "source");
   const parsedDir = join(templatesDir, "parsed");
   const indexPath = join(templatesDir, "templates.json");
@@ -905,7 +905,7 @@ app.post("/doc-templates/:id/parse", async (c) => {
         extractedAt: new Date().toISOString(),
         styles: extractedStyles,
       };
-      const stylesPath = join(root, ".pi_tool", "template-styles.json");
+      const stylesPath = join(root, ".ai_tool", "template-styles.json");
       await writeFile(stylesPath, JSON.stringify(stylesData, null, 2));
     }
 
@@ -979,7 +979,7 @@ async function processTemplatesWithLimit(
   const results: ParseResult[] = new Array(templates.length);
   let currentIndex = 0;
 
-  const templatesDir = join(root, ".pi_tool", "templates");
+  const templatesDir = join(root, ".ai_tool", "templates");
   const sourceDir = join(templatesDir, "source");
   const parsedDir = join(templatesDir, "parsed");
   const indexPath = join(templatesDir, "templates.json");
@@ -1047,7 +1047,7 @@ async function processTemplatesWithLimit(
             extractedAt: new Date().toISOString(),
             styles: extractedStyles,
           };
-          const stylesPath = join(root, ".pi_tool", "template-styles.json");
+          const stylesPath = join(root, ".ai_tool", "template-styles.json");
           await writeFile(stylesPath, JSON.stringify(stylesData, null, 2));
         }
 
@@ -1124,7 +1124,7 @@ app.post("/doc-templates/parse-batch", async (c) => {
 
   const { templateIds, reparse } = await c.req.json();
 
-  const templatesDir = join(root, ".pi_tool", "templates");
+  const templatesDir = join(root, ".ai_tool", "templates");
   const sourceDir = join(templatesDir, "source");
   const indexPath = join(templatesDir, "templates.json");
 
@@ -1239,7 +1239,7 @@ app.put("/doc-templates/:id", async (c) => {
 
   if (!root) return c.json({ error: "root query param required" }, 400);
 
-  const indexPath = join(root, ".pi_tool", "templates", "templates.json");
+  const indexPath = join(root, ".ai_tool", "templates", "templates.json");
 
   try {
     const indexContent = await readFile(indexPath, "utf-8");
@@ -1274,7 +1274,7 @@ app.get("/doc-templates/:id/preview", async (c) => {
 
   if (!root) return c.json({ error: "root query param required" }, 400);
 
-  const parsedFilePath = join(root, ".pi_tool", "templates", "parsed", `${templateId}.md`);
+  const parsedFilePath = join(root, ".ai_tool", "templates", "parsed", `${templateId}.md`);
 
   try {
     const content = await readFile(parsedFilePath, "utf-8");
@@ -1291,7 +1291,7 @@ app.delete("/doc-templates/:id", async (c) => {
 
   if (!root) return c.json({ error: "root query param required" }, 400);
 
-  const templatesDir = join(root, ".pi_tool", "templates");
+  const templatesDir = join(root, ".ai_tool", "templates");
   const indexPath = join(templatesDir, "templates.json");
 
   try {
@@ -1342,7 +1342,7 @@ app.post("/doc-templates/:id/extract-styles", async (c) => {
 
   if (!root) return c.json({ error: "root query param required" }, 400);
 
-  const templatesDir = join(root, ".pi_tool", "templates");
+  const templatesDir = join(root, ".ai_tool", "templates");
   const sourceDir = join(templatesDir, "source");
 
   try {
@@ -1381,7 +1381,7 @@ app.post("/doc-templates/:id/extract-styles", async (c) => {
       styles,
     };
 
-    const stylesPath = join(root, ".pi_tool", "template-styles.json");
+    const stylesPath = join(root, ".ai_tool", "template-styles.json");
     await writeFile(stylesPath, JSON.stringify(stylesData, null, 2));
 
     return c.json({
@@ -1403,7 +1403,7 @@ app.get("/template-styles", async (c) => {
 
   if (!root) return c.json({ error: "root query param required" }, 400);
 
-  const stylesPath = join(root, ".pi_tool", "template-styles.json");
+  const stylesPath = join(root, ".ai_tool", "template-styles.json");
 
   try {
     const content = await readFile(stylesPath, "utf-8");
@@ -1541,7 +1541,7 @@ Format everything as clean markdown. The goal is to help an AI agent understand 
  * Returns a formatted string describing available templates.
  */
 export async function loadDocumentTemplates(firmRoot: string): Promise<string> {
-  const indexPath = join(firmRoot, ".pi_tool", "templates", "templates.json");
+  const indexPath = join(firmRoot, ".ai_tool", "templates", "templates.json");
 
   try {
     const indexContent = await readFile(indexPath, "utf-8");
@@ -1563,7 +1563,7 @@ export async function loadDocumentTemplates(firmRoot: string): Promise<string> {
     return `DOCUMENT TEMPLATES:
 ${lines.join("\n")}
 
-To use a template, read .pi_tool/templates/parsed/{id}.md for the template content.`;
+To use a template, read .ai_tool/templates/parsed/{id}.md for the template content.`;
   } catch {
     return "";
   }

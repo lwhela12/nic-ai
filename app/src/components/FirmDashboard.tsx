@@ -88,11 +88,13 @@ interface CaseSummary {
   containerName?: string         // Container display name
   siblingCases?: Array<{ path: string; name: string; dateOfInjury: string }>
   injuryDate?: string            // Parsed from DOI folder name (YYYY-MM-DD)
+  fileCount?: number             // Total document files in case folder
 }
 
 interface FirmData {
   root: string
   cases: CaseSummary[]
+  yearBasedMode?: boolean
   summary: {
     total: number
     indexed: number
@@ -1072,6 +1074,30 @@ export default function FirmDashboard({
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
             <div className="flex items-center gap-2 rounded-xl bg-white/5 px-2 py-1">
+              {firmData?.yearBasedMode && (
+                <button
+                  onClick={async () => {
+                    try {
+                      const res = await fetch(`${apiUrl}/api/firm/scan-clients`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ root: firmRoot }),
+                      })
+                      if (res.ok) {
+                        const result = await res.json()
+                        if (result.added?.length > 0 || result.updated?.length > 0) {
+                          loadCases()
+                        }
+                      }
+                    } catch {}
+                  }}
+                  className="px-4 py-2 text-sm text-brand-200 hover:text-white bg-white/5 hover:bg-white/10
+                             rounded-lg transition-colors"
+                  title="Scan year folders for new or updated clients"
+                >
+                  Scan for Clients
+                </button>
+              )}
               {selectedCases.size === 0 && unindexedCases.length > 0 && (
                 <button
                   onClick={() => startBatchIndex(unindexedCases.map(c => c.path))}
@@ -1622,7 +1648,7 @@ export default function FirmDashboard({
                             </span>
                           </div>
                         ) : !c.indexed ? (
-                          <span className="text-xs text-brand-400">Not indexed</span>
+                          <span className="text-xs text-brand-400">Not indexed{c.fileCount ? ` (${c.fileCount} files)` : ''}</span>
                         ) : c.needsReindex ? (
                           <span className="inline-flex items-center gap-1.5 text-amber-600">
                             <span className="w-2 h-2 bg-amber-400 rounded-full"></span>

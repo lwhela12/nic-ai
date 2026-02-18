@@ -55,7 +55,7 @@ export interface TeamContext {
 }
 
 const TEAM_FILE = "team.json";
-const TOOL_DIR = ".pi_tool";
+const TOOL_DIR = ".ai_tool";
 const TEAM_VERSION = 1;
 const INVITE_EXPIRY_DAYS = 30;
 

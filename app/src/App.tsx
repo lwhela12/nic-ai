@@ -1663,15 +1663,17 @@ function App() {
 
   // Handle login success
   const handleLoginSuccess = (email: string, subscriptionStatus: string) => {
-    // Force explicit folder selection on each login so users do not inherit prior local workspace context
-    setFirmRoot(null)
+    // Preserve saved firm root across logins — user can switch via "Change Folder"
+    const savedRoot = localStorage.getItem(FIRM_ROOT_KEY)
     setCaseFolder(null)
     setDocumentIndex(null)
-    setPracticeArea(null)
     setPendingFolderPath(null)
     setPendingPracticeArea(null)
     setFolderSetupError(null)
-    localStorage.removeItem(FIRM_ROOT_KEY)
+    if (!savedRoot) {
+      setFirmRoot(null)
+      setPracticeArea(null)
+    }
     setAuthState({
       authenticated: true,
       email,

@@ -5,7 +5,7 @@ description: Initialize a case by indexing all documents
 
 Index all documents in this case folder. For each document, extract the title, date, and what's important about it.
 
-Save the result to `.pi_tool/document_index.json`
+Save the result to `.ai_tool/document_index.json`
 
 Use sub-agents for each folder to manage context efficiently.
 

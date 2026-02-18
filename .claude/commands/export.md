@@ -62,13 +62,13 @@ curl -s -X POST http://localhost:3001/api/docs/export \
   -H "Content-Type: application/json" \
   -d '{
     "caseFolder": "/Users/lucaswhelan/Cases/Smith v. Jones",
-    "sourcePath": ".pi_tool/case_memo.md",
+    "sourcePath": ".ai_tool/case_memo.md",
     "format": "pdf",
     "openAfter": true
   }'
 ```
 
-Output: `.pi_tool/case_memo.pdf` (opens in Preview)
+Output: `.ai_tool/case_memo.pdf` (opens in Preview)
 
 ### Export with custom output path
 

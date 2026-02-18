@@ -49,7 +49,7 @@ The frontend proxies `/api/*` requests to the backend via Vite config.
 - Uses `@anthropic-ai/claude-agent-sdk` for agent interactions
 - System prompt loaded from `agent/system-prompt.md`
 - Supports parallel subagent spawning via Task tool for batch operations
-- Sessions persisted per-case in `.pi_tool/session.json`
+- Sessions persisted per-case in `.ai_tool/session.json`
 
 ### Key Flows
 
@@ -57,7 +57,7 @@ The frontend proxies `/api/*` requests to the backend via Vite config.
 1. User clicks "Re-index" in case view
 2. `POST /api/claude/chat` with indexing prompt
 3. Agent reads documents, spawns folder subagents in parallel
-4. Writes index to `.pi_tool/document_index.json`
+4. Writes index to `.ai_tool/document_index.json`
 
 **Batch Indexing (Multiple Cases):**
 1. User clicks "Index All" in dashboard
@@ -72,7 +72,7 @@ The frontend proxies `/api/*` requests to the backend via Vite config.
 - Frontend shows amber banner when updates needed
 
 ### Data Storage
-- Each case folder contains `.pi_tool/` directory:
+- Each case folder contains `.ai_tool/` directory:
   - `document_index.json` - Parsed case data
   - `session.json` - Agent session ID for continuity
   - `case_memo.md` - Generated case memo (if created)

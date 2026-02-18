@@ -10,8 +10,8 @@ const caseFolder = process.argv[2] || "/Users/lucaswhelan/claude-pi/test-cases/l
 async function testSynthesis() {
   console.log(`Testing synthesis for: ${caseFolder}`);
 
-  const indexPath = join(caseFolder, '.pi_tool/document_index.json');
-  const hypergraphPath = join(caseFolder, '.pi_tool/hypergraph_analysis.json');
+  const indexPath = join(caseFolder, '.ai_tool/document_index.json');
+  const hypergraphPath = join(caseFolder, '.ai_tool/hypergraph_analysis.json');
 
   const [documentIndexContent, hypergraphContent] = await Promise.all([
     readFile(indexPath, 'utf-8'),

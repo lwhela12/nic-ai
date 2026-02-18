@@ -2,7 +2,7 @@ import { existsSync } from "fs";
 import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
 
-const LOCK_DIR = ".pi_tool/locks";
+const LOCK_DIR = ".ai_tool/locks";
 const LOCK_FILE = "write.lock.json";
 const DEFAULT_TTL_MS = 10 * 60 * 1000;
 

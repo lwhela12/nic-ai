@@ -44,7 +44,7 @@ export async function resolveFirmPracticeArea(
   firmRoot: string
 ): Promise<PracticeAreaName | undefined> {
   try {
-    const firmConfigPath = join(firmRoot, ".pi_tool", "firm-config.json");
+    const firmConfigPath = join(firmRoot, ".ai_tool", "firm-config.json");
     const config = JSON.parse(await readFile(firmConfigPath, "utf-8"));
     const fromConfig = normalizePracticeArea(config?.practiceArea);
     if (fromConfig) return fromConfig;
@@ -53,7 +53,7 @@ export async function resolveFirmPracticeArea(
   }
 
   try {
-    const manifestPath = join(firmRoot, ".pi_tool", "knowledge", "manifest.json");
+    const manifestPath = join(firmRoot, ".ai_tool", "knowledge", "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
     const fromManifest = normalizePracticeArea(manifest?.practiceArea);
     if (fromManifest) return fromManifest;

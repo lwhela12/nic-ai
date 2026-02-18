@@ -10,20 +10,20 @@ Combine the finalized demand letter with all supporting exhibits into a single P
 ## Prerequisites
 
 Before bundling, verify:
-1. Demand letter markdown exists at `.pi_tool/drafts/demand_letter.md`
-2. Manifest exists at `.pi_tool/drafts/manifest.json` with a `demand_letter` entry
+1. Demand letter markdown exists at `.ai_tool/drafts/demand_letter.md`
+2. Manifest exists at `.ai_tool/drafts/manifest.json` with a `demand_letter` entry
 3. The `demand_letter` entry has an `exhibits` array
 
 If these are missing, inform the user they need to run `/draft-demand` first.
 
 ## Step 1: Check Prerequisites
 
-Read `.pi_tool/drafts/manifest.json` and verify:
+Read `.ai_tool/drafts/manifest.json` and verify:
 - The `demand_letter` key exists
 - It has an `exhibits` array with at least one entry
 - Each exhibit has a `path` property
 
-Also check that `.pi_tool/drafts/demand_letter.md` exists.
+Also check that `.ai_tool/drafts/demand_letter.md` exists.
 
 ## Step 2: Call the Bundle API
 

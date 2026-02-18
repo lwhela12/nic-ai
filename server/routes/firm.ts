@@ -8,6 +8,19 @@ import { getSDKCliOptions } from "../lib/sdk-cli-options";
 import { readdir, readFile, stat, writeFile, mkdir } from "fs/promises";
 import { readFileSync, existsSync } from "fs";
 import { join, relative, dirname } from "path";
+import { migratePiTool } from "../lib/migrate-pi-tool";
+import {
+  detectYearBasedMode,
+  loadClientRegistry,
+  scanAndBuildRegistry,
+  refreshRegistry,
+  resolveFirmRoot,
+  getClientSlug,
+  getSourceFolders,
+  listYearBasedCaseFiles,
+  resolveYearFilePath,
+  type ClientRegistry,
+} from "../lib/year-mode";
 import { homedir } from "os";
 import { getFirmSession, saveFirmSession } from "../sessions";
 import { PHASE_RULES, getPhaseRules } from "../shared/phase-rules";
@@ -525,6 +538,7 @@ interface CaseSummary {
   containerName?: string;         // Container display name
   siblingCases?: Array<{ path: string; name: string; dateOfInjury: string }>;
   injuryDate?: string;            // Parsed from DOI folder name (YYYY-MM-DD)
+  fileCount?: number;             // Total document files in case folder
 }
 
 // Helper to parse amount values (handles both number and string formats like "$24,419.90")
@@ -547,7 +561,7 @@ async function buildCaseSummary(
     practiceArea?: string;
   }
 ): Promise<CaseSummary> {
-  const indexPath = join(casePath, ".pi_tool", "document_index.json");
+  const indexPath = join(casePath, ".ai_tool", "document_index.json");
   const configuredPracticeArea = normalizePracticeArea(options?.practiceArea);
 
   const caseSummary: CaseSummary = {
@@ -655,6 +669,22 @@ async function buildCaseSummary(
     caseSummary.indexed = false;
   }
 
+  // Quick file count (lightweight recursive walk)
+  try {
+    let count = 0;
+    async function countFiles(dir: string) {
+      let entries: Awaited<ReturnType<typeof readdir>>;
+      try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.name === '.ai_tool' || e.name.startsWith('.')) continue;
+        if (e.isDirectory()) await countFiles(join(dir, e.name));
+        else count++;
+      }
+    }
+    await countFiles(casePath);
+    caseSummary.fileCount = count;
+  } catch { /* ignore */ }
+
   return caseSummary;
 }
 
@@ -738,6 +768,9 @@ app.get("/cases", async (c) => {
     return access.response;
   }
 
+  // Migrate .pi_tool → .ai_tool at firm root if needed
+  await migratePiTool(root);
+
   const configuredPracticeArea = await resolveFirmPracticeArea(root);
   const practiceArea =
     configuredPracticeArea ||
@@ -746,11 +779,48 @@ app.get("/cases", async (c) => {
   const isWC = practiceArea === PRACTICE_AREAS.WC;
 
   try {
+    // Check for year-based folder structure (2024/, 2025/, etc.)
+    const yearMode = await detectYearBasedMode(root);
+    if (yearMode) {
+      let registry = await loadClientRegistry(root);
+      if (!registry) {
+        registry = await scanAndBuildRegistry(root);
+      }
+
+      // Build CaseSummary[] from virtual case folders
+      const cases = await Promise.all(
+        Object.values(registry.clients).map(async (client) => {
+          const virtualPath = join(root, ".ai_tool", "clients", client.slug);
+          return buildCaseSummary(virtualPath, client.name, { practiceArea });
+        })
+      );
+
+      // Sort: indexed first, then alphabetically
+      cases.sort((a, b) => {
+        if (a.indexed !== b.indexed) return a.indexed ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      const indexedCount = cases.filter((c) => c.indexed).length;
+
+      return c.json({
+        root,
+        practiceArea,
+        yearBasedMode: true,
+        cases,
+        summary: {
+          total: cases.length,
+          indexed: indexedCount,
+          needsAttention: 0,
+        },
+      });
+    }
+
     const entries = await readdir(root, { withFileTypes: true });
 
     // Process all case directories in parallel for speed
     const casePromises = entries
-      .filter(entry => entry.isDirectory() && entry.name !== ".pi_tool")
+      .filter(entry => entry.isDirectory() && entry.name !== ".ai_tool" && entry.name !== ".ai_tool")
       .map(async (entry) => {
         const casePath = join(root, entry.name);
         const results: CaseSummary[] = [];
@@ -850,6 +920,28 @@ app.get("/cases", async (c) => {
   } catch (error) {
     console.error("Firm cases error:", error);
     return c.json({ error: "Could not read firm directory" }, 500);
+  }
+});
+
+// Scan for new clients in year-based folder structures
+app.post("/scan-clients", async (c) => {
+  const { root } = await c.req.json();
+
+  if (!root) {
+    return c.json({ error: "root is required" }, 400);
+  }
+
+  const access = await requireFirmAccess(c, root);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  try {
+    const result = await refreshRegistry(root);
+    return c.json(result);
+  } catch (error) {
+    console.error("Scan clients error:", error);
+    return c.json({ error: "Could not scan for clients" }, 500);
   }
 });
 
@@ -1548,12 +1640,21 @@ interface ClassifiedFile {
 async function classifyFile(
   caseFolder: string,
   filePath: string,
+  yearModeInfo?: { firmRoot: string; registry: ClientRegistry; slug: string },
 ): Promise<ClassifiedFile> {
   const filename = filePath.split('/').pop() || filePath;
   const isPdf = filename.toLowerCase().endsWith(".pdf");
   const rawFolder = dirname(filePath).replace(/\\/g, '/');
   const folder = rawFolder === '.' ? '.' : rawFolder;
-  const fullPath = join(caseFolder, filePath);
+
+  // Year-based mode: resolve through source folders
+  let fullPath: string;
+  if (yearModeInfo) {
+    const { firmRoot, registry, slug } = yearModeInfo;
+    fullPath = resolveYearFilePath(firmRoot, registry, slug, filePath);
+  } else {
+    fullPath = join(caseFolder, filePath);
+  }
 
   let fileSizeMB = 0;
   try {
@@ -1810,7 +1911,7 @@ async function synthesizeCaseSummary(
   console.log(`[Sonnet] Conflicts detected: ${conflictCount}`);
 
   const startTime = Date.now();
-  const indexDir = join(caseFolder, '.pi_tool');
+  const indexDir = join(caseFolder, '.ai_tool');
   const indexPath = join(indexDir, 'document_index.json');
   const hypergraphPath = join(indexDir, 'hypergraph_analysis.json');
 
@@ -1967,14 +2068,50 @@ Analyze the case and use the case_synthesis tool to return your synthesis.`
 }
 
 // List all indexable files in a case folder
-async function listCaseFiles(caseFolder: string): Promise<string[]> {
+async function listCaseFiles(
+  caseFolder: string,
+  options?: { sourceFolders?: { firmRoot: string; folders: string[] } }
+): Promise<string[]> {
+  // Year-based mode: walk each source folder with year prefix
+  if (options?.sourceFolders) {
+    const { firmRoot, folders } = options.sourceFolders;
+    const allFiles: string[] = [];
+    for (const relFolder of folders) {
+      const absFolder = join(firmRoot, relFolder);
+      const yearPrefix = relFolder.split("/")[0];
+      const files: string[] = [];
+
+      async function walkSourceDir(dir: string, base: string = '') {
+        let entries: Awaited<ReturnType<typeof readdir>>;
+        try {
+          entries = await readdir(dir, { withFileTypes: true });
+        } catch { return; }
+        for (const entry of entries) {
+          if (entry.name === '.ai_tool' || entry.name.startsWith('.')) continue;
+          const fullPath = join(dir, entry.name);
+          const relativePath = base ? `${base}/${entry.name}` : entry.name;
+          if (entry.isDirectory()) {
+            await walkSourceDir(fullPath, relativePath);
+          } else {
+            files.push(`${yearPrefix}/${relativePath}`);
+          }
+        }
+      }
+
+      await walkSourceDir(absFolder);
+      allFiles.push(...files);
+    }
+    return allFiles;
+  }
+
+  // Standard mode
   const files: string[] = [];
 
   async function walkDir(dir: string, base: string = '') {
     const entries = await readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
-      // Skip .pi_tool entirely
-      if (entry.name === '.pi_tool') continue;
+      // Skip .ai_tool entirely
+      if (entry.name === '.ai_tool') continue;
 
       const fullPath = join(dir, entry.name);
       const relativePath = base ? `${base}/${entry.name}` : entry.name;
@@ -2037,7 +2174,7 @@ async function detectDOISubfolders(folderPath: string): Promise<DOIDetectionResu
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      if (entry.name === '.pi_tool') continue;
+      if (entry.name === '.ai_tool') continue;
 
       const parsed = parseDOIFolderName(entry.name);
       if (parsed) {
@@ -2096,7 +2233,7 @@ async function indexContainer(
   onProgress?: (event: { type: string; [key: string]: any }) => void
 ): Promise<{ success: boolean; containerInfo?: ContainerInfo; error?: string }> {
   const containerName = containerPath.split('/').pop() || containerPath;
-  const piToolDir = join(containerPath, '.pi_tool');
+  const piToolDir = join(containerPath, '.ai_tool');
   const containerInfoPath = join(piToolDir, 'container_info.json');
 
   onProgress?.({ type: "status", message: `Indexing container: ${containerName}` });
@@ -2150,14 +2287,14 @@ async function discoverSubcases(casePath: string): Promise<string[]> {
     const entries = await readdir(casePath, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      if (entry.name === '.pi_tool') continue;
+      if (entry.name === '.ai_tool' || entry.name === '.ai_tool') continue;
       if (!entry.name.startsWith('.')) continue;
 
       // Check if subfolder has any files (not empty)
       const subPath = join(casePath, entry.name);
       try {
         const subEntries = await readdir(subPath, { withFileTypes: true });
-        const hasFiles = subEntries.some(e => !e.isDirectory() || e.name !== '.pi_tool');
+        const hasFiles = subEntries.some(e => !e.isDirectory() || e.name !== '.ai_tool');
         if (hasFiles) {
           subcases.push(subPath);
         }
@@ -2214,11 +2351,13 @@ async function indexCase(
       injuryDate: string;
       siblingCases?: Array<{ path: string; name: string; dateOfInjury: string }>;
     };
+    // Year-based mode: source folders to scan instead of caseFolder
+    sourceFolders?: { firmRoot: string; folders: string[] };
   }
 ): Promise<{ success: boolean; error?: string; diff?: IndexDiff }> {
   const caseName = caseFolder.split('/').pop() || caseFolder;
   const isIncremental = options?.incrementalFiles && options.incrementalFiles.length > 0;
-  const indexDir = join(caseFolder, '.pi_tool');
+  const indexDir = join(caseFolder, '.ai_tool');
   const indexPath = join(indexDir, 'document_index.json');
 
   let previousIndexContent: string | null = null;
@@ -2267,7 +2406,9 @@ async function indexCase(
       onProgress({ type: "files_found", caseName, count: files.length, files, incremental: true });
     } else {
       onProgress({ type: "status", caseName, message: "Listing files..." });
-      files = await listCaseFiles(caseFolder);
+      files = await listCaseFiles(caseFolder, {
+        sourceFolders: options?.sourceFolders,
+      });
       onProgress({ type: "files_found", caseName, count: files.length, files });
     }
 
@@ -2306,6 +2447,17 @@ async function indexCase(
     console.log(`\n========== PROCESSING ${files.length} FILES (max concurrent: ${CONCURRENCY_LIMIT}) =========`);
     onProgress({ type: "status", caseName, message: `Processing ${files.length} files (steady stream, max ${CONCURRENCY_LIMIT} concurrent)...` });
 
+    // Build year-mode info for file path resolution if applicable
+    let yearModeInfo: { firmRoot: string; registry: ClientRegistry; slug: string } | undefined;
+    if (options?.sourceFolders) {
+      const slug = getClientSlug(caseFolder);
+      const firmRoot = resolveFirmRoot(caseFolder);
+      const registry = await loadClientRegistry(firmRoot);
+      if (slug && registry?.clients[slug]) {
+        yearModeInfo = { firmRoot, registry, slug };
+      }
+    }
+
     const processWorker = async () => {
       while (nextFileIndex < totalFiles) {
         const fileIndex = nextFileIndex++;
@@ -2314,7 +2466,7 @@ async function indexCase(
         let extraction: FileExtraction | null = null;
         let isVision = false;
         try {
-          let classified: ClassifiedFile | null = await classifyFile(caseFolder, filePath);
+          let classified: ClassifiedFile | null = await classifyFile(caseFolder, filePath, yearModeInfo);
           isVision = !classified.useText;
           extraction = classified.useText
             ? await extractFileText(
@@ -2699,7 +2851,7 @@ async function indexCase(
     // If this is a subcase, update parent's index to include it in related_cases
     if (options?.parentCase) {
       try {
-        const parentIndexPath = join(options.parentCase.path, '.pi_tool', 'document_index.json');
+        const parentIndexPath = join(options.parentCase.path, '.ai_tool', 'document_index.json');
         const parentContent = await readFile(parentIndexPath, 'utf-8');
         const parentIndex = JSON.parse(parentContent);
 
@@ -2766,6 +2918,8 @@ interface BatchIndexTarget {
     injuryDate: string;
     siblingCases?: Array<{ path: string; name: string; dateOfInjury: string }>;
   };
+  // Year-based mode: source folders for this client
+  sourceFolders?: { firmRoot: string; folders: string[] };
 }
 
 // Track containers that need to be indexed first
@@ -2857,7 +3011,7 @@ app.post("/batch-index", async (c) => {
             });
 
             for (const doiCase of doiDetection.doiCases) {
-              const doiIndexPath = join(doiCase.path, ".pi_tool", "document_index.json");
+              const doiIndexPath = join(doiCase.path, ".ai_tool", "document_index.json");
               try {
                 await stat(doiIndexPath);
                 // DOI case already indexed, skip
@@ -2887,7 +3041,7 @@ app.post("/batch-index", async (c) => {
         const subcasePaths = await discoverSubcases(casePath);
         for (const subcasePath of subcasePaths) {
           const subcaseName = subcasePath.split('/').pop() || subcasePath;
-          const subcaseIndexPath = join(subcasePath, ".pi_tool", "document_index.json");
+          const subcaseIndexPath = join(subcasePath, ".ai_tool", "document_index.json");
           try {
             await stat(subcaseIndexPath);
             // Subcase already indexed, skip
@@ -2904,11 +3058,33 @@ app.post("/batch-index", async (c) => {
     }
   } else {
     // No specific cases provided - find all unindexed ones (including subcases and DOI cases)
+
+    // Year-based mode: iterate registry clients instead of directory entries
+    const batchYearMode = await detectYearBasedMode(root);
+    if (batchYearMode) {
+      let registry = await loadClientRegistry(root);
+      if (!registry) {
+        registry = await scanAndBuildRegistry(root);
+      }
+      for (const client of Object.values(registry.clients)) {
+        const virtualPath = join(root, ".ai_tool", "clients", client.slug);
+        const indexPath = join(virtualPath, ".ai_tool", "document_index.json");
+        try {
+          await stat(indexPath);
+          // Already indexed, skip
+        } catch {
+          targetCases.push({
+            path: virtualPath,
+            name: client.name,
+            sourceFolders: { firmRoot: root, folders: client.sourceFolders },
+          });
+        }
+      }
+    } else {
     try {
       const entries = await readdir(root, { withFileTypes: true });
       for (const entry of entries) {
-        if (!entry.isDirectory() || entry.name === ".pi_tool") continue;
-
+        if (!entry.isDirectory() || entry.name === ".ai_tool" || entry.name === ".ai_tool") continue;
 
         const casePath = join(root, entry.name);
 
@@ -2925,7 +3101,7 @@ app.post("/batch-index", async (c) => {
             });
 
             for (const doiCase of doiDetection.doiCases) {
-              const doiIndexPath = join(doiCase.path, ".pi_tool", "document_index.json");
+              const doiIndexPath = join(doiCase.path, ".ai_tool", "document_index.json");
               try {
                 await stat(doiIndexPath);
                 // DOI case already indexed, skip
@@ -2949,7 +3125,7 @@ app.post("/batch-index", async (c) => {
         }
 
         // Regular case
-        const indexPath = join(casePath, ".pi_tool", "document_index.json");
+        const indexPath = join(casePath, ".ai_tool", "document_index.json");
         try {
           await stat(indexPath);
           // Parent index exists, but check subcases
@@ -2962,7 +3138,7 @@ app.post("/batch-index", async (c) => {
         const subcasePaths = await discoverSubcases(casePath);
         for (const subcasePath of subcasePaths) {
           const subcaseName = subcasePath.split('/').pop() || subcasePath;
-          const subcaseIndexPath = join(subcasePath, ".pi_tool", "document_index.json");
+          const subcaseIndexPath = join(subcasePath, ".ai_tool", "document_index.json");
           try {
             await stat(subcaseIndexPath);
             // Subcase already indexed, skip
@@ -2979,6 +3155,7 @@ app.post("/batch-index", async (c) => {
     } catch (error) {
       return c.json({ error: "Could not read firm directory" }, 500);
     }
+    } // close non-year-mode else
   }
 
   if (targetCases.length === 0) {
@@ -3041,6 +3218,7 @@ app.post("/batch-index", async (c) => {
             parentCase: target.parentCase,
             practiceArea,
             containerInfo: target.containerInfo,
+            sourceFolders: target.sourceFolders,
           })
         )
       );
@@ -3106,7 +3284,7 @@ async function checkNeedsReindex(casePath: string, indexedAt: number): Promise<b
       const entries = await readdir(dir, { withFileTypes: true });
       const results = await Promise.all(
         entries
-          .filter(entry => entry.name !== ".pi_tool")
+          .filter(entry => entry.name !== ".ai_tool")
           .map(async (entry) => {
             const fullPath = join(dir, entry.name);
             if (entry.isDirectory()) {
@@ -3948,7 +4126,7 @@ app.post("/generate-hypergraph", async (c) => {
   }
 
   // Read the existing document index
-  const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+  const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
 
   try {
     const indexContent = await readFile(indexPath, "utf-8");
@@ -4095,10 +4273,10 @@ async function buildFirmContext(
   let visibleCaseCount = 0;
 
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name === ".pi_tool") continue;
+    if (!entry.isDirectory() || entry.name === ".ai_tool") continue;
 
     const casePath = join(root, entry.name);
-    const indexPath = join(casePath, ".pi_tool", "document_index.json");
+    const indexPath = join(casePath, ".ai_tool", "document_index.json");
 
     try {
       const indexContent = await readFile(indexPath, "utf-8");
@@ -4463,7 +4641,7 @@ interface FirmTodosData {
   todos: FirmTodo[];
 }
 
-const FIRM_DIR = ".pi_tool";
+const FIRM_DIR = ".ai_tool";
 
 // Get firm todos
 app.get("/todos", async (c) => {
@@ -4548,7 +4726,7 @@ app.put("/case/assign", async (c) => {
   }
 
   try {
-    const indexPath = join(casePath, ".pi_tool", "document_index.json");
+    const indexPath = join(casePath, ".ai_tool", "document_index.json");
 
     if (!existsSync(indexPath)) {
       return c.json({ error: "Case index not found" }, 404);
@@ -4607,7 +4785,7 @@ app.delete("/case/unassign", async (c) => {
   }
 
   try {
-    const indexPath = join(casePath, ".pi_tool", "document_index.json");
+    const indexPath = join(casePath, ".ai_tool", "document_index.json");
 
     if (!existsSync(indexPath)) {
       return c.json({ error: "Case index not found" }, 404);

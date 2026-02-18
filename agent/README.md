@@ -69,7 +69,7 @@ Edit `system-prompt.md` sections:
 
 ## Index Schema
 
-The agent creates `.pi_tool/document_index.json` with this structure:
+The agent creates `.ai_tool/document_index.json` with this structure:
 
 ```json
 {

@@ -7,10 +7,10 @@ description: Generate a case memo from the document index
 
 **All file paths must be absolute and within the case folder.**
 - Get your WORKING_DIRECTORY from the prompt context
-- Construct paths as: `{WORKING_DIRECTORY}/.pi_tool/drafts/{filename}.md`
+- Construct paths as: `{WORKING_DIRECTORY}/.ai_tool/drafts/{filename}.md`
 - The system will reject writes outside the case folder
 
-Read `{WORKING_DIRECTORY}/.pi_tool/document_index.json` and generate a comprehensive case memo.
+Read `{WORKING_DIRECTORY}/.ai_tool/document_index.json` and generate a comprehensive case memo.
 
 ## Include
 
@@ -37,16 +37,16 @@ Determine from the index:
 ### Step 1: Create drafts folder if needed
 
 ```bash
-mkdir -p "{WORKING_DIRECTORY}/.pi_tool/drafts"
+mkdir -p "{WORKING_DIRECTORY}/.ai_tool/drafts"
 ```
 
 ### Step 2: Save Case Memo
 
-Save to: `{WORKING_DIRECTORY}/.pi_tool/drafts/case_memo.md`
+Save to: `{WORKING_DIRECTORY}/.ai_tool/drafts/case_memo.md`
 
 ### Step 3: Update Drafts Manifest
 
-Read `{WORKING_DIRECTORY}/.pi_tool/drafts/manifest.json` if it exists, then merge:
+Read `{WORKING_DIRECTORY}/.ai_tool/drafts/manifest.json` if it exists, then merge:
 
 ```json
 {
@@ -54,7 +54,7 @@ Read `{WORKING_DIRECTORY}/.pi_tool/drafts/manifest.json` if it exists, then merg
     "name": "Case Memo",
     "type": "memo",
     "createdAt": "ISO timestamp",
-    "targetPath": ".pi_tool/case_memo.pdf"
+    "targetPath": ".ai_tool/case_memo.pdf"
   }
 }
 ```

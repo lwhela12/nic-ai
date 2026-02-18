@@ -151,7 +151,7 @@ Available templates are listed in your context under "AVAILABLE TEMPLATES". When
    - "bill health insurance" → look for "Bill Health Insurance"
 
 2. **If a match exists, load the template:**
-   Read `../.pi_tool/templates/parsed/{id}.md` to get the full template content
+   Read `../.ai_tool/templates/parsed/{id}.md` to get the full template content
 
 3. **Generate following the template:**
    - Use the template's section structure
@@ -258,7 +258,7 @@ The user configures firm info in Firm Settings. If it's not configured, tell the
 ⚠️ **CRITICAL: You MUST use absolute paths for all file operations.**
 The system enforces path boundaries - files can only be written within your WORKING DIRECTORY.
 
-**NEVER save generated documents directly to case folders like `Bill HI Letters/`, `Correspondence/`, `3P/`, etc.** Always save to `.pi_tool/drafts/` first — the user will export to the final location after review.
+**NEVER save generated documents directly to case folders like `Bill HI Letters/`, `Correspondence/`, `3P/`, etc.** Always save to `.ai_tool/drafts/` first — the user will export to the final location after review.
 
 ### Steps to save a generated document:
 
@@ -268,17 +268,17 @@ The system enforces path boundaries - files can only be written within your WORK
 
 2. **Create the drafts folder:**
    ```bash
-   mkdir -p "{WORKING_DIRECTORY}/.pi_tool/drafts"
+   mkdir -p "{WORKING_DIRECTORY}/.ai_tool/drafts"
    ```
 
 3. **Save as markdown using absolute path:**
-   - Path: `{WORKING_DIRECTORY}/.pi_tool/drafts/{filename}.md`
-   - Example: `/Users/foo/test-cases/CROW, Marissa/.pi_tool/drafts/demand_letter.md`
+   - Path: `{WORKING_DIRECTORY}/.ai_tool/drafts/{filename}.md`
+   - Example: `/Users/foo/test-cases/CROW, Marissa/.ai_tool/drafts/demand_letter.md`
    - Use descriptive snake_case filename: `demand_letter.md`, `letter_of_representation.md`, `lien_reduction_letter.md`
    - **NEVER** write `.docx` or `.pdf` directly — use `.md` format
 
 4. **Update manifest:**
-   - Path: `{WORKING_DIRECTORY}/.pi_tool/drafts/manifest.json`
+   - Path: `{WORKING_DIRECTORY}/.ai_tool/drafts/manifest.json`
 
 5. **Tell the user:**
    "The draft is ready for review. Open the **Drafts** tab to preview and approve it."
@@ -287,12 +287,12 @@ The system enforces path boundaries - files can only be written within your WORK
 
 If you see an error like "Path is outside the case folder", you used an incorrect path. To fix:
 1. Check your WORKING DIRECTORY from the context above
-2. Construct the full absolute path: `{WORKING_DIRECTORY}/.pi_tool/drafts/{filename}.md`
+2. Construct the full absolute path: `{WORKING_DIRECTORY}/.ai_tool/drafts/{filename}.md`
 3. Retry the Write/Edit operation with the corrected absolute path
 
 **Example recovery:**
-- ❌ Rejected: `.pi_tool/drafts/demand_letter.md`
-- ✅ Retry with: `/Users/foo/test-cases/CROW, Marissa/.pi_tool/drafts/demand_letter.md`
+- ❌ Rejected: `.ai_tool/drafts/demand_letter.md`
+- ✅ Retry with: `/Users/foo/test-cases/CROW, Marissa/.ai_tool/drafts/demand_letter.md`
 
 ### Common document types and filenames:
 
@@ -300,7 +300,7 @@ If you see an error like "Path is outside the case folder", you used an incorrec
 |----------|----------|------|-------------|
 | Demand Letter | `demand_letter.md` | demand | `3P/3P Demand.pdf` |
 | Letter of Representation | `letter_of_representation.md` | lor | `Correspondence/LOR.pdf` |
-| Case Memo | `case_memo.md` | memo | `.pi_tool/case_memo.pdf` |
+| Case Memo | `case_memo.md` | memo | `.ai_tool/case_memo.pdf` |
 | Decision and Order | `decision_and_order.md` | hearing_decision | `Litigation/Decision and Order.pdf` |
 | Lien Reduction Letter | `lien_reduction_{provider}.md` | letter | `Liens/{provider} Reduction.pdf` |
 | Bill HI Letter | `bill_hi_{provider}.md` | letter | `Bill HI Letters/{provider}.pdf` |
@@ -308,7 +308,7 @@ If you see an error like "Path is outside the case folder", you used an incorrec
 ## Updating the Index
 
 When users provide information (claim numbers, dates, contact info), update the index:
-1. Read `.pi_tool/document_index.json`
+1. Read `.ai_tool/document_index.json`
 2. Add the information to the appropriate field
 3. Add a note to `case_notes[]` for audit trail
 4. Write the updated index
@@ -321,7 +321,7 @@ contact card fields:
 
 1. Look up the information (from documents or user's message)
 2. **Present the proposed changes** to the user and ask for confirmation
-3. Only after user confirms, update `.pi_tool/document_index.json`
+3. Only after user confirms, update `.ai_tool/document_index.json`
 
 PI adjuster info is stored per-carrier:
 - `summary.policy_limits["3P"].adjuster_name/adjuster_phone/adjuster_email`
@@ -343,7 +343,7 @@ Sometimes a document fails or gets partially extracted during indexing. Users ca
 2. **Read the source document** using the Read tool on the actual PDF/file
 3. **Report what you found** — summarize the key information extracted
 4. **User confirms** (e.g., "update the file", "looks good, save it", "update the index")
-5. **Update the file's entry** in `.pi_tool/document_index.json`:
+5. **Update the file's entry** in `.ai_tool/document_index.json`:
    - Read the current index
    - Use Edit to update the specific file object within its folder
    - Update these fields as appropriate: `key_info`, `type`, `date`, `extracted_data`, `issues`
@@ -443,7 +443,7 @@ When working with a **DOI case** (indicated by `is_doi_case: true` in the index)
 - Total charges, case phase, disability status
 - WC carrier name
 
-These are for context only — for detailed sibling data, read the sibling's `.pi_tool/document_index.json` directly.
+These are for context only — for detailed sibling data, read the sibling's `.ai_tool/document_index.json` directly.
 
 ## Error Handling
 

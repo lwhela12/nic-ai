@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { join } from "path";
 
-const SESSIONS_DIR = ".pi_tool";
+const SESSIONS_DIR = ".ai_tool";
 const SESSIONS_FILE = "session.json";
 
 interface SessionData {
@@ -38,8 +38,8 @@ export async function saveSession(caseFolder: string, sessionId: string): Promis
   await writeFile(path, JSON.stringify(data, null, 2));
 }
 
-// Firm-level session management (stored in .pi_tool/)
-const FIRM_SESSIONS_DIR = ".pi_tool";
+// Firm-level session management (stored in .ai_tool/)
+const FIRM_SESSIONS_DIR = ".ai_tool";
 
 export async function getFirmSession(firmRoot: string): Promise<string | null> {
   try {

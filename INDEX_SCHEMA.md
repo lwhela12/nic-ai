@@ -1,6 +1,6 @@
 # Document Index Schema
 
-This is the canonical schema for `.pi_tool/document_index.json`. All indexing agents must produce this exact structure.
+This is the canonical schema for `.ai_tool/document_index.json`. All indexing agents must produce this exact structure.
 
 ## Root Structure
 

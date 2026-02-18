@@ -75,7 +75,7 @@ const TOOLS: Anthropic.Tool[] = [
       properties: {
         path: {
           type: "string",
-          description: "Relative path from firm root (e.g., '.pi_tool/firm-config.json', '.pi_tool/knowledge/manifest.json')"
+          description: "Relative path from firm root (e.g., '.ai_tool/firm-config.json', '.ai_tool/knowledge/manifest.json')"
         }
       },
       required: ["path"]
@@ -178,7 +178,7 @@ const TOOLS: Anthropic.Tool[] = [
 
 // Helper to load current todos from file
 async function loadTodos(firmRoot: string): Promise<{ updated_at: string; todos: FirmTodo[] }> {
-  const todosPath = join(firmRoot, ".pi_tool", "todos.json");
+  const todosPath = join(firmRoot, ".ai_tool", "todos.json");
   try {
     const content = await readFile(todosPath, "utf-8");
     return JSON.parse(content);
@@ -189,7 +189,7 @@ async function loadTodos(firmRoot: string): Promise<{ updated_at: string; todos:
 
 // Helper to save todos to file
 async function saveTodos(firmRoot: string, todos: FirmTodo[]): Promise<void> {
-  const todosDir = join(firmRoot, ".pi_tool");
+  const todosDir = join(firmRoot, ".ai_tool");
   const todosPath = join(todosDir, "todos.json");
   await mkdir(todosDir, { recursive: true });
   const data = {
@@ -273,7 +273,7 @@ async function executeTool(
       case "get_case_details": {
         const caseName = toolInput.case_name;
         const casePath = join(firmRoot, caseName);
-        const indexPath = join(casePath, ".pi_tool", "document_index.json");
+        const indexPath = join(casePath, ".ai_tool", "document_index.json");
 
         try {
           const indexContent = await readFile(indexPath, "utf-8");
@@ -317,7 +317,7 @@ async function executeTool(
         }));
 
         // Save to file
-        const todosDir = join(firmRoot, ".pi_tool");
+        const todosDir = join(firmRoot, ".ai_tool");
         const todosPath = join(todosDir, "todos.json");
 
         await mkdir(todosDir, { recursive: true });
@@ -452,7 +452,7 @@ async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOption
 
   // Load firm config
   try {
-    const configPath = join(firmRoot, ".pi_tool", "firm-config.json");
+    const configPath = join(firmRoot, ".ai_tool", "firm-config.json");
     const config = JSON.parse(await readFile(configPath, "utf-8"));
     parts.push(`\n## FIRM CONFIGURATION\n${JSON.stringify(config, null, 2)}`);
   } catch {
@@ -461,7 +461,7 @@ async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOption
 
   // Load knowledge manifest (abbreviated)
   try {
-    const manifestPath = join(firmRoot, ".pi_tool", "knowledge", "manifest.json");
+    const manifestPath = join(firmRoot, ".ai_tool", "knowledge", "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
     parts.push(`\n## PRACTICE KNOWLEDGE\nArea: ${manifest.practiceArea} (${manifest.jurisdiction})`);
 
@@ -475,7 +475,7 @@ async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOption
 
   // Load templates list
   try {
-    const templatesPath = join(firmRoot, ".pi_tool", "templates", "templates.json");
+    const templatesPath = join(firmRoot, ".ai_tool", "templates", "templates.json");
     const templatesData = JSON.parse(await readFile(templatesPath, "utf-8"));
     if (templatesData.templates?.length > 0) {
       const templateList = templatesData.templates
@@ -499,10 +499,10 @@ async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOption
     const entries = await readdir(firmRoot, { withFileTypes: true });
 
     for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name === ".pi_tool") continue;
+      if (!entry.isDirectory() || entry.name === ".ai_tool") continue;
 
       const casePath = join(firmRoot, entry.name);
-      const indexPath = join(casePath, ".pi_tool", "document_index.json");
+      const indexPath = join(casePath, ".ai_tool", "document_index.json");
 
       try {
         const indexContent = await readFile(indexPath, "utf-8");

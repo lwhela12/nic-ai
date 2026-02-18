@@ -8,7 +8,7 @@ Schema documentation and folder structure conventions remain below for developer
 
 ## Canonical Index Schema
 
-The definitive schema for `.pi_tool/document_index.json`. Produced by `firm.ts` indexing pipeline.
+The definitive schema for `.ai_tool/document_index.json`. Produced by `firm.ts` indexing pipeline.
 
 ```json
 {

@@ -1,6 +1,7 @@
-import { dirname } from "path";
 import type { Context } from "hono";
 import { requireTeamContext } from "./team";
+import { migratePiTool } from "./migrate-pi-tool";
+import { resolveFirmRoot } from "./year-mode";
 
 interface AccessResultOk {
   ok: true;
@@ -61,6 +62,7 @@ export async function requireFirmAccess(c: Context, firmRoot: string): Promise<A
 }
 
 export async function requireCaseAccess(c: Context, casePath: string): Promise<AccessResult> {
-  const firmRoot = dirname(casePath);
+  await migratePiTool(casePath);
+  const firmRoot = resolveFirmRoot(casePath);
   return requireFirmAccess(c, firmRoot);
 }

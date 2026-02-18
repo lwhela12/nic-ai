@@ -85,7 +85,7 @@ export function generateMetaIndex(indexData: Record<string, any>): MetaIndex {
     }
 
     // Sanitize folder name for index_file path
-    const indexFile = `.pi_tool/indexes/${folderName}.json`;
+    const indexFile = `.ai_tool/indexes/${folderName}.json`;
 
     folders[folderName] = {
       file_count: files.length,
@@ -170,7 +170,7 @@ export async function splitIndexToFolders(
   caseFolder: string
 ): Promise<void> {
   const rawFolders = indexData?.folders || {};
-  const indexesDir = join(caseFolder, ".pi_tool", "indexes");
+  const indexesDir = join(caseFolder, ".ai_tool", "indexes");
 
   // Ensure base indexes directory exists
   await mkdir(indexesDir, { recursive: true });
@@ -212,7 +212,7 @@ export async function writeIndexDerivedFiles(
   caseFolder: string,
   index: Record<string, any>
 ): Promise<void> {
-  const piToolDir = join(caseFolder, ".pi_tool");
+  const piToolDir = join(caseFolder, ".ai_tool");
   // Meta-index + per-folder files
   await splitIndexToFolders(index, caseFolder);
   const metaIndex = generateMetaIndex(index);
@@ -308,7 +308,7 @@ export function buildMetaIndexPromptView(
   }
 
   // Footer
-  parts.push(`To read full details for any folder, use: read_file(".pi_tool/indexes/{FolderName}.json")`);
+  parts.push(`To read full details for any folder, use: read_file(".ai_tool/indexes/{FolderName}.json")`);
 
   let result = parts.join("\n");
 
@@ -384,14 +384,14 @@ function truncatePromptView(metaIndex: MetaIndex, maxChars: number): string {
     parts.push("");
   }
 
-  parts.push(`To read full details for any folder, use: read_file(".pi_tool/indexes/{FolderName}.json")`);
+  parts.push(`To read full details for any folder, use: read_file(".ai_tool/indexes/{FolderName}.json")`);
 
   let result = parts.join("\n");
 
   // If still too long, hard truncate
   if (result.length > maxChars) {
     result = result.slice(0, maxChars) +
-      "\n...\n[NOTE: Meta-index truncated. Use read_file(\".pi_tool/indexes/{FolderName}.json\") for per-folder details.]";
+      "\n...\n[NOTE: Meta-index truncated. Use read_file(\".ai_tool/indexes/{FolderName}.json\") for per-folder details.]";
   }
 
   return result;

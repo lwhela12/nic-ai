@@ -9,6 +9,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { readFile, writeFile, mkdir, readdir, stat } from "fs/promises";
 import { join, dirname, relative as pathRelative } from "path";
+import { resolveFirmRoot } from "./year-mode";
 import { execSync } from "child_process";
 import { loadSectionsByIds } from "../routes/knowledge";
 import { extractPdfText } from "./pdftotext";
@@ -55,7 +56,7 @@ const DOC_TOOLS: Anthropic.Tool[] = [
       properties: {
         path: {
           type: "string",
-          description: "Relative path from case folder (e.g., 'Medical/records.pdf' or '.pi_tool/templates/parsed/demand-letter.md')"
+          description: "Relative path from case folder (e.g., 'Medical/records.pdf' or '.ai_tool/templates/parsed/demand-letter.md')"
         }
       },
       required: ["path"]
@@ -63,13 +64,13 @@ const DOC_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "read_index_slice",
-    description: "Read a bounded slice of .pi_tool/document_index.json for large cases. Use this when you need more detail than the meta-index provides.",
+    description: "Read a bounded slice of .ai_tool/document_index.json for large cases. Use this when you need more detail than the meta-index provides.",
     input_schema: {
       type: "object" as const,
       properties: {
         offset: {
           type: "number",
-          description: "Character offset into .pi_tool/document_index.json (0-based)."
+          description: "Character offset into .ai_tool/document_index.json (0-based)."
         },
         length: {
           type: "number",
@@ -140,7 +141,7 @@ const DOC_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "write_draft",
-    description: "Write the generated document to a draft file. Call this when the document is complete. Saves to .pi_tool/drafts/ folder.",
+    description: "Write the generated document to a draft file. Call this when the document is complete. Saves to .ai_tool/drafts/ folder.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -163,7 +164,7 @@ const DOC_TOOLS: Anthropic.Tool[] = [
  */
 async function loadCaseIndex(caseFolder: string): Promise<Record<string, any>> {
   try {
-    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
     const content = await readFile(indexPath, "utf-8");
     return JSON.parse(content);
   } catch {
@@ -181,7 +182,7 @@ async function buildCasePromptContext(
 ): Promise<string> {
   let metaIndexData: Record<string, any>;
   try {
-    const metaIndexPath = join(caseFolder, ".pi_tool", "meta_index.json");
+    const metaIndexPath = join(caseFolder, ".ai_tool", "meta_index.json");
     const content = await readFile(metaIndexPath, "utf-8");
     metaIndexData = JSON.parse(content);
   } catch {
@@ -189,7 +190,7 @@ async function buildCasePromptContext(
   }
 
   const metaView = buildMetaIndexPromptView(metaIndexData as any);
-  const metaBlock = `${metaView}\n[For full folder details, use read_file(".pi_tool/indexes/{FolderName}.json"). For deep index access, use read_index_slice.]`;
+  const metaBlock = `${metaView}\n[For full folder details, use read_file(".ai_tool/indexes/{FolderName}.json"). For deep index access, use read_index_slice.]`;
 
   const preview = { ...caseIndex };
   if (preview.folders) {
@@ -220,7 +221,7 @@ async function buildCasePromptContext(
  * Load all parsed templates as a single context string.
  */
 async function loadAllTemplates(firmRoot: string): Promise<string> {
-  const templatesDir = join(firmRoot, ".pi_tool", "templates");
+  const templatesDir = join(firmRoot, ".ai_tool", "templates");
   const indexPath = join(templatesDir, "templates.json");
   const parsedDir = join(templatesDir, "parsed");
 
@@ -265,7 +266,7 @@ ${content}
  */
 async function loadFirmConfig(firmRoot: string): Promise<Record<string, any>> {
   try {
-    const configPath = join(firmRoot, ".pi_tool", "firm-config.json");
+    const configPath = join(firmRoot, ".ai_tool", "firm-config.json");
     return JSON.parse(await readFile(configPath, "utf-8"));
   } catch {
     return {};
@@ -325,8 +326,8 @@ async function executeTool(
         // Allow reading from case folder or firm root (for templates)
         let filePath = join(caseFolder, toolInput.path);
 
-        // If path starts with .pi_tool/templates, try firm root first
-        if (toolInput.path.startsWith(".pi_tool/templates")) {
+        // If path starts with .ai_tool/templates, try firm root first
+        if (toolInput.path.startsWith(".ai_tool/templates")) {
           const firmPath = join(firmRoot, toolInput.path);
           try {
             const content = await readFile(firmPath, "utf-8");
@@ -370,7 +371,7 @@ async function executeTool(
       }
 
       case "read_index_slice": {
-        const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
         const content = await readFile(indexPath, "utf-8");
 
         const offsetRaw = Number(toolInput.offset);
@@ -498,8 +499,8 @@ async function executeTool(
       }
 
       case "write_draft": {
-        // Save drafts to .pi_tool/drafts/ within the case folder
-        const draftsDir = join(caseFolder, ".pi_tool", "drafts");
+        // Save drafts to .ai_tool/drafts/ within the case folder
+        const draftsDir = join(caseFolder, ".ai_tool", "drafts");
         await mkdir(draftsDir, { recursive: true });
 
         const filePath = join(draftsDir, toolInput.filename);
@@ -510,7 +511,7 @@ async function executeTool(
         }
 
         await writeFile(filePath, toolInput.content);
-        const relativePath = `.pi_tool/drafts/${toolInput.filename}`;
+        const relativePath = `.ai_tool/drafts/${toolInput.filename}`;
         return {
           result: `Draft saved to ${relativePath}`,
           filePath: relativePath
@@ -520,7 +521,7 @@ async function executeTool(
       // Keep backwards compatibility with old tool name
       case "write_document": {
         // Redirect to write_draft behavior
-        const draftsDir = join(caseFolder, ".pi_tool", "drafts");
+        const draftsDir = join(caseFolder, ".ai_tool", "drafts");
         await mkdir(draftsDir, { recursive: true });
 
         const filePath = join(draftsDir, toolInput.filename);
@@ -530,7 +531,7 @@ async function executeTool(
         }
 
         await writeFile(filePath, toolInput.content);
-        const relativePath = `.pi_tool/drafts/${toolInput.filename}`;
+        const relativePath = `.ai_tool/drafts/${toolInput.filename}`;
         return {
           result: `Draft saved to ${relativePath}`,
           filePath: relativePath
@@ -646,7 +647,7 @@ IMPORTANT:
 - grep: Search for text across files
 - list_folder: List directory contents
 - bash: Run shell commands for complex operations
-- write_draft: Save your completed document to .pi_tool/drafts/`;
+- write_draft: Save your completed document to .ai_tool/drafts/`;
 }
 
 /**
@@ -658,7 +659,7 @@ export async function* generateDocument(
   docType: DocumentType,
   userPrompt: string
 ): AsyncGenerator<{ type: string; content?: string; filePath?: string; done?: boolean }> {
-  const firmRoot = dirname(caseFolder);
+  const firmRoot = resolveFirmRoot(caseFolder);
 
   yield { type: "status", content: "Loading case data and templates..." };
 

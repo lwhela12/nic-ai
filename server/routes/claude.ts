@@ -8,6 +8,7 @@ import { readFileSync as readFileSyncFs, existsSync as existsSyncFs } from "fs";
 import { getSDKCliOptions } from "../lib/sdk-cli-options";
 
 import { join, dirname } from "path";
+import { resolveFirmRoot, getClientSlug, getSourceFolders, loadClientRegistry } from "../lib/year-mode";
 import { homedir } from "os";
 import { getSession, saveSession } from "../sessions";
 import { indexCase } from "./firm";
@@ -144,7 +145,7 @@ app.post("/chat", async (c) => {
   let caseContext = "";
   const INDEX_MAX_CHARS = 80000; // ~20K tokens, leaves room for session history + response
   try {
-    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
     const indexContent = await readFile(indexPath, "utf-8");
     const indexData = JSON.parse(indexContent);
 
@@ -189,23 +190,23 @@ app.post("/chat", async (c) => {
           }
         }
         indexJson = JSON.stringify(summaryIndex, null, 2);
-        indexJson += '\n\n[NOTE: Index was too large to include in full. Use the Read tool on .pi_tool/document_index.json for complete details.]';
+        indexJson += '\n\n[NOTE: Index was too large to include in full. Use the Read tool on .ai_tool/document_index.json for complete details.]';
       }
     }
 
     // Load templates from firm root (parent of case folder)
     let templatesContext = "";
     try {
-      const firmRoot = dirname(caseFolder);
-      const templatesPath = join(firmRoot, ".pi_tool", "templates", "templates.json");
+      const firmRoot = resolveFirmRoot(caseFolder);
+      const templatesPath = join(firmRoot, ".ai_tool", "templates", "templates.json");
       const templatesContent = await readFile(templatesPath, "utf-8");
       const templatesData = JSON.parse(templatesContent);
       if (templatesData.templates && templatesData.templates.length > 0) {
         templatesContext = `
-AVAILABLE TEMPLATES (at firm root ${firmRoot}/.pi_tool/templates/):
+AVAILABLE TEMPLATES (at firm root ${firmRoot}/.ai_tool/templates/):
 ${JSON.stringify(templatesData.templates.map((t: any) => ({ id: t.id, name: t.name, description: t.description })), null, 2)}
 
-To use a template, read: ../.pi_tool/templates/parsed/{id}.md
+To use a template, read: ../.ai_tool/templates/parsed/{id}.md
 
 `;
       }
@@ -216,8 +217,8 @@ To use a template, read: ../.pi_tool/templates/parsed/{id}.md
     // Load knowledge from firm root
     let knowledgeContext = "";
     try {
-      const firmRoot = dirname(caseFolder);
-      const knowledgePath = join(firmRoot, ".pi_tool", "knowledge", "manifest.json");
+      const firmRoot = resolveFirmRoot(caseFolder);
+      const knowledgePath = join(firmRoot, ".ai_tool", "knowledge", "manifest.json");
       const manifestContent = await readFile(knowledgePath, "utf-8");
       const manifest = JSON.parse(manifestContent);
 
@@ -225,7 +226,7 @@ To use a template, read: ../.pi_tool/templates/parsed/{id}.md
       const sections: string[] = [];
       for (const section of manifest.sections || []) {
         try {
-          const sectionPath = join(firmRoot, ".pi_tool", "knowledge", section.filename);
+          const sectionPath = join(firmRoot, ".ai_tool", "knowledge", section.filename);
           const content = await readFile(sectionPath, "utf-8");
           sections.push(content);
         } catch {
@@ -248,8 +249,8 @@ ${sections.join("\n\n---\n\n")}
     // Load firm configuration for signature blocks and letterhead
     let firmInfoContext = "";
     try {
-      const firmRoot = dirname(caseFolder);
-      const firmConfigPath = join(firmRoot, ".pi_tool", "firm-config.json");
+      const firmRoot = resolveFirmRoot(caseFolder);
+      const firmConfigPath = join(firmRoot, ".ai_tool", "firm-config.json");
       const firmConfigContent = await readFile(firmConfigPath, "utf-8");
       const firmConfig = JSON.parse(firmConfigContent);
 
@@ -299,7 +300,7 @@ No firm configuration found. When generating letters, use placeholder text and t
           for (const sibling of indexData.related_cases) {
             if (sibling.type === "doi_sibling") {
               try {
-                const siblingIndexPath = join(sibling.path, ".pi_tool", "document_index.json");
+                const siblingIndexPath = join(sibling.path, ".ai_tool", "document_index.json");
                 const siblingContent = await readFile(siblingIndexPath, "utf-8");
                 const siblingIndex = JSON.parse(siblingContent);
 
@@ -346,9 +347,28 @@ Note: Each claim has its own carrier, injury date, and treatment history. Refere
     // Get current date for document generation
     const dateStr = formatDateMMDDYYYY(new Date());
 
+    // Year-based mode: add source folder information
+    let yearModeContext = "";
+    const chatSlug = getClientSlug(caseFolder);
+    if (chatSlug) {
+      const chatFirmRoot = resolveFirmRoot(caseFolder);
+      const chatRegistry = await loadClientRegistry(chatFirmRoot);
+      if (chatRegistry?.clients[chatSlug]) {
+        const sourcePaths = getSourceFolders(chatFirmRoot, chatRegistry, chatSlug);
+        yearModeContext = `
+SOURCE FOLDERS (year-based organization - files are stored across these folders):
+${sourcePaths.map(p => `- ${p}`).join("\n")}
+
+When reading case files, use the full paths above. File paths in the index are prefixed with the year (e.g. "2024/Medical/report.pdf").
+To read a file, resolve its full path: combine the source folder for that year with the relative path after the year prefix.
+
+`;
+      }
+    }
+
     caseContext = `
 TODAY'S DATE: ${dateStr}
-${siblingContext}
+${siblingContext}${yearModeContext}
 CASE INDEX (use this to answer questions):
 ${indexJson}
 ${templatesContext}${knowledgeContext}${firmInfoContext}
@@ -433,11 +453,34 @@ USER REQUEST: `;
               };
             }
 
+            // Build year-mode source paths for boundary checks
+            let yearSourcePaths: string[] | undefined;
+            const toolSlug = getClientSlug(caseFolder);
+            if (toolSlug) {
+              const toolFirmRoot = resolveFirmRoot(caseFolder);
+              const toolRegistry = await loadClientRegistry(toolFirmRoot);
+              if (toolRegistry?.clients[toolSlug]) {
+                yearSourcePaths = getSourceFolders(toolFirmRoot, toolRegistry, toolSlug);
+              }
+            }
+
+            // Helper to check if path is within allowed boundaries
+            const isPathAllowed = async (filePath: string): Promise<boolean> => {
+              if (await isPathWithinBounds(filePath, caseFolder, caseFolder)) return true;
+              // Year-based: also allow access to source folders
+              if (yearSourcePaths) {
+                for (const sf of yearSourcePaths) {
+                  if (await isPathWithinBounds(filePath, sf, caseFolder)) return true;
+                }
+              }
+              return false;
+            };
+
             // Validate Write and Edit tool paths
             if (toolName === "Write" || toolName === "Edit") {
               const filePath = (input as { file_path?: string }).file_path;
               if (filePath) {
-                const isAllowed = await isPathWithinBounds(filePath, caseFolder, caseFolder);
+                const isAllowed = await isPathAllowed(filePath);
                 if (!isAllowed) {
                   return {
                     behavior: "deny" as const,
@@ -453,7 +496,7 @@ USER REQUEST: `;
               if (command) {
                 const paths = extractPathsFromBash(command);
                 for (const path of paths) {
-                  const isAllowed = await isPathWithinBounds(path, caseFolder, caseFolder);
+                  const isAllowed = await isPathAllowed(path);
                   if (!isAllowed) {
                     return {
                       behavior: "deny" as const,
@@ -596,7 +639,7 @@ USER REQUEST: `;
         // Try to generate a brief summary of recent chat history for continuity
         let recoverySummary = "The conversation context grew too large and was reset. Your previous discussion has been preserved in chat history.";
         try {
-          const historyPath = join(caseFolder, ".pi_tool", "chat_history.json");
+          const historyPath = join(caseFolder, ".ai_tool", "chat_history.json");
           const historyContent = await readFile(historyPath, "utf-8");
           const history = JSON.parse(historyContent);
           if (history.messages && history.messages.length > 0) {
@@ -781,21 +824,31 @@ app.post("/init", async (c) => {
       // Use the shared indexCase function from firm.ts
       // Pass incrementalFiles if provided for incremental indexing
       // Derive firmRoot as parent directory of caseFolder
-      const firmRoot = dirname(caseFolder);
+      const firmRoot = resolveFirmRoot(caseFolder);
       // Resolve practice area from folder metadata first.
       // Fallback to existing index for backward compatibility.
       let practiceArea = await resolveFirmPracticeArea(firmRoot);
       if (!practiceArea) {
         try {
-          const existingIndex = JSON.parse(await readFile(join(caseFolder, '.pi_tool', 'document_index.json'), 'utf-8'));
+          const existingIndex = JSON.parse(await readFile(join(caseFolder, '.ai_tool', 'document_index.json'), 'utf-8'));
           practiceArea = normalizePracticeArea(existingIndex.practice_area ?? existingIndex.practiceArea);
         } catch {
           // No existing index.
         }
       }
+      // Build sourceFolders for year-based mode
+      let sourceFolders: { firmRoot: string; folders: string[] } | undefined;
+      const initSlug = getClientSlug(caseFolder);
+      if (initSlug) {
+        const initRegistry = await loadClientRegistry(firmRoot);
+        if (initRegistry?.clients[initSlug]) {
+          sourceFolders = { firmRoot, folders: initRegistry.clients[initSlug].sourceFolders };
+        }
+      }
+
       const options = files?.length
-        ? { incrementalFiles: files, firmRoot, practiceArea }
-        : { firmRoot, practiceArea };
+        ? { incrementalFiles: files, firmRoot, practiceArea, sourceFolders }
+        : { firmRoot, practiceArea, sourceFolders };
       const result = await indexCase(caseFolder, async (event) => {
         await log(`[${((Date.now() - startTime) / 1000).toFixed(1)}s] ${event.type}: ${JSON.stringify(event)}`);
         await stream.writeSSE({
@@ -906,7 +959,7 @@ app.post("/document", async (c) => {
   }
 
   try {
-    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
     const indexContent = await readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
 
@@ -972,7 +1025,7 @@ ${feedback}
 **Instructions:**
 1. Read the document using the Read tool (or run \`pdftotext "${documentPath}" -\` if needed)
 2. Re-extract the information, paying special attention to the user's feedback
-3. Read the current index from .pi_tool/document_index.json
+3. Read the current index from .ai_tool/document_index.json
 4. Update ONLY this document's entry in the appropriate folder
 5. Add a "user_reviewed" field set to true and "review_notes" with a brief summary of changes
 6. Write the updated index back
@@ -1127,7 +1180,7 @@ app.get("/history", async (c) => {
   }
 
   try {
-    const historyPath = join(caseFolder, ".pi_tool", "chat_history.json");
+    const historyPath = join(caseFolder, ".ai_tool", "chat_history.json");
     const historyContent = await readFile(historyPath, "utf-8");
     const history: ChatHistory = JSON.parse(historyContent);
     return c.json(history);
@@ -1156,10 +1209,10 @@ app.post("/history", async (c) => {
   }
 
   try {
-    const piToolDir = join(caseFolder, ".pi_tool");
+    const piToolDir = join(caseFolder, ".ai_tool");
     const historyPath = join(piToolDir, "chat_history.json");
 
-    // Ensure .pi_tool directory exists
+    // Ensure .ai_tool directory exists
     await mkdir(piToolDir, { recursive: true });
 
     // Load existing history or create new
@@ -1207,7 +1260,7 @@ app.get("/history/archives", async (c) => {
 
   try {
     // Load archives from document index
-    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
     const indexContent = await readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
     return c.json({ archives: index.chat_archives || [] });
@@ -1234,7 +1287,7 @@ app.post("/history/archive", async (c) => {
     return access.response;
   }
 
-  const piToolDir = join(caseFolder, ".pi_tool");
+  const piToolDir = join(caseFolder, ".ai_tool");
   const historyPath = join(piToolDir, "chat_history.json");
   const archivesDir = join(piToolDir, "chat_archives");
   const indexPath = join(piToolDir, "document_index.json");
@@ -1390,7 +1443,7 @@ app.get("/history/archive/:id", async (c) => {
 
   try {
     // Find the archive entry in the index
-    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
     const indexContent = await readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
 
@@ -1403,7 +1456,7 @@ app.get("/history/archive/:id", async (c) => {
     }
 
     // Load the archive file
-    const archivePath = join(caseFolder, ".pi_tool", archiveEntry.file);
+    const archivePath = join(caseFolder, ".ai_tool", archiveEntry.file);
     const archiveContent = await readFile(archivePath, "utf-8");
     const archive = JSON.parse(archiveContent);
 
@@ -1432,7 +1485,7 @@ app.post("/errata-correct", async (c) => {
   }
 
   try {
-    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
     const indexContent = await readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
 

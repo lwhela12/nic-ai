@@ -48,7 +48,7 @@ async function loadFirmLogo(firmRoot: string): Promise<string | undefined> {
   const logoExtensions = ["png", "jpg", "jpeg"];
   for (const ext of logoExtensions) {
     try {
-      const logoPath = join(firmRoot, ".pi_tool", `firm-logo.${ext}`);
+      const logoPath = join(firmRoot, ".ai_tool", `firm-logo.${ext}`);
       console.log(`[Logo] Trying to load logo from: ${logoPath}`);
       const logoBuffer = await readFile(logoPath);
       const mimeType = ext === "png" ? "image/png" : "image/jpeg";
@@ -58,7 +58,7 @@ async function loadFirmLogo(firmRoot: string): Promise<string | undefined> {
       // Try next extension
     }
   }
-  console.log(`[Logo] No logo found in ${firmRoot}/.pi_tool/`);
+  console.log(`[Logo] No logo found in ${firmRoot}/.ai_tool/`);
   return undefined;
 }
 
@@ -83,7 +83,7 @@ export async function loadFirmInfo(firmRoot: string): Promise<FirmInfo | null> {
 
   // First try firm-config.json (from Firm Settings UI)
   try {
-    const configPath = join(firmRoot, ".pi_tool", "firm-config.json");
+    const configPath = join(firmRoot, ".ai_tool", "firm-config.json");
     const configContent = await readFile(configPath, "utf-8");
     const config = JSON.parse(configContent);
     const configObj = config as Record<string, any>;
@@ -134,7 +134,7 @@ export async function loadFirmInfo(firmRoot: string): Promise<FirmInfo | null> {
   // Fall back to 12-firm-preferences.md if no config found
   if (!hasAnyInfo) {
     try {
-      const prefsPath = join(firmRoot, ".pi_tool", "knowledge", "12-firm-preferences.md");
+      const prefsPath = join(firmRoot, ".ai_tool", "knowledge", "12-firm-preferences.md");
       const content = await readFile(prefsPath, "utf-8");
 
       // Parse the firm information block (between triple backticks)

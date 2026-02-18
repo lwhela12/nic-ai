@@ -625,7 +625,7 @@ export default function TemplateManager({ firmRoot, apiUrl }: Props) {
           </div>
           <p className="text-lg font-medium text-brand-700">No templates yet</p>
           <p className="text-sm text-brand-400 mt-1 max-w-sm mx-auto">
-            Add PDF or DOCX template files to <code className="bg-surface-100 px-1 py-0.5 rounded text-xs">.pi_tool/templates/source/</code> then refresh.
+            Add PDF or DOCX template files to <code className="bg-surface-100 px-1 py-0.5 rounded text-xs">.ai_tool/templates/source/</code> then refresh.
           </p>
           <button
             onClick={loadTemplates}

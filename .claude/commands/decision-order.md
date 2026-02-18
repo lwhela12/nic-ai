@@ -9,8 +9,8 @@ description: Draft a workers' compensation Decision and Order after a hearing
 
 You MUST save files to EXACTLY these paths:
 
-1. Decision and Order draft: `.pi_tool/drafts/decision_and_order.md`
-2. Draft manifest: `.pi_tool/drafts/manifest.json`
+1. Decision and Order draft: `.ai_tool/drafts/decision_and_order.md`
+2. Draft manifest: `.ai_tool/drafts/manifest.json`
 
 If you save to a different file path, the draft workflow will not detect it correctly.
 
@@ -19,8 +19,8 @@ If you save to a different file path, the draft workflow will not detect it corr
 All file paths must be absolute and within the case folder.
 
 - Get `WORKING_DIRECTORY` from prompt context.
-- Use: `{WORKING_DIRECTORY}/.pi_tool/drafts/decision_and_order.md`
-- Use: `{WORKING_DIRECTORY}/.pi_tool/drafts/manifest.json`
+- Use: `{WORKING_DIRECTORY}/.ai_tool/drafts/decision_and_order.md`
+- Use: `{WORKING_DIRECTORY}/.ai_tool/drafts/manifest.json`
 
 ## Purpose
 
@@ -56,13 +56,13 @@ Use this order unless the firm template requires a different sequence:
 
 ## Workflow
 
-1. Read `{WORKING_DIRECTORY}/.pi_tool/document_index.json`.
+1. Read `{WORKING_DIRECTORY}/.ai_tool/document_index.json`.
 2. Locate hearing-related source files (`hearing notice`, `hearing decision`, `d9`, appeals correspondence, IME/work status as needed).
 3. Read the controlling documents to build a reliable timeline and issue list.
-4. Check firm templates in `../.pi_tool/templates/parsed/` and follow a matching Decision/Order template if available.
+4. Check firm templates in `../.ai_tool/templates/parsed/` and follow a matching Decision/Order template if available.
 5. Draft complete Decision and Order content.
-6. Save to `{WORKING_DIRECTORY}/.pi_tool/drafts/decision_and_order.md`.
-7. Update `{WORKING_DIRECTORY}/.pi_tool/drafts/manifest.json` with:
+6. Save to `{WORKING_DIRECTORY}/.ai_tool/drafts/decision_and_order.md`.
+7. Update `{WORKING_DIRECTORY}/.ai_tool/drafts/manifest.json` with:
 
 ```json
 {

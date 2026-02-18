@@ -5,6 +5,14 @@ import { homedir } from "os";
 import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
 import { applyResolvedFieldToSummary } from "../lib/index-summary-sync";
 import { writeIndexDerivedFiles } from "../lib/meta-index";
+import {
+  getClientSlug,
+  resolveFirmRoot,
+  loadClientRegistry,
+  resolveYearFilePath,
+  walkYearBasedFiles,
+  listYearBasedCaseFiles,
+} from "../lib/year-mode";
 
 // System/temporary files to ignore during file enumeration
 const IGNORED_FILES = new Set([
@@ -218,7 +226,7 @@ async function resolveDocumentPath(
   }
 
   try {
-    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
     const indexContent = await readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
     const pathMap = buildIndexedPathMap(index);
@@ -233,16 +241,54 @@ async function resolveDocumentPath(
       ),
     ].filter(Boolean);
 
+    const yearSlug = getClientSlug(caseFolder);
+    const yearFirmRoot = yearSlug ? resolveFirmRoot(caseFolder) : null;
+    const yearRegistry = yearSlug && yearFirmRoot
+      ? await loadClientRegistry(yearFirmRoot)
+      : null;
+
     for (const candidate of candidates) {
       const mappedPath = pathMap.get(candidate);
       if (!mappedPath) continue;
-      const fullPath = resolveCasePath(caseFolder, mappedPath);
-      if (await pathExists(fullPath)) {
-        return { fullPath, relativePath: mappedPath };
+
+      // Try direct resolution first
+      try {
+        const fullPath = resolveCasePath(caseFolder, mappedPath);
+        if (await pathExists(fullPath)) {
+          return { fullPath, relativePath: mappedPath };
+        }
+      } catch {
+        // Path outside case folder — try year-based resolution
+      }
+
+      // Year-based resolution for indexed paths
+      if (yearSlug && yearFirmRoot && yearRegistry?.clients[yearSlug]) {
+        const resolved = resolveYearFilePath(yearFirmRoot, yearRegistry, yearSlug, mappedPath);
+        if (await pathExists(resolved)) {
+          return { fullPath: resolved, relativePath: mappedPath };
+        }
       }
     }
   } catch {
-    // Fall through to not found
+    // Fall through to year-based fallback
+  }
+
+  // Year-based fallback: resolve through source folders
+  const slug = getClientSlug(caseFolder);
+  if (slug) {
+    const firmRoot = resolveFirmRoot(caseFolder);
+    const registry = await loadClientRegistry(firmRoot);
+    if (registry?.clients[slug]) {
+      const resolved = resolveYearFilePath(
+        firmRoot,
+        registry,
+        slug,
+        normalizedRequestedPath
+      );
+      if (await pathExists(resolved)) {
+        return { fullPath: resolved, relativePath: normalizedRequestedPath };
+      }
+    }
   }
 
   throw new Error("File not found");
@@ -255,7 +301,7 @@ app.get("/browse", async (c) => {
   try {
     const entries = await readdir(dir, { withFileTypes: true });
     const folders = entries
-      .filter((e) => e.isDirectory() && e.name !== ".pi_tool")
+      .filter((e) => e.isDirectory() && e.name !== ".ai_tool")
       .map((e) => ({
         name: e.name,
         path: join(dir, e.name),
@@ -288,7 +334,7 @@ app.get("/cases", async (c) => {
   try {
     const entries = await readdir(baseDir, { withFileTypes: true });
     const folders = entries
-      .filter((e) => e.isDirectory() && e.name !== ".pi_tool")
+      .filter((e) => e.isDirectory() && e.name !== ".ai_tool")
       .map((e) => ({
         name: e.name,
         path: join(baseDir, e.name),
@@ -313,7 +359,7 @@ app.get("/index", async (c) => {
     return access.response;
   }
 
-  const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+  const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
 
   try {
     const content = await readFile(indexPath, "utf-8");
@@ -352,7 +398,7 @@ app.post("/document-summary", async (c) => {
     return access.response;
   }
 
-  const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+  const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
 
   const normalizePath = (value: string): string =>
     value
@@ -578,7 +624,7 @@ app.get("/index-status", async (c) => {
     return access.response;
   }
 
-  const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+  const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
 
   // Get all current files
   async function getAllFiles(dir: string, base: string = ""): Promise<{ path: string; mtime: number }[]> {
@@ -586,7 +632,7 @@ app.get("/index-status", async (c) => {
     try {
       const entries = await readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.name === ".pi_tool" || shouldIgnoreFile(entry.name)) continue;
+        if (entry.name === ".ai_tool" || shouldIgnoreFile(entry.name)) continue;
         const fullPath = join(dir, entry.name);
         const relativePath = (base ? join(base, entry.name) : entry.name).replace(/\\/g, "/");
 
@@ -604,7 +650,31 @@ app.get("/index-status", async (c) => {
     return files;
   }
 
-  const currentFiles = await getAllFiles(caseFolder);
+  // Year-based mode: scan all source folders instead of virtual caseFolder
+  let currentFiles: { path: string; mtime: number }[];
+  const statusSlug = getClientSlug(caseFolder);
+  if (statusSlug) {
+    const firmRoot = resolveFirmRoot(caseFolder);
+    const registry = await loadClientRegistry(firmRoot);
+    if (registry?.clients[statusSlug]) {
+      const entry = registry.clients[statusSlug];
+      const allFiles: { path: string; mtime: number }[] = [];
+      for (const relSourceFolder of entry.sourceFolders) {
+        const absFolder = join(firmRoot, relSourceFolder);
+        const yearPrefix = relSourceFolder.split("/")[0];
+        const folderFiles = await getAllFiles(absFolder, "");
+        // Prefix with year
+        for (const f of folderFiles) {
+          allFiles.push({ path: `${yearPrefix}/${f.path}`, mtime: f.mtime });
+        }
+      }
+      currentFiles = allFiles;
+    } else {
+      currentFiles = await getAllFiles(caseFolder);
+    }
+  } else {
+    currentFiles = await getAllFiles(caseFolder);
+  }
 
   // Normalize paths for robust comparison across index shape variants.
   const normalizePath = (p: string) =>
@@ -739,7 +809,7 @@ app.get("/memo", async (c) => {
     return access.response;
   }
 
-  const memoPath = join(caseFolder, ".pi_tool", "case_memo.md");
+  const memoPath = join(caseFolder, ".ai_tool", "case_memo.md");
 
   try {
     const content = await readFile(memoPath, "utf-8");
@@ -767,7 +837,7 @@ app.get("/list", async (c) => {
     const results: any[] = [];
 
     for (const entry of entries) {
-      if (entry.name === ".pi_tool" || shouldIgnoreFile(entry.name)) continue;
+      if (entry.name === ".ai_tool" || shouldIgnoreFile(entry.name)) continue;
 
       const fullPath = join(dir, entry.name);
       const relativePath = base ? join(base, entry.name) : entry.name;
@@ -796,6 +866,17 @@ app.get("/list", async (c) => {
   }
 
   try {
+    // Year-based mode: walk source folders grouped by year
+    const slug = getClientSlug(caseFolder);
+    if (slug) {
+      const firmRoot = resolveFirmRoot(caseFolder);
+      const registry = await loadClientRegistry(firmRoot);
+      if (registry?.clients[slug]) {
+        const tree = await walkYearBasedFiles(firmRoot, registry, slug);
+        return c.json({ tree });
+      }
+    }
+
     const tree = await walkDir(caseFolder);
     return c.json({ tree });
   } catch (error) {
@@ -870,7 +951,7 @@ app.post("/resolve", async (c) => {
     return c.json({ error: "caseFolder, field, and resolvedValue required" }, 400);
   }
 
-  const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+  const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
 
   try {
     // Read current index
@@ -1056,7 +1137,7 @@ app.patch("/contact-card", async (c) => {
     return access.response;
   }
 
-  const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+  const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
 
   try {
     const content = await readFile(indexPath, "utf-8");
@@ -1173,7 +1254,7 @@ app.get("/needs-review", async (c) => {
     return c.json({ error: "case query param required" }, 400);
   }
 
-  const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+  const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
 
   try {
     const content = await readFile(indexPath, "utf-8");
@@ -1251,7 +1332,7 @@ app.get("/verified-items", async (c) => {
     return c.json({ error: "case query param required" }, 400);
   }
 
-  const verifiedPath = join(caseFolder, ".pi_tool", "verified_items.json");
+  const verifiedPath = join(caseFolder, ".ai_tool", "verified_items.json");
 
   try {
     const content = await readFile(verifiedPath, "utf-8");
@@ -1275,11 +1356,11 @@ app.post("/verified-items", async (c) => {
     return c.json({ error: "verified must be an array" }, 400);
   }
 
-  const piToolDir = join(caseFolder, ".pi_tool");
+  const piToolDir = join(caseFolder, ".ai_tool");
   const verifiedPath = join(piToolDir, "verified_items.json");
 
   try {
-    // Ensure .pi_tool directory exists
+    // Ensure .ai_tool directory exists
     await mkdir(piToolDir, { recursive: true });
 
     await writeFile(verifiedPath, JSON.stringify({ verified }, null, 2));

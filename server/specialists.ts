@@ -8,6 +8,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFile } from "fs/promises";
 import { join, dirname } from "path";
+import { resolveFirmRoot } from "./lib/year-mode";
 
 // SDK CLI options helper - handles both direct and npx modes
 import { getSDKCliOptions } from "./lib/sdk-cli-options";
@@ -41,8 +42,8 @@ async function loadFullSystemPrompt(): Promise<string> {
  * Returns a formatted string with all templates for inclusion in the system prompt.
  */
 async function loadFirmTemplates(caseFolder: string): Promise<string> {
-  const firmRoot = dirname(caseFolder);
-  const templatesDir = join(firmRoot, ".pi_tool", "templates");
+  const firmRoot = resolveFirmRoot(caseFolder);
+  const templatesDir = join(firmRoot, ".ai_tool", "templates");
   const indexPath = join(templatesDir, "templates.json");
 
   try {
@@ -205,7 +206,7 @@ export async function generateMemo(
         result = {
           success: msg.subtype === "success",
           output: msg.subtype === "success" ? msg.result : undefined,
-          outputPath: ".pi_tool/case_memo.md",
+          outputPath: ".ai_tool/case_memo.md",
           error: msg.subtype !== "success" ? "Memo generation failed" : undefined,
         };
       }
@@ -319,7 +320,7 @@ export async function analyzeGaps(
         result = {
           success: msg.subtype === "success",
           output: msg.subtype === "success" ? msg.result : undefined,
-          outputPath: ".pi_tool/gap_analysis.md",
+          outputPath: ".ai_tool/gap_analysis.md",
           error: msg.subtype !== "success" ? "Gap analysis failed" : undefined,
         };
       }

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { readdir, readFile, writeFile, mkdir, stat, unlink } from "fs/promises";
 import { join, dirname, basename, resolve, sep } from "path";
+import { resolveFirmRoot } from "../lib/year-mode";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
@@ -40,7 +41,7 @@ function resolveStyleProfile(
   return isCourtCriticalDocumentType(documentType) ? "court_safe" : "template";
 }
 
-// Helper to load template styles from .pi_tool/template-styles.json
+// Helper to load template styles from .ai_tool/template-styles.json
 async function loadTemplateStyles(
   firmRoot: string,
   styleProfile: ExportStyleProfile
@@ -50,7 +51,7 @@ async function loadTemplateStyles(
   }
 
   try {
-    const stylesPath = join(firmRoot, ".pi_tool", "template-styles.json");
+    const stylesPath = join(firmRoot, ".ai_tool", "template-styles.json");
     const content = await readFile(stylesPath, "utf-8");
     const data = JSON.parse(content);
     return data.styles;
@@ -65,7 +66,7 @@ async function resolveCaseName(caseFolder: string, providedCaseName?: string): P
   if (direct) return direct;
 
   try {
-    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
     const indexContent = await readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
 
@@ -216,7 +217,7 @@ interface Draft {
   outputPath?: string;
 }
 
-// List generated documents in .pi_tool and standard locations
+// List generated documents in .ai_tool and standard locations
 app.get("/list", async (c) => {
   const caseFolder = c.req.query("case");
 
@@ -231,8 +232,8 @@ app.get("/list", async (c) => {
 
   const docs: any[] = [];
 
-  // Check .pi_tool folder
-  const piToolPath = join(caseFolder, ".pi_tool");
+  // Check .ai_tool folder
+  const piToolPath = join(caseFolder, ".ai_tool");
   try {
     const entries = await readdir(piToolPath);
     for (const entry of entries) {
@@ -240,7 +241,7 @@ app.get("/list", async (c) => {
         const content = await readFile(join(piToolPath, entry), "utf-8");
         docs.push({
           name: entry,
-          path: join(".pi_tool", entry),
+          path: join(".ai_tool", entry),
           fullPath: join(piToolPath, entry),
           type: entry.includes("memo") ? "memo" : entry.includes("index") ? "index" : "report",
           size: content.length,
@@ -248,7 +249,7 @@ app.get("/list", async (c) => {
       }
     }
   } catch {
-    // .pi_tool doesn't exist yet
+    // .ai_tool doesn't exist yet
   }
 
   // Check for demand letter draft
@@ -383,7 +384,7 @@ app.post("/export", async (c) => {
     console.log(`[Export] caseFolder=${caseFolder}, sourcePath=${sourcePath}, documentType=${inferredType}`);
 
     // Load firm info if firmRoot provided (or try parent of caseFolder)
-    const firmInfoRoot = firmRoot || dirname(caseFolder);
+    const firmInfoRoot = firmRoot || resolveFirmRoot(caseFolder);
     console.log(`[Export] firmInfoRoot=${firmInfoRoot} (firmRoot param=${firmRoot})`);
     const firmInfo = await loadFirmInfo(firmInfoRoot);
 
@@ -511,7 +512,7 @@ app.get("/download", async (c) => {
     // Infer document type and load firm info
     const documentType = inferTypeFromPath(docPath);
     const resolvedStyleProfile = resolveStyleProfile(documentType, styleProfile);
-    const firmInfoRoot = firmRoot || dirname(caseFolder);
+    const firmInfoRoot = firmRoot || resolveFirmRoot(caseFolder);
     const firmInfo = await loadFirmInfo(firmInfoRoot);
 
     // Load template styles if available
@@ -573,7 +574,7 @@ app.get("/download", async (c) => {
   }
 });
 
-// List drafts in .pi_tool/drafts/ folder
+// List drafts in .ai_tool/drafts/ folder
 app.get("/drafts", async (c) => {
   const caseFolder = c.req.query("case");
 
@@ -587,7 +588,7 @@ app.get("/drafts", async (c) => {
   }
 
   const drafts: Draft[] = [];
-  const draftsPath = join(caseFolder, ".pi_tool", "drafts");
+  const draftsPath = join(caseFolder, ".ai_tool", "drafts");
 
   try {
     // Read manifest if it exists
@@ -616,7 +617,7 @@ app.get("/drafts", async (c) => {
         drafts.push({
           id,
           name,
-          path: `.pi_tool/drafts/${entry}`,
+          path: `.ai_tool/drafts/${entry}`,
           type,
           createdAt: meta.createdAt || fileStat.mtime.toISOString(),
           targetPath,
@@ -648,7 +649,7 @@ app.get("/drafts", async (c) => {
         drafts.push({
           id,
           name: draftName,
-          path: `.pi_tool/drafts/${entry}`,
+          path: `.ai_tool/drafts/${entry}`,
           type: "packet",
           createdAt: fileStat.mtime.toISOString(),
           targetPath: "Hearing/Evidence Packet.pdf",
@@ -695,7 +696,7 @@ function inferTargetPath(id: string, type: string): string {
     case "settlement":
       return "Settlement/Settlement Memo.pdf";
     case "memo":
-      return ".pi_tool/case_memo.pdf";
+      return ".ai_tool/case_memo.pdf";
     case "hearing_decision":
       return "Litigation/Decision and Order.pdf";
     default:
@@ -740,13 +741,13 @@ app.post("/approve", async (c) => {
 
     // 2. Determine output path
     const outputPath =
-      targetPath || draftPath.replace(/\.md$/, `.${format}`).replace(".pi_tool/drafts/", "");
+      targetPath || draftPath.replace(/\.md$/, `.${format}`).replace(".ai_tool/drafts/", "");
     const fullOutputPath = join(caseFolder, outputPath);
 
     // 3. Infer document type and load firm info
     const documentType = inferTypeFromPath(draftPath);
     const resolvedStyleProfile = resolveStyleProfile(documentType, styleProfile);
-    const firmInfoRoot = firmRoot || dirname(caseFolder);
+    const firmInfoRoot = firmRoot || resolveFirmRoot(caseFolder);
     const firmInfo = await loadFirmInfo(firmInfoRoot);
 
     const clientName = await resolveCaseName(caseFolder, caseName);
@@ -792,7 +793,7 @@ app.post("/approve", async (c) => {
     // The markdown source is preserved for future edits or reference
 
     // 8. Update manifest to mark this draft as approved
-    const manifestPath = join(caseFolder, ".pi_tool", "drafts", "manifest.json");
+    const manifestPath = join(caseFolder, ".ai_tool", "drafts", "manifest.json");
     try {
       const manifestContent = await readFile(manifestPath, "utf-8");
       const manifest = JSON.parse(manifestContent);
@@ -991,8 +992,8 @@ app.post("/bundle-demand", async (c) => {
   const warnings: string[] = [];
 
   try {
-    // 1. Read the manifest from .pi_tool/drafts/manifest.json
-    const manifestPath = join(caseFolder, ".pi_tool", "drafts", "manifest.json");
+    // 1. Read the manifest from .ai_tool/drafts/manifest.json
+    const manifestPath = join(caseFolder, ".ai_tool", "drafts", "manifest.json");
     let manifest: Record<string, any>;
     try {
       const manifestContent = await readFile(manifestPath, "utf-8");
@@ -1012,25 +1013,25 @@ app.post("/bundle-demand", async (c) => {
     }
 
     // 3. Read the demand letter markdown
-    const demandLetterPath = join(caseFolder, ".pi_tool", "drafts", "demand_letter.md");
+    const demandLetterPath = join(caseFolder, ".ai_tool", "drafts", "demand_letter.md");
     let demandContent: string;
     try {
       demandContent = await readFile(demandLetterPath, "utf-8");
     } catch (err) {
       return c.json({
-        error: "Demand letter markdown not found at .pi_tool/drafts/demand_letter.md",
+        error: "Demand letter markdown not found at .ai_tool/drafts/demand_letter.md",
       }, 404);
     }
 
     // 4. Convert demand letter to PDF using existing export logic
-    const firmInfoRoot = firmRoot || dirname(caseFolder);
+    const firmInfoRoot = firmRoot || resolveFirmRoot(caseFolder);
     const firmInfo = await loadFirmInfo(firmInfoRoot);
     const templateStyles = await loadTemplateStyles(firmInfoRoot);
 
     // Try to get client name from document index
     let clientName: string | undefined;
     try {
-      const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+      const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
       const indexContent = await readFile(indexPath, "utf-8");
       const documentIndex = JSON.parse(indexContent);
       clientName = documentIndex?.summary?.client;
@@ -1157,7 +1158,7 @@ app.get("/bundle-status", async (c) => {
 
   try {
     // Check for manifest
-    const manifestPath = join(caseFolder, ".pi_tool", "drafts", "manifest.json");
+    const manifestPath = join(caseFolder, ".ai_tool", "drafts", "manifest.json");
     let manifest: Record<string, any> | null = null;
     let hasManifest = false;
     try {
@@ -1174,7 +1175,7 @@ app.get("/bundle-status", async (c) => {
     const hasExhibits = Array.isArray(demandEntry?.exhibits) && demandEntry.exhibits.length > 0;
 
     // Check for demand letter markdown file
-    const demandLetterPath = join(caseFolder, ".pi_tool", "drafts", "demand_letter.md");
+    const demandLetterPath = join(caseFolder, ".ai_tool", "drafts", "demand_letter.md");
     let hasDemandFile = false;
     try {
       await stat(demandLetterPath);
@@ -1230,7 +1231,7 @@ app.post("/packet-draft", async (c) => {
   }
 
   try {
-    const draftsDir = join(caseFolder, ".pi_tool", "drafts");
+    const draftsDir = join(caseFolder, ".ai_tool", "drafts");
     await mkdir(draftsDir, { recursive: true });
 
     const draftId = state.draftId || `packet-${Date.now()}`;
@@ -1259,7 +1260,7 @@ app.get("/packet-draft/:id", async (c) => {
   }
 
   try {
-    const draftPath = join(caseFolder, ".pi_tool", "drafts", `${draftId}.json`);
+    const draftPath = join(caseFolder, ".ai_tool", "drafts", `${draftId}.json`);
     const content = await readFile(draftPath, "utf-8");
     return c.json(JSON.parse(content));
   } catch {
@@ -1281,7 +1282,7 @@ app.post("/packet-draft/duplicate", async (c) => {
   }
 
   try {
-    const sourcePath = join(caseFolder, ".pi_tool", "drafts", `${draftId}.json`);
+    const sourcePath = join(caseFolder, ".ai_tool", "drafts", `${draftId}.json`);
     const content = await readFile(sourcePath, "utf-8");
     const state = JSON.parse(content);
 
@@ -1298,7 +1299,7 @@ app.post("/packet-draft/duplicate", async (c) => {
       state.draftName = "Evidence Packet Draft (copy)";
     }
 
-    const draftsDir = join(caseFolder, ".pi_tool", "drafts");
+    const draftsDir = join(caseFolder, ".ai_tool", "drafts");
     await writeFile(join(draftsDir, `${newDraftId}.json`), JSON.stringify(state, null, 2), "utf-8");
 
     return c.json({ success: true, draftId: newDraftId });
@@ -1322,7 +1323,7 @@ app.delete("/packet-draft/:id", async (c) => {
   }
 
   try {
-    const draftPath = join(caseFolder, ".pi_tool", "drafts", `${draftId}.json`);
+    const draftPath = join(caseFolder, ".ai_tool", "drafts", `${draftId}.json`);
     await unlink(draftPath);
     return c.json({ success: true });
   } catch {
@@ -1362,9 +1363,9 @@ app.post("/preview-front-matter", async (c) => {
     let firmBlockLines: string[] = Array.isArray(frontMatter.firmBlockLines) ? frontMatter.firmBlockLines : [];
     const hasNonEmptyLines = firmBlockLines.some((l: string) => typeof l === "string" && l.trim());
     if (!hasNonEmptyLines) {
-      const configRoot = firmRoot || dirname(caseFolder);
+      const configRoot = firmRoot || resolveFirmRoot(caseFolder);
       try {
-        const configPath = join(configRoot, ".pi_tool", "firm-config.json");
+        const configPath = join(configRoot, ".ai_tool", "firm-config.json");
         const configContent = await readFile(configPath, "utf-8");
         const config = JSON.parse(configContent);
         const built: string[] = [];
@@ -1404,14 +1405,14 @@ app.post("/preview-front-matter", async (c) => {
       includeAffirmationPage: true,
     });
 
-    // Write to .pi_tool so the preview can be served via GET /api/files/view
+    // Write to .ai_tool so the preview can be served via GET /api/files/view
     // (blob URLs don't work with Electron's window.open pop-out on Windows)
-    const piToolDir = join(caseFolder, ".pi_tool");
+    const piToolDir = join(caseFolder, ".ai_tool");
     await mkdir(piToolDir, { recursive: true });
     const previewPath = join(piToolDir, "front-matter-preview.pdf");
     await writeFile(previewPath, pdfBytes);
 
-    const viewUrl = `/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(".pi_tool/front-matter-preview.pdf")}#view=FitH`;
+    const viewUrl = `/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(".ai_tool/front-matter-preview.pdf")}#view=FitH`;
     return c.json({ url: viewUrl });
   } catch (err) {
     console.error("preview-front-matter error:", err);
@@ -1436,7 +1437,7 @@ app.post("/generate-packet", async (c) => {
   }
 
   try {
-    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
     const indexContent = await readFile(indexPath, "utf-8");
     const indexData = JSON.parse(indexContent);
     const maps = buildIndexedPathMaps(indexData);
@@ -1507,7 +1508,7 @@ app.post("/generate-packet", async (c) => {
 
     // Auto-save state as a draft for future reference
     try {
-      const draftsDir = join(caseFolder, ".pi_tool", "drafts");
+      const draftsDir = join(caseFolder, ".ai_tool", "drafts");
       await mkdir(draftsDir, { recursive: true });
       const draftId = `packet-${Date.now()}`;
       await writeFile(
@@ -1543,7 +1544,7 @@ app.post("/batch-scan-pii", async (c) => {
   }
 
   try {
-    const indexPath = join(caseFolder, ".pi_tool", "document_index.json");
+    const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
     const indexContent = await readFile(indexPath, "utf-8");
     const indexData = JSON.parse(indexContent);
     const maps = buildIndexedPathMaps(indexData);

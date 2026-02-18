@@ -224,7 +224,7 @@ export const AssignmentSchema = z.object({
 
 /**
  * Container info for clients with multiple DOI subfolders.
- * Stored in ClientName/.pi_tool/container_info.json
+ * Stored in ClientName/.ai_tool/container_info.json
  */
 export const ContainerInfoSchema = z.object({
   clientName: z.string(),
