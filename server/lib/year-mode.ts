@@ -16,6 +16,7 @@ export interface ClientRegistryEntry {
   name: string;           // "Smith, John"
   slug: string;           // "smith-john"
   sourceFolders: string[]; // ["2024/Smith, John", "2025/Smith, John"]
+  fileCount?: number;     // total files across all source folders
 }
 
 export interface ClientRegistry {
@@ -112,7 +113,30 @@ async function saveClientRegistry(
 // ---------------------------------------------------------------------------
 
 /**
- * Walk all year folders, group clients by exact name, create .ai_tool/clients/<slug>/ dirs.
+ * Count files in a directory recursively (excludes .ai_tool and dot-files).
+ */
+async function countDirFiles(dir: string): Promise<number> {
+  let count = 0;
+  let entries: Awaited<ReturnType<typeof readdir>>;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const e of entries) {
+    if (e.name === AI_TOOL_DIR || e.name.startsWith(".")) continue;
+    if (e.isDirectory()) {
+      count += await countDirFiles(join(dir, e.name));
+    } else {
+      count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Walk all year folders, group clients by exact name, count files,
+ * and create .ai_tool/clients/<slug>/ dirs.
  */
 export async function scanAndBuildRegistry(
   firmRoot: string
@@ -128,24 +152,31 @@ export async function scanAndBuildRegistry(
     (e) => e.isDirectory() && isYearFolder(e.name)
   );
 
-  for (const yearDir of yearDirs) {
-    const yearPath = join(firmRoot, yearDir.name);
-    let clients: Awaited<ReturnType<typeof readdir>>;
-    try {
-      clients = await readdir(yearPath, { withFileTypes: true });
-    } catch {
-      continue;
-    }
+  // Read all year folders in parallel
+  const yearResults = await Promise.all(
+    yearDirs.map(async (yearDir) => {
+      const yearPath = join(firmRoot, yearDir.name);
+      let clients: Awaited<ReturnType<typeof readdir>>;
+      try {
+        clients = await readdir(yearPath, { withFileTypes: true });
+      } catch {
+        return [];
+      }
+      return clients
+        .filter((c) => c.isDirectory() && !c.name.startsWith("."))
+        .map((c) => ({ yearName: yearDir.name, clientName: c.name }));
+    })
+  );
 
-    for (const client of clients) {
-      if (!client.isDirectory() || client.name.startsWith(".")) continue;
-
-      const slug = slugify(client.name);
-      const relFolder = `${yearDir.name}/${client.name}`;
+  // Build registry from parallel results
+  for (const yearClients of yearResults) {
+    for (const { yearName, clientName } of yearClients) {
+      const slug = slugify(clientName);
+      const relFolder = `${yearName}/${clientName}`;
 
       if (!registry.clients[slug]) {
         registry.clients[slug] = {
-          name: client.name,
+          name: clientName,
           slug,
           sourceFolders: [],
         };
@@ -157,16 +188,30 @@ export async function scanAndBuildRegistry(
     }
   }
 
-  // Sort source folders chronologically for each client
+  // Sort source folders chronologically
   for (const entry of Object.values(registry.clients)) {
     entry.sourceFolders.sort();
   }
 
-  // Ensure .ai_tool/clients/<slug>/ directories exist
-  for (const entry of Object.values(registry.clients)) {
-    const clientDir = join(firmRoot, AI_TOOL_DIR, CLIENTS_DIR, entry.slug);
-    await mkdir(clientDir, { recursive: true });
-  }
+  // Count files and create client dirs in parallel
+  await Promise.all(
+    Object.values(registry.clients).map(async (entry) => {
+      // Count files across all source folders
+      const counts = await Promise.all(
+        entry.sourceFolders.map((rel) => countDirFiles(join(firmRoot, rel)))
+      );
+      entry.fileCount = counts.reduce((a, b) => a + b, 0);
+
+      // Ensure virtual client dir exists
+      await mkdir(join(firmRoot, AI_TOOL_DIR, CLIENTS_DIR, entry.slug), {
+        recursive: true,
+      });
+    })
+  );
+
+  console.log(
+    `[year-mode] scanned ${yearDirs.length} year folders → ${Object.keys(registry.clients).length} clients`
+  );
 
   await saveClientRegistry(firmRoot, registry);
   return registry;

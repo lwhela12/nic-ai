@@ -17,7 +17,6 @@ import {
   resolveFirmRoot,
   getClientSlug,
   getSourceFolders,
-  listYearBasedCaseFiles,
   resolveYearFilePath,
   type ClientRegistry,
 } from "../lib/year-mode";
@@ -559,6 +558,7 @@ async function buildCaseSummary(
   options?: {
     subcaseInfo?: { parentPath: string; parentName: string };
     practiceArea?: string;
+    yearRegistry?: { firmRoot: string; registry: ClientRegistry; slug: string };
   }
 ): Promise<CaseSummary> {
   const indexPath = join(casePath, ".ai_tool", "document_index.json");
@@ -661,25 +661,21 @@ async function buildCaseSummary(
       caseSummary.assignments = index.assignments;
     }
 
-    // Check if needs reindex (files modified after index)
-    caseSummary.needsReindex = await checkNeedsReindex(casePath, indexStats.mtimeMs);
+    // Check if needs reindex — skip for year-based dashboard loads (expensive)
+    if (!options?.yearRegistry) {
+      caseSummary.needsReindex = await checkNeedsReindex(casePath, indexStats.mtimeMs);
+    }
 
   } catch {
     // No index found - case exists but not indexed
     caseSummary.indexed = false;
   }
 
-  // Quick file count (lightweight recursive walk)
+  // File count — use registry if available, otherwise walk
   try {
-    const slug = getClientSlug(casePath);
-    if (slug) {
-      // Year-based: count files across all real source folders
-      const firmRoot = resolveFirmRoot(casePath);
-      const registry = await loadClientRegistry(firmRoot);
-      if (registry?.clients[slug]) {
-        const files = await listYearBasedCaseFiles(firmRoot, registry, slug);
-        caseSummary.fileCount = files.length;
-      }
+    if (options?.yearRegistry) {
+      const entry = options.yearRegistry.registry.clients[options.yearRegistry.slug];
+      caseSummary.fileCount = entry?.fileCount ?? 0;
     } else {
       let count = 0;
       async function countFiles(dir: string) {
@@ -798,11 +794,14 @@ app.get("/cases", async (c) => {
         registry = await scanAndBuildRegistry(root);
       }
 
-      // Build CaseSummary[] from virtual case folders
+      // Build CaseSummary[] from virtual case folders — pass registry to avoid per-client I/O
       const cases = await Promise.all(
         Object.values(registry.clients).map(async (client) => {
           const virtualPath = join(root, ".ai_tool", "clients", client.slug);
-          return buildCaseSummary(virtualPath, client.name, { practiceArea });
+          return buildCaseSummary(virtualPath, client.name, {
+            practiceArea,
+            yearRegistry: { firmRoot: root, registry, slug: client.slug },
+          });
         })
       );
 
