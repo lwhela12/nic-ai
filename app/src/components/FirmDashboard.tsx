@@ -119,7 +119,6 @@ interface Props {
   practiceArea: PracticeArea
   onSelectCase: (casePath: string) => void
   onChangeFirmRoot: () => void
-  onChangePracticeAreaForFolder: () => void
   userEmail?: string
   onLogout?: () => void
   // Todo props - managed by App.tsx
@@ -257,7 +256,7 @@ const ClipboardDocumentListIcon = () => (
 let firmDataCache: { root: string; data: FirmData; fetchedAt: number } | null = null
 
 export default function FirmDashboard({
-  apiUrl, firmRoot, practiceArea, onSelectCase, onChangeFirmRoot, onChangePracticeAreaForFolder, userEmail, onLogout,
+  apiUrl, firmRoot, practiceArea, onSelectCase, onChangeFirmRoot, userEmail, onLogout,
   todos, onDrawerOpen, onTodosUpdated,
   firmChatPrompt, forceShowFirmChat, onFirmChatPromptUsed,
   knowledgeVersion,
@@ -1124,17 +1123,8 @@ export default function FirmDashboard({
                 <span>Change Folder</span>
               </button>
               <div className="h-6 w-px bg-white/15" />
-              <div className="flex items-center gap-2">
-                <div className="px-3 py-1.5 text-xs font-medium rounded-lg bg-white/10 text-brand-100">
-                  {isWC ? 'Workers\' Comp' : 'Personal Injury'}
-                </div>
-                <button
-                  onClick={onChangePracticeAreaForFolder}
-                  className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-white/5 text-brand-200 hover:text-white hover:bg-white/10 transition-colors"
-                  title="Change area of law for this folder"
-                >
-                  Change
-                </button>
+              <div className="px-3 py-1.5 text-xs font-medium rounded-lg bg-white/10 text-brand-100">
+                Workers' Comp
               </div>
             </div>
 

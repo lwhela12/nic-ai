@@ -29,7 +29,7 @@ export interface ClientRegistry {
 // ---------------------------------------------------------------------------
 
 export function isYearFolder(name: string): boolean {
-  return /^(19|20)\d{2}$/.test(name);
+  return /^(19|20)\d{2}(\s|$)/.test(name);
 }
 
 export function slugify(name: string): string {

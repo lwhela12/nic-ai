@@ -475,10 +475,6 @@ function App() {
     return localStorage.getItem(FIRM_ROOT_KEY)
   })
   const [practiceArea, setPracticeArea] = useState<PracticeArea | null>(null)
-  const [pendingFolderPath, setPendingFolderPath] = useState<string | null>(null)
-  const [pendingPracticeArea, setPendingPracticeArea] = useState<PracticeArea | null>(null)
-  const [pendingPracticeAreaLoading, setPendingPracticeAreaLoading] = useState(false)
-  const [savingFolderSetup, setSavingFolderSetup] = useState(false)
   const [folderSetupError, setFolderSetupError] = useState<string | null>(null)
   const [caseFolder, setCaseFolderState] = useState<string | null>(() => {
     return getUrlParam('case')
@@ -1082,63 +1078,35 @@ function App() {
     setPacketState(null)
   }, [])
 
-  const beginFolderSetup = useCallback(async (path: string, options?: { forcePrompt?: boolean }) => {
+  const beginFolderSetup = useCallback(async (path: string) => {
     setShowKnowledgeInit(false)
     setFolderSetupError(null)
-    setPendingPracticeAreaLoading(true)
 
     const status = await checkAuthStatus(path)
-    if (!status.authenticated) {
-      setPendingPracticeAreaLoading(false)
-      return
-    }
+    if (!status.authenticated) return
 
     const resolved = await resolveFolderPracticeArea(path)
-    setPendingPracticeAreaLoading(false)
 
-    // Default behavior: if folder already has an area configured, continue directly.
-    if (resolved && !options?.forcePrompt) {
+    // If folder already has an area configured, continue directly.
+    if (resolved) {
       clearCaseView()
-      setPendingFolderPath(null)
-      setPendingPracticeArea(null)
       setPracticeArea(resolved)
       setFirmRoot(path)
       return
     }
 
-    // Folder needs explicit setup (or user explicitly asked to change area).
-    clearCaseView()
-    setFirmRoot(null)
-    setPracticeArea(null)
-    localStorage.removeItem(FIRM_ROOT_KEY)
-    setPendingFolderPath(path)
-    setPendingPracticeArea(resolved)
-  }, [checkAuthStatus, clearCaseView, resolveFolderPracticeArea])
-
-  const confirmFolderSetup = useCallback(async () => {
-    if (!pendingFolderPath) return
-    if (!pendingPracticeArea) {
-      setFolderSetupError('Select an area of law for this folder.')
-      return
-    }
-
-    setSavingFolderSetup(true)
-    setFolderSetupError(null)
-
-    const saved = await saveFolderPracticeArea(pendingFolderPath, pendingPracticeArea)
+    // Workers' Comp only – auto-select and save without prompting.
+    const area: PracticeArea = 'Workers\' Compensation'
+    const saved = await saveFolderPracticeArea(path, area)
     if (!saved) {
       setFolderSetupError('Could not save the area of law in this folder.')
-      setSavingFolderSetup(false)
       return
     }
-
     clearCaseView()
-    setPracticeArea(pendingPracticeArea)
-    setFirmRoot(pendingFolderPath)
-    setPendingFolderPath(null)
-    setPendingPracticeArea(null)
-    setSavingFolderSetup(false)
-  }, [clearCaseView, pendingFolderPath, pendingPracticeArea, saveFolderPracticeArea])
+    setPracticeArea(area)
+    setFirmRoot(path)
+  }, [checkAuthStatus, clearCaseView, resolveFolderPracticeArea, saveFolderPracticeArea])
+
 
   const startCaseIndexing = useCallback(async (targetFolder: string, files?: string[]) => {
     // Abort any existing indexing SSE
@@ -1480,17 +1448,23 @@ function App() {
       const detectedArea = await resolveFolderPracticeArea(firmRoot)
       if (cancelled) return
 
-      if (!detectedArea) {
-        setPracticeArea(null)
-        setPendingFolderPath(firmRoot)
-        setPendingPracticeArea(null)
-        setFolderSetupError('Select an area of law for this folder.')
-        localStorage.removeItem(FIRM_ROOT_KEY)
-        setFirmRoot(null)
-        return
+      let effectiveArea = detectedArea
+      if (!effectiveArea) {
+        // Workers' Comp only – auto-save without prompting.
+        const area: PracticeArea = 'Workers\' Compensation'
+        const saved = await saveFolderPracticeArea(firmRoot, area)
+        if (cancelled) return
+        if (!saved) {
+          setPracticeArea(null)
+          setFolderSetupError('Could not save the area of law in this folder.')
+          localStorage.removeItem(FIRM_ROOT_KEY)
+          setFirmRoot(null)
+          return
+        }
+        effectiveArea = area
       }
 
-      setPracticeArea(detectedArea)
+      setPracticeArea(effectiveArea)
       setFolderSetupError(null)
 
       try {
@@ -1503,13 +1477,13 @@ function App() {
         if (manifestRes.ok) {
           const manifest = await manifestRes.json()
           const manifestArea = normalizePracticeArea(manifest?.practiceArea)
-          if (manifestArea && manifestArea !== detectedArea) {
+          if (manifestArea && manifestArea !== effectiveArea) {
             const templates = await loadKnowledgeTemplates()
             if (cancelled) return
             setKnowledgeTemplates(templates)
 
             const matchingTemplate = templates.find((template) => {
-              return normalizePracticeArea(template.practiceArea) === detectedArea
+              return normalizePracticeArea(template.practiceArea) === effectiveArea
             })
 
             if (matchingTemplate) {
@@ -1535,7 +1509,7 @@ function App() {
       setKnowledgeTemplates(templates)
 
       const matchingTemplate = templates.find((template) => {
-        return normalizePracticeArea(template.practiceArea) === detectedArea
+        return normalizePracticeArea(template.practiceArea) === effectiveArea
       })
 
       if (matchingTemplate) {
@@ -1655,8 +1629,6 @@ function App() {
     setCaseFolder(null)
     setDocumentIndex(null)
     setPracticeArea(null)
-    setPendingFolderPath(null)
-    setPendingPracticeArea(null)
     setFolderSetupError(null)
     localStorage.removeItem(FIRM_ROOT_KEY)
   }
@@ -1667,8 +1639,6 @@ function App() {
     const savedRoot = localStorage.getItem(FIRM_ROOT_KEY)
     setCaseFolder(null)
     setDocumentIndex(null)
-    setPendingFolderPath(null)
-    setPendingPracticeArea(null)
     setFolderSetupError(null)
     if (!savedRoot) {
       setFirmRoot(null)
@@ -1749,9 +1719,7 @@ function App() {
             </div>
             <h1 className="font-serif text-3xl text-brand-900">Claude PI</h1>
           </div>
-          <p className="text-brand-500 mb-8">
-            {pendingFolderPath ? 'Confirm folder settings to continue' : 'Legal Case Management'}
-          </p>
+          <p className="text-brand-500 mb-8">Legal Case Management</p>
 
           <button
             onClick={() => setShowPicker(true)}
@@ -1765,63 +1733,16 @@ function App() {
                 <FolderIcon />
               </div>
               <p className="text-base font-medium text-brand-700 group-hover:text-brand-900">
-                {pendingFolderPath ? 'Change Folder (Optional)' : 'Select Cases Folder'}
+                Select Cases Folder
               </p>
               <p className="mt-1 text-sm text-brand-400">
-                {pendingFolderPath
-                  ? 'Use this only if you want a different folder'
-                  : 'Choose the folder containing all your case files first'}
+                Choose the folder containing all your case files first
               </p>
             </div>
           </button>
 
-          {pendingFolderPath && (
-            <div className="mt-6 border border-surface-200 rounded-xl p-4 bg-surface-50">
-              <p className="text-xs font-medium text-brand-700 mb-1">Confirm Folder Settings</p>
-              <p className="text-xs text-brand-500 mb-2">Selected folder</p>
-              <p className="text-sm text-brand-700 break-all">{pendingFolderPath}</p>
-              <p className="text-xs text-brand-500 mt-2">
-                Area of law is saved per folder and reused automatically.
-              </p>
-              <div className="mt-4">
-                <label className="block text-sm font-medium text-brand-700 mb-2">Area of Law</label>
-                {pendingPracticeAreaLoading && (
-                  <p className="text-xs text-brand-500 mb-3">Checking existing folder settings...</p>
-                )}
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    onClick={() => setPendingPracticeArea('Personal Injury')}
-                    className={`px-4 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
-                      pendingPracticeArea === 'Personal Injury'
-                        ? 'border-accent-500 bg-accent-50 text-accent-700'
-                        : 'border-surface-200 text-brand-600 hover:border-accent-300 hover:bg-surface-50'
-                    }`}
-                  >
-                    Personal Injury
-                  </button>
-                  <button
-                    onClick={() => setPendingPracticeArea('Workers\' Compensation')}
-                    className={`px-4 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
-                      pendingPracticeArea === 'Workers\' Compensation'
-                        ? 'border-accent-500 bg-accent-50 text-accent-700'
-                        : 'border-surface-200 text-brand-600 hover:border-accent-300 hover:bg-surface-50'
-                    }`}
-                  >
-                    Workers' Comp
-                  </button>
-                </div>
-              </div>
-              {folderSetupError && (
-                <p className="mt-3 text-xs text-red-700">{folderSetupError}</p>
-              )}
-              <button
-                onClick={confirmFolderSetup}
-                disabled={savingFolderSetup || !pendingPracticeArea}
-                className="mt-4 w-full px-4 py-3 bg-brand-900 text-white rounded-lg font-medium hover:bg-brand-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {savingFolderSetup ? 'Saving...' : 'Save & Open Folder'}
-              </button>
-            </div>
+          {folderSetupError && (
+            <p className="mt-4 text-xs text-red-700 text-center">{folderSetupError}</p>
           )}
 
           <p className="text-xs text-brand-400 text-center mt-6">
@@ -1863,7 +1784,6 @@ function App() {
           practiceArea={practiceArea}
           onSelectCase={(path) => handleCaseSelect(path)}
           onChangeFirmRoot={() => setShowPicker(true)}
-          onChangePracticeAreaForFolder={() => beginFolderSetup(firmRoot, { forcePrompt: true })}
           userEmail={authState?.email}
           onLogout={handleLogout}
           todos={todos}
