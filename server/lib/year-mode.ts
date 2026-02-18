@@ -33,6 +33,12 @@ export function isYearFolder(name: string): boolean {
   return /^(19|20)\d{2}(\s|$)/.test(name);
 }
 
+/** Extract the 4-digit year from a year folder name, or null. */
+export function yearFromFolder(name: string): number | null {
+  const m = name.match(/^((?:19|20)\d{2})/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
 export function slugify(name: string): string {
   return name
     .toLowerCase()
@@ -211,6 +217,118 @@ export async function scanAndBuildRegistry(
 
   console.log(
     `[year-mode] scanned ${yearDirs.length} year folders → ${Object.keys(registry.clients).length} clients`
+  );
+
+  await saveClientRegistry(firmRoot, registry);
+  return registry;
+}
+
+/**
+ * Lightweight freshness check: only scan the current year folder and any
+ * year folders not yet in the registry. Prior years are considered frozen.
+ * Returns the (possibly updated) registry — callers should use this instead
+ * of the one they loaded from disk.
+ */
+export async function ensureRegistryFresh(
+  firmRoot: string,
+  registry: ClientRegistry
+): Promise<ClientRegistry> {
+  const currentYear = new Date().getFullYear();
+
+  const entries = await readdir(firmRoot, { withFileTypes: true });
+  const yearDirs = entries.filter(
+    (e) => e.isDirectory() && isYearFolder(e.name)
+  );
+
+  // Collect year folders in the registry for quick lookup
+  const knownFolders = new Set<string>();
+  for (const client of Object.values(registry.clients)) {
+    for (const sf of client.sourceFolders) {
+      knownFolders.add(sf);
+    }
+  }
+
+  // Determine which year folders need scanning:
+  // 1. Current year folder — always check for new clients
+  // 2. Any year folder not represented in the registry at all (new year added)
+  const foldersToScan = yearDirs.filter((d) => {
+    const y = yearFromFolder(d.name);
+    if (y === currentYear) return true;
+    // Check if ANY client has a source folder starting with this year dir name
+    const prefix = d.name + "/";
+    for (const sf of knownFolders) {
+      if (sf.startsWith(prefix)) return false;
+    }
+    return true; // entirely new year folder
+  });
+
+  if (foldersToScan.length === 0) return registry;
+
+  // Read client folders in the target year dirs
+  let changed = false;
+  const scanResults = await Promise.all(
+    foldersToScan.map(async (yearDir) => {
+      const yearPath = join(firmRoot, yearDir.name);
+      let clients: Awaited<ReturnType<typeof readdir>>;
+      try {
+        clients = await readdir(yearPath, { withFileTypes: true });
+      } catch {
+        return [];
+      }
+      return clients
+        .filter((c) => c.isDirectory() && !c.name.startsWith("."))
+        .map((c) => ({ yearName: yearDir.name, clientName: c.name }));
+    })
+  );
+
+  for (const yearClients of scanResults) {
+    for (const { yearName, clientName } of yearClients) {
+      const slug = slugify(clientName);
+      const relFolder = `${yearName}/${clientName}`;
+
+      if (!registry.clients[slug]) {
+        registry.clients[slug] = {
+          name: clientName,
+          slug,
+          sourceFolders: [],
+        };
+        changed = true;
+      }
+
+      if (!registry.clients[slug].sourceFolders.includes(relFolder)) {
+        registry.clients[slug].sourceFolders.push(relFolder);
+        registry.clients[slug].sourceFolders.sort();
+        changed = true;
+      }
+    }
+  }
+
+  if (!changed) return registry;
+
+  // Recount files and create dirs only for new/changed clients
+  const changedSlugs = new Set<string>();
+  for (const yearClients of scanResults) {
+    for (const { clientName } of yearClients) {
+      changedSlugs.add(slugify(clientName));
+    }
+  }
+
+  await Promise.all(
+    [...changedSlugs].map(async (slug) => {
+      const entry = registry.clients[slug];
+      if (!entry) return;
+      const counts = await Promise.all(
+        entry.sourceFolders.map((rel) => countDirFiles(join(firmRoot, rel)))
+      );
+      entry.fileCount = counts.reduce((a, b) => a + b, 0);
+      await mkdir(join(firmRoot, AI_TOOL_DIR, CLIENTS_DIR, entry.slug), {
+        recursive: true,
+      });
+    })
+  );
+
+  console.log(
+    `[year-mode] freshness check: scanned ${foldersToScan.map((d) => d.name).join(", ")} → ${changedSlugs.size} clients updated`
   );
 
   await saveClientRegistry(firmRoot, registry);

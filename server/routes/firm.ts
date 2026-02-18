@@ -13,6 +13,7 @@ import {
   detectYearBasedMode,
   loadClientRegistry,
   scanAndBuildRegistry,
+  ensureRegistryFresh,
   refreshRegistry,
   resolveFirmRoot,
   getClientSlug,
@@ -792,6 +793,9 @@ app.get("/cases", async (c) => {
       let registry = await loadClientRegistry(root);
       if (!registry) {
         registry = await scanAndBuildRegistry(root);
+      } else {
+        // Lightweight check: pick up new clients in current year + any new year folders
+        registry = await ensureRegistryFresh(root, registry);
       }
 
       // Build CaseSummary[] from virtual case folders — pass registry to avoid per-client I/O
