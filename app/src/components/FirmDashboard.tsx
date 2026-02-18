@@ -162,7 +162,6 @@ interface Props {
   onBatchComplete?: () => void
 }
 
-type SortField = 'name' | 'phase' | 'sol' | 'specials'
 type TableDensity = 'comfortable' | 'compact'
 
 // Icons
@@ -282,8 +281,6 @@ export default function FirmDashboard({
   }, [firmRoot])
   const [loading, setLoading] = useState(!hasCachedData)
   const [error, setError] = useState<string | null>(null)
-  const [sortField, setSortField] = useState<SortField>('sol')
-  const [filterPhase, setFilterPhase] = useState<string>('all')
   const [tableDensity, setTableDensity] = useState<TableDensity>('comfortable')
   // Use App-level batch state when available, local state as fallback
   const [localBatchProgress, setLocalBatchProgress] = useState<BatchProgress | null>(null)
@@ -974,7 +971,6 @@ export default function FirmDashboard({
       return (c.clientName || '').toLowerCase().includes(q) ||
              c.name.toLowerCase().includes(q)
     })
-    .filter(c => filterPhase === 'all' || c.casePhase === filterPhase)
     .filter(c => {
       if (!firmData?.yearBasedMode || filterYears.size === 0) return true
       return c.latestYear != null && filterYears.has(c.latestYear)
@@ -992,23 +988,7 @@ export default function FirmDashboard({
       }
       return true
     })
-    .sort((a, b) => {
-      switch (sortField) {
-        case 'name':
-          return (a.clientName || a.name).localeCompare(b.clientName || b.name)
-        case 'phase':
-          return (a.casePhase || '').localeCompare(b.casePhase || '')
-        case 'sol':
-          if (a.solDaysRemaining === undefined && b.solDaysRemaining === undefined) return 0
-          if (a.solDaysRemaining === undefined) return 1
-          if (b.solDaysRemaining === undefined) return -1
-          return a.solDaysRemaining - b.solDaysRemaining
-        case 'specials':
-          return (b.totalSpecials || 0) - (a.totalSpecials || 0)
-        default:
-          return 0
-      }
-    }) || []
+    .sort((a, b) => (a.clientName || a.name).localeCompare(b.clientName || b.name)) || []
 
   const visibleCasePaths = useMemo(
     () => sortedCases.filter((c) => !c.isContainer).map((c) => c.path),
@@ -1035,7 +1015,6 @@ export default function FirmDashboard({
   const containerRowCellPad = isCompact ? 'px-6 py-2.5' : 'px-6 py-3'
   const containerCheckboxCellPad = isCompact ? 'px-4 py-2.5 w-10' : 'px-4 py-3 w-10'
 
-  const phases = [...new Set(firmData?.cases.map(c => c.casePhase).filter(Boolean))]
 
   // Available years for filter (descending), only for year-based mode
   const availableYears = useMemo(() => {
@@ -1220,7 +1199,7 @@ export default function FirmDashboard({
         </div>
 
         {/* Summary cards — reflect filtered view */}
-        <div className="grid grid-cols-3 gap-6">
+        <div className="grid grid-cols-2 gap-6">
           <div className="bg-white/10 backdrop-blur rounded-xl p-5">
             <div className="flex items-center justify-between">
               <div>
@@ -1229,19 +1208,6 @@ export default function FirmDashboard({
               </div>
               <div className="w-12 h-12 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400">
                 <CheckCircleIcon />
-              </div>
-            </div>
-          </div>
-          <div className="bg-white/10 backdrop-blur rounded-xl p-5">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-brand-300 uppercase tracking-wide">
-                  {isWC ? 'Open Hearings' : 'SOL < 90 Days'}
-                </p>
-                <p className="text-4xl font-serif text-white mt-1">{firmData?.summary.needsAttention || 0}</p>
-              </div>
-              <div className="w-12 h-12 rounded-full bg-amber-500/20 flex items-center justify-center text-amber-400">
-                <ExclamationIcon />
               </div>
             </div>
           </div>
@@ -1340,44 +1306,6 @@ export default function FirmDashboard({
                              placeholder:text-brand-400"
                 />
               </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <label className="text-sm font-medium text-brand-600">Sort by</label>
-              <select
-                value={sortField}
-                onChange={(e) => setSortField(e.target.value as SortField)}
-                className="text-sm border border-surface-200 rounded-lg px-3 py-2 bg-white
-                           focus:outline-none focus:ring-2 focus:ring-accent-500 focus:border-transparent"
-              >
-                {isWC ? (
-                  <>
-                    <option value="name">Client Name</option>
-                    <option value="phase">Case Phase</option>
-                    <option value="specials">Total Medical</option>
-                  </>
-                ) : (
-                  <>
-                    <option value="sol">SOL Urgency</option>
-                    <option value="name">Client Name</option>
-                    <option value="phase">Case Phase</option>
-                    <option value="specials">Total Specials</option>
-                  </>
-                )}
-              </select>
-            </div>
-            <div className="flex items-center gap-2">
-              <label className="text-sm font-medium text-brand-600">Phase</label>
-              <select
-                value={filterPhase}
-                onChange={(e) => setFilterPhase(e.target.value)}
-                className="text-sm border border-surface-200 rounded-lg px-3 py-2 bg-white
-                           focus:outline-none focus:ring-2 focus:ring-accent-500 focus:border-transparent"
-              >
-                <option value="all">All Phases</option>
-                {phases.map(phase => (
-                  <option key={phase} value={phase}>{phase}</option>
-                ))}
-              </select>
             </div>
             {availableYears.length > 1 && (
               <div className="relative flex items-center gap-2">
