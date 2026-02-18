@@ -19,6 +19,7 @@ import {
   getClientSlug,
   getSourceFolders,
   resolveYearFilePath,
+  yearFromFolder,
   type ClientRegistry,
 } from "../lib/year-mode";
 import { homedir } from "os";
@@ -539,6 +540,7 @@ interface CaseSummary {
   siblingCases?: Array<{ path: string; name: string; dateOfInjury: string }>;
   injuryDate?: string;            // Parsed from DOI folder name (YYYY-MM-DD)
   fileCount?: number;             // Total document files in case folder
+  latestYear?: number;            // Most recent year folder containing this client
 }
 
 // Helper to parse amount values (handles both number and string formats like "$24,419.90")
@@ -802,10 +804,16 @@ app.get("/cases", async (c) => {
       const cases = await Promise.all(
         Object.values(registry.clients).map(async (client) => {
           const virtualPath = join(root, ".ai_tool", "clients", client.slug);
-          return buildCaseSummary(virtualPath, client.name, {
+          const summary = await buildCaseSummary(virtualPath, client.name, {
             practiceArea,
             yearRegistry: { firmRoot: root, registry, slug: client.slug },
           });
+          // Compute latest year from source folders
+          const years = client.sourceFolders
+            .map((sf) => yearFromFolder(sf.split("/")[0]))
+            .filter((y): y is number => y !== null);
+          summary.latestYear = years.length > 0 ? Math.max(...years) : undefined;
+          return summary;
         })
       );
 

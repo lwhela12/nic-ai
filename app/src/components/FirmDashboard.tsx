@@ -89,6 +89,7 @@ interface CaseSummary {
   siblingCases?: Array<{ path: string; name: string; dateOfInjury: string }>
   injuryDate?: string            // Parsed from DOI folder name (YYYY-MM-DD)
   fileCount?: number             // Total document files in case folder
+  latestYear?: number            // Most recent year folder containing this client
 }
 
 interface FirmData {
@@ -342,6 +343,7 @@ export default function FirmDashboard({
     return () => window.removeEventListener('popstate', handlePopState)
   }, [])
   const [searchQuery, setSearchQuery] = useState('')
+  const [filterYear, setFilterYear] = useState<string>(() => String(new Date().getFullYear()))
   const [selectedCases, setSelectedCases] = useState<Set<string>>(new Set())
   const [knowledgeExists, setKnowledgeExists] = useState<boolean | null>(null)
   const [showFirmConfig, setShowFirmConfig] = useState(false)
@@ -973,6 +975,10 @@ export default function FirmDashboard({
     })
     .filter(c => filterPhase === 'all' || c.casePhase === filterPhase)
     .filter(c => {
+      if (filterYear === 'all' || !firmData?.yearBasedMode) return true
+      return c.latestYear === parseInt(filterYear, 10)
+    })
+    .filter(c => {
       // Assignment filter
       if (assignmentFilter === 'all') return true
       if (assignmentFilter === 'unassigned') return !c.assignments || c.assignments.length === 0
@@ -1029,6 +1035,13 @@ export default function FirmDashboard({
   const containerCheckboxCellPad = isCompact ? 'px-4 py-2.5 w-10' : 'px-4 py-3 w-10'
 
   const phases = [...new Set(firmData?.cases.map(c => c.casePhase).filter(Boolean))]
+
+  // Available years for filter (descending), only for year-based mode
+  const availableYears = useMemo(() => {
+    if (!firmData?.yearBasedMode) return []
+    const years = [...new Set(firmData.cases.map(c => c.latestYear).filter((y): y is number => !!y))]
+    return years.sort((a, b) => b - a)
+  }, [firmData])
 
   if (loading) {
     return (
@@ -1365,6 +1378,22 @@ export default function FirmDashboard({
                 ))}
               </select>
             </div>
+            {availableYears.length > 1 && (
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-brand-600">Year</label>
+                <select
+                  value={filterYear}
+                  onChange={(e) => setFilterYear(e.target.value)}
+                  className="text-sm border border-surface-200 rounded-lg px-3 py-2 bg-white
+                             focus:outline-none focus:ring-2 focus:ring-accent-500 focus:border-transparent"
+                >
+                  {availableYears.map(year => (
+                    <option key={year} value={String(year)}>{year}</option>
+                  ))}
+                  <option value="all">All Years</option>
+                </select>
+              </div>
+            )}
             {/* Assignment filter - only show when team is configured */}
             {teamMembers.length > 0 && (
               <div className="flex items-center gap-2">
