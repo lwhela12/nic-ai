@@ -1455,11 +1455,9 @@ function App() {
         const saved = await saveFolderPracticeArea(firmRoot, area)
         if (cancelled) return
         if (!saved) {
-          setPracticeArea(null)
-          setFolderSetupError('Could not save the area of law in this folder.')
-          localStorage.removeItem(FIRM_ROOT_KEY)
-          setFirmRoot(null)
-          return
+          // Don't nuke firmRoot here — beginFolderSetup may have already
+          // succeeded.  Just default the area so the dashboard can load.
+          console.warn('[syncFolderContext] Could not persist practice area; defaulting to Workers\' Comp')
         }
         effectiveArea = area
       }

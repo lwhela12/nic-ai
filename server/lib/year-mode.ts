@@ -64,8 +64,14 @@ export async function detectYearBasedMode(firmRoot: string): Promise<boolean> {
     );
     if (dirs.length === 0) return false;
     const yearCount = dirs.filter((e) => isYearFolder(e.name)).length;
-    return yearCount > 0 && yearCount / dirs.length >= 0.5;
-  } catch {
+    const result = yearCount > 0 && yearCount / dirs.length >= 0.5;
+    console.log(
+      `[year-mode] detect: ${dirs.length} dirs, ${yearCount} year folders → ${result ? "YEAR MODE" : "flat mode"}`,
+      dirs.map((d) => d.name)
+    );
+    return result;
+  } catch (err) {
+    console.error("[year-mode] detect error:", err);
     return false;
   }
 }
