@@ -839,10 +839,15 @@ app.post("/init", async (c) => {
       // Build sourceFolders for year-based mode
       let sourceFolders: { firmRoot: string; folders: string[] } | undefined;
       const initSlug = getClientSlug(caseFolder);
+      console.log(`[init] firmRoot=${firmRoot}, slug=${initSlug}`);
       if (initSlug) {
         const initRegistry = await loadClientRegistry(firmRoot);
+        console.log(`[init] registry loaded: ${initRegistry ? Object.keys(initRegistry.clients).length + ' clients' : 'null'}`);
         if (initRegistry?.clients[initSlug]) {
           sourceFolders = { firmRoot, folders: initRegistry.clients[initSlug].sourceFolders };
+          console.log(`[init] sourceFolders:`, sourceFolders.folders);
+        } else {
+          console.log(`[init] slug "${initSlug}" not found in registry`);
         }
       }
 

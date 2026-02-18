@@ -2097,6 +2097,7 @@ async function listCaseFiles(
   // Year-based mode: walk each source folder with year prefix
   if (options?.sourceFolders) {
     const { firmRoot, folders } = options.sourceFolders;
+    console.log(`[listCaseFiles] year-mode: firmRoot=${firmRoot}, folders=${JSON.stringify(folders)}`);
     const allFiles: string[] = [];
     for (const relFolder of folders) {
       const absFolder = join(firmRoot, relFolder);
@@ -2107,7 +2108,10 @@ async function listCaseFiles(
         let entries: Awaited<ReturnType<typeof readdir>>;
         try {
           entries = await readdir(dir, { withFileTypes: true });
-        } catch { return; }
+        } catch (err) {
+          console.error(`[listCaseFiles] readdir failed for ${dir}:`, err);
+          return;
+        }
         for (const entry of entries) {
           if (entry.name === '.ai_tool' || entry.name.startsWith('.')) continue;
           const fullPath = join(dir, entry.name);
@@ -2121,8 +2125,10 @@ async function listCaseFiles(
       }
 
       await walkSourceDir(absFolder);
+      console.log(`[listCaseFiles] ${relFolder} → ${files.length} files`);
       allFiles.push(...files);
     }
+    console.log(`[listCaseFiles] total: ${allFiles.length} files`);
     return allFiles;
   }
 
