@@ -3062,8 +3062,29 @@ app.post("/batch-index", async (c) => {
           }
         }
 
-        // Regular case
-        targetCases.push({ path: casePath, name: caseName });
+        // Check if this is a year-based virtual path (.ai_tool/clients/<slug>)
+        const slug = getClientSlug(casePath);
+        if (slug) {
+          const firmRoot = resolveFirmRoot(casePath);
+          let registry = await loadClientRegistry(firmRoot);
+          if (!registry) {
+            registry = await scanAndBuildRegistry(firmRoot);
+          }
+          const client = registry.clients[slug];
+          if (client) {
+            console.log(`[batch-index] year-based case: ${caseName}, slug=${slug}, sourceFolders=${JSON.stringify(client.sourceFolders)}`);
+            targetCases.push({
+              path: casePath,
+              name: client.name,
+              sourceFolders: { firmRoot, folders: client.sourceFolders },
+            });
+          } else {
+            console.warn(`[batch-index] slug ${slug} not found in registry, skipping`);
+          }
+        } else {
+          // Regular case
+          targetCases.push({ path: casePath, name: caseName });
+        }
 
         // Also discover and add any unindexed subcases
         const subcasePaths = await discoverSubcases(casePath);
