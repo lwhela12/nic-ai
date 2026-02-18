@@ -55,8 +55,8 @@
     "sharp": "^0.34.5"
   },
   "build": {
-    "appId": "com.claudepi.app",
-    "productName": "Claude PI",
+    "appId": "com.jasonai.app",
+    "productName": "Jason AI",
     "electronVersion": "33.4.11",
     "directories": {
       "app": ".",
