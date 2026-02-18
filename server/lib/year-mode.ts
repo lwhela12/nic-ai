@@ -262,6 +262,23 @@ export async function ensureRegistryFresh(
     return true; // entirely new year folder
   });
 
+  // One-time migration: populate fileCount for entries from older registries
+  const missingCounts = Object.values(registry.clients).filter(
+    (e) => e.fileCount == null
+  );
+  if (missingCounts.length > 0) {
+    console.log(`[year-mode] migrating file counts for ${missingCounts.length} clients`);
+    await Promise.all(
+      missingCounts.map(async (entry) => {
+        const counts = await Promise.all(
+          entry.sourceFolders.map((rel) => countDirFiles(join(firmRoot, rel)))
+        );
+        entry.fileCount = counts.reduce((a, b) => a + b, 0);
+      })
+    );
+    await saveClientRegistry(firmRoot, registry);
+  }
+
   if (foldersToScan.length === 0) return registry;
 
   // Read client folders in the target year dirs
