@@ -1097,11 +1097,7 @@ function App() {
 
     // Workers' Comp only – auto-select and save without prompting.
     const area: PracticeArea = 'Workers\' Compensation'
-    const saved = await saveFolderPracticeArea(path, area)
-    if (!saved) {
-      setFolderSetupError('Could not save the area of law in this folder.')
-      return
-    }
+    await saveFolderPracticeArea(path, area) // best-effort persist
     clearCaseView()
     setPracticeArea(area)
     setFirmRoot(path)

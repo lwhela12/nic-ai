@@ -54,7 +54,7 @@ async function pathExists(p: string): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 /**
- * Returns true if the majority of direct children of firmRoot are year folders.
+ * Returns true if at least 2 direct children of firmRoot are year folders.
  */
 export async function detectYearBasedMode(firmRoot: string): Promise<boolean> {
   try {
@@ -62,9 +62,8 @@ export async function detectYearBasedMode(firmRoot: string): Promise<boolean> {
     const dirs = entries.filter(
       (e) => e.isDirectory() && !e.name.startsWith(".")
     );
-    if (dirs.length === 0) return false;
     const yearCount = dirs.filter((e) => isYearFolder(e.name)).length;
-    const result = yearCount > 0 && yearCount / dirs.length >= 0.5;
+    const result = yearCount >= 2;
     console.log(
       `[year-mode] detect: ${dirs.length} dirs, ${yearCount} year folders → ${result ? "YEAR MODE" : "flat mode"}`,
       dirs.map((d) => d.name)

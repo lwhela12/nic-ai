@@ -671,18 +671,29 @@ async function buildCaseSummary(
 
   // Quick file count (lightweight recursive walk)
   try {
-    let count = 0;
-    async function countFiles(dir: string) {
-      let entries: Awaited<ReturnType<typeof readdir>>;
-      try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
-      for (const e of entries) {
-        if (e.name === '.ai_tool' || e.name.startsWith('.')) continue;
-        if (e.isDirectory()) await countFiles(join(dir, e.name));
-        else count++;
+    const slug = getClientSlug(casePath);
+    if (slug) {
+      // Year-based: count files across all real source folders
+      const firmRoot = resolveFirmRoot(casePath);
+      const registry = await loadClientRegistry(firmRoot);
+      if (registry?.clients[slug]) {
+        const files = await listYearBasedCaseFiles(firmRoot, registry, slug);
+        caseSummary.fileCount = files.length;
       }
+    } else {
+      let count = 0;
+      async function countFiles(dir: string) {
+        let entries: Awaited<ReturnType<typeof readdir>>;
+        try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+          if (e.name === '.ai_tool' || e.name.startsWith('.')) continue;
+          if (e.isDirectory()) await countFiles(join(dir, e.name));
+          else count++;
+        }
+      }
+      await countFiles(casePath);
+      caseSummary.fileCount = count;
     }
-    await countFiles(casePath);
-    caseSummary.fileCount = count;
   } catch { /* ignore */ }
 
   return caseSummary;
@@ -3299,7 +3310,23 @@ async function checkNeedsReindex(casePath: string, indexedAt: number): Promise<b
       return false;
     }
   }
-  const needsReindex = await checkDir(casePath);
+  // Year-based: check actual source folders instead of the virtual path
+  const slug = getClientSlug(casePath);
+  let needsReindex = false;
+  if (slug) {
+    const firmRoot = resolveFirmRoot(casePath);
+    const registry = await loadClientRegistry(firmRoot);
+    if (registry?.clients[slug]) {
+      for (const rel of registry.clients[slug].sourceFolders) {
+        if (await checkDir(join(firmRoot, rel))) {
+          needsReindex = true;
+          break;
+        }
+      }
+    }
+  } else {
+    needsReindex = await checkDir(casePath);
+  }
   reindexCheckCache.set(cacheKey, { value: needsReindex, checkedAt: now });
   return needsReindex;
 }
