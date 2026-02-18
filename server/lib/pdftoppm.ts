@@ -13,6 +13,7 @@ import { readFile, unlink } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import { promisify } from "util";
+import { resolvePoppler } from "./pdftotext";
 
 const execFileAsync = promisify(execFile);
 
@@ -22,54 +23,12 @@ export interface PdfPageImage {
   sizeBytes: number;
 }
 
-function getBundledPdftoppmPath(): string | null {
-  const resourcesPath = process.env.RESOURCES_PATH;
-  if (!resourcesPath) return null;
-
-  const candidates =
-    process.platform === "win32"
-      ? [join(resourcesPath, "tools", "pdftotext", "pdftoppm.exe")]
-      : [
-          join(resourcesPath, "tools", "pdftotext", "pdftoppm"),
-          join(resourcesPath, "tools", "pdftotext", "pdftoppm.exe"),
-        ];
-
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
-
-function getBundledPdfinfoPath(): string | null {
-  const resourcesPath = process.env.RESOURCES_PATH;
-  if (!resourcesPath) return null;
-
-  const candidates =
-    process.platform === "win32"
-      ? [join(resourcesPath, "tools", "pdftotext", "pdfinfo.exe")]
-      : [
-          join(resourcesPath, "tools", "pdftotext", "pdfinfo"),
-          join(resourcesPath, "tools", "pdftotext", "pdfinfo.exe"),
-        ];
-
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
-
 function resolvePdftoppmCommand(): string {
-  return getBundledPdftoppmPath() ?? "pdftoppm";
+  return resolvePoppler("pdftoppm");
 }
 
 function resolvePdfinfoCommand(): string {
-  return getBundledPdfinfoPath() ?? "pdfinfo";
+  return resolvePoppler("pdfinfo");
 }
 
 /**

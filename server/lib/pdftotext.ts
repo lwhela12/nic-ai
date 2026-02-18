@@ -1,6 +1,6 @@
 import { execFile } from "child_process";
 import { existsSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
 import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
@@ -10,29 +10,29 @@ export interface PdftotextOptions {
   maxBuffer?: number;
 }
 
-function getBundledPdftotextPath(): string | null {
+/** Resolve a Poppler binary by checking RESOURCES_PATH, then project-root tools/ dir, then PATH. */
+export function resolvePoppler(binaryName: string): string {
+  const ext = process.platform === "win32" ? ".exe" : "";
+  const withExt = binaryName + ext;
+
+  // 1. Production: RESOURCES_PATH (set by Electron)
   const resourcesPath = process.env.RESOURCES_PATH;
-  if (!resourcesPath) return null;
-
-  const candidates =
-    process.platform === "win32"
-      ? [join(resourcesPath, "tools", "pdftotext", "pdftotext.exe")]
-      : [
-          join(resourcesPath, "tools", "pdftotext", "pdftotext"),
-          join(resourcesPath, "tools", "pdftotext", "pdftotext.exe"),
-        ];
-
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
+  if (resourcesPath) {
+    const p = join(resourcesPath, "tools", "pdftotext", withExt);
+    if (existsSync(p)) return p;
   }
 
-  return null;
+  // 2. Dev mode: tools/pdftotext/ relative to project root (server/..)
+  const projectRoot = join(dirname(__dirname), "..");
+  const devPath = join(projectRoot, "tools", "pdftotext", withExt);
+  if (existsSync(devPath)) return devPath;
+
+  // 3. Fallback: system PATH
+  return binaryName;
 }
 
 export function resolvePdftotextCommand(): string {
-  return getBundledPdftotextPath() ?? "pdftotext";
+  return resolvePoppler("pdftotext");
 }
 
 export async function runPdftotext(

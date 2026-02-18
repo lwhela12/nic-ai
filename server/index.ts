@@ -111,6 +111,14 @@ if (isProduction) {
   console.log("Serving frontend from:", frontendDistPath);
 }
 
+// Log Poppler binary resolution at startup
+import { resolvePdftotextCommand } from "./lib/pdftotext";
+import { resolvePoppler } from "./lib/pdftotext";
+const pdftotextCmd = resolvePdftotextCommand();
+const pdftoppmCmd = resolvePoppler("pdftoppm");
+console.log(`[poppler] pdftotext: ${pdftotextCmd}`);
+console.log(`[poppler] pdftoppm: ${pdftoppmCmd}`);
+
 export default {
   port,
   fetch: app.fetch,
