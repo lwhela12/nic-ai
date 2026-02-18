@@ -343,7 +343,8 @@ export default function FirmDashboard({
     return () => window.removeEventListener('popstate', handlePopState)
   }, [])
   const [searchQuery, setSearchQuery] = useState('')
-  const [filterYear, setFilterYear] = useState<string>(() => String(new Date().getFullYear()))
+  const [filterYears, setFilterYears] = useState<Set<number>>(() => new Set([new Date().getFullYear()]))
+  const [yearDropdownOpen, setYearDropdownOpen] = useState(false)
   const [selectedCases, setSelectedCases] = useState<Set<string>>(new Set())
   const [knowledgeExists, setKnowledgeExists] = useState<boolean | null>(null)
   const [showFirmConfig, setShowFirmConfig] = useState(false)
@@ -975,8 +976,8 @@ export default function FirmDashboard({
     })
     .filter(c => filterPhase === 'all' || c.casePhase === filterPhase)
     .filter(c => {
-      if (filterYear === 'all' || !firmData?.yearBasedMode) return true
-      return c.latestYear === parseInt(filterYear, 10)
+      if (!firmData?.yearBasedMode || filterYears.size === 0) return true
+      return c.latestYear != null && filterYears.has(c.latestYear)
     })
     .filter(c => {
       // Assignment filter
@@ -1218,13 +1219,13 @@ export default function FirmDashboard({
           </div>
         </div>
 
-        {/* Summary cards */}
+        {/* Summary cards — reflect filtered view */}
         <div className="grid grid-cols-3 gap-6">
           <div className="bg-white/10 backdrop-blur rounded-xl p-5">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-brand-300 uppercase tracking-wide">Active Cases</p>
-                <p className="text-4xl font-serif text-white mt-1">{firmData?.summary.indexed || 0}</p>
+                <p className="text-sm font-medium text-brand-300 uppercase tracking-wide">Indexed</p>
+                <p className="text-4xl font-serif text-white mt-1">{sortedCases.filter(c => c.indexed && !c.isContainer).length}</p>
               </div>
               <div className="w-12 h-12 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400">
                 <CheckCircleIcon />
@@ -1247,8 +1248,8 @@ export default function FirmDashboard({
           <div className="bg-white/10 backdrop-blur rounded-xl p-5">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-brand-300 uppercase tracking-wide">Not Indexed</p>
-                <p className="text-4xl font-serif text-white mt-1">{(firmData?.summary.total || 0) - (firmData?.summary.indexed || 0)}</p>
+                <p className="text-sm font-medium text-brand-300 uppercase tracking-wide">Active Cases</p>
+                <p className="text-4xl font-serif text-white mt-1">{sortedCases.filter(c => !c.isContainer).length}</p>
               </div>
               <div className="w-12 h-12 rounded-full bg-brand-500/30 flex items-center justify-center text-brand-300">
                 <FolderIcon />
@@ -1379,19 +1380,72 @@ export default function FirmDashboard({
               </select>
             </div>
             {availableYears.length > 1 && (
-              <div className="flex items-center gap-2">
+              <div className="relative flex items-center gap-2">
                 <label className="text-sm font-medium text-brand-600">Year</label>
-                <select
-                  value={filterYear}
-                  onChange={(e) => setFilterYear(e.target.value)}
+                <button
+                  onClick={() => setYearDropdownOpen(!yearDropdownOpen)}
                   className="text-sm border border-surface-200 rounded-lg px-3 py-2 bg-white
-                             focus:outline-none focus:ring-2 focus:ring-accent-500 focus:border-transparent"
+                             focus:outline-none focus:ring-2 focus:ring-accent-500 focus:border-transparent
+                             flex items-center gap-1.5"
                 >
-                  {availableYears.map(year => (
-                    <option key={year} value={String(year)}>{year}</option>
-                  ))}
-                  <option value="all">All Years</option>
-                </select>
+                  {filterYears.size === 0 || filterYears.size === availableYears.length
+                    ? 'All Years'
+                    : [...filterYears].sort((a, b) => b - a).join(', ')}
+                  <svg className="w-3.5 h-3.5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+                  </svg>
+                </button>
+                {yearDropdownOpen && (
+                  <>
+                    <div className="fixed inset-0 z-30" onClick={() => setYearDropdownOpen(false)} />
+                    <div className="absolute top-full left-0 mt-1 z-40 bg-white border border-surface-200 rounded-lg shadow-lg py-1 min-w-[140px]">
+                      {availableYears.map(year => (
+                        <label
+                          key={year}
+                          className="flex items-center gap-2 px-3 py-1.5 hover:bg-surface-50 cursor-pointer text-sm text-brand-700"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={filterYears.has(year)}
+                            onChange={() => {
+                              setFilterYears(prev => {
+                                const next = new Set(prev)
+                                if (next.has(year)) {
+                                  next.delete(year)
+                                } else {
+                                  next.add(year)
+                                }
+                                return next
+                              })
+                            }}
+                            className="rounded border-surface-300 text-accent-600 focus:ring-accent-500"
+                          />
+                          {year}
+                        </label>
+                      ))}
+                      <div className="border-t border-surface-100 mt-1 pt-1">
+                        <button
+                          onClick={() => {
+                            setFilterYears(new Set(availableYears))
+                            setYearDropdownOpen(false)
+                          }}
+                          className="w-full text-left px-3 py-1.5 text-sm text-brand-500 hover:bg-surface-50"
+                        >
+                          Select All
+                        </button>
+                        <button
+                          onClick={() => {
+                            setFilterYears(new Set())
+                            setYearDropdownOpen(false)
+                          }}
+                          className="w-full text-left px-3 py-1.5 text-sm text-brand-500 hover:bg-surface-50"
+                        >
+                          Clear All
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             )}
             {/* Assignment filter - only show when team is configured */}
