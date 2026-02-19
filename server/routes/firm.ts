@@ -2448,7 +2448,7 @@ async function indexCase(
     // Step 2: Process files in a steady stream (max concurrent workers)
     // Accumulators are declared here so workers can build results incrementally,
     // allowing each extraction to be GC'd immediately after processing.
-    const CONCURRENCY_LIMIT = 6;
+    const CONCURRENCY_LIMIT = 10;
     const totalFiles = files.length;
     let completedCount = 0;
     let successCount = 0;

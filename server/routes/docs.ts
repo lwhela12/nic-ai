@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { readdir, readFile, writeFile, mkdir, stat, unlink } from "fs/promises";
 import { join, dirname, basename, resolve, sep } from "path";
-import { resolveFirmRoot } from "../lib/year-mode";
+import { resolveFirmRoot, getClientSlug, loadClientRegistry, scanAndBuildRegistry, resolveYearFilePath } from "../lib/year-mode";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
@@ -93,6 +93,24 @@ function resolveCasePath(caseFolder: string, relativePath: string): string {
     throw new Error(`Path is outside case folder: ${relativePath}`);
   }
   return target;
+}
+
+/**
+ * Build a year-mode-aware path resolver for a case folder.
+ * Returns a function that resolves relative doc paths to absolute paths.
+ * For non-year-based cases, falls back to standard resolution.
+ */
+async function buildDocPathResolver(caseFolder: string): Promise<(relativePath: string) => string> {
+  const slug = getClientSlug(caseFolder);
+  if (slug) {
+    const firmRoot = resolveFirmRoot(caseFolder);
+    let registry = await loadClientRegistry(firmRoot);
+    if (!registry) {
+      registry = await scanAndBuildRegistry(firmRoot);
+    }
+    return (relativePath: string) => resolveYearFilePath(firmRoot, registry!, slug, relativePath);
+  }
+  return (relativePath: string) => resolveCasePath(caseFolder, relativePath);
 }
 
 function normalizeRelativePath(path: string): string {
@@ -848,7 +866,8 @@ app.post("/scan-pii", async (c) => {
   const relativePath = normalizeRelativePath(path);
 
   try {
-    const fullPath = resolveCasePath(caseFolder, relativePath);
+    const resolvePath = await buildDocPathResolver(caseFolder);
+    const fullPath = resolvePath(relativePath);
     const scan = await scanPdfForSensitiveData(fullPath, relativePath);
 
     const pdfBytes = await readFile(fullPath);
@@ -954,8 +973,9 @@ app.post("/redact-pdf-manual", async (c) => {
   }
 
   try {
-    const fullInputPath = resolveCasePath(caseFolder, relativePath);
-    const fullOutputPath = resolveCasePath(caseFolder, resolvedOutputPath);
+    const resolvePath = await buildDocPathResolver(caseFolder);
+    const fullInputPath = resolvePath(relativePath);
+    const fullOutputPath = resolvePath(resolvedOutputPath);
 
     const inputBytes = await readFile(fullInputPath);
     const redactedBytes = await applyManualRedactionBoxes(inputBytes, normalizedBoxes);
@@ -1487,6 +1507,8 @@ app.post("/generate-packet", async (c) => {
       recipients: frontMatter.recipients,
     };
 
+    const resolveDocPath = await buildDocPathResolver(caseFolder);
+
     const result = await buildEvidencePacket({
       caseFolder,
       documents: canonicalDocuments,
@@ -1497,6 +1519,7 @@ app.post("/generate-packet", async (c) => {
       service,
       includeAffirmationPage: true,
       firmBlockLines: frontMatter.firmBlockLines,
+      resolveDocPath,
     });
 
     // Determine output path
@@ -1548,6 +1571,7 @@ app.post("/batch-scan-pii", async (c) => {
     const indexContent = await readFile(indexPath, "utf-8");
     const indexData = JSON.parse(indexContent);
     const maps = buildIndexedPathMaps(indexData);
+    const resolvePath = await buildDocPathResolver(caseFolder);
 
     const results = await Promise.all(
       paths.map(async (relativePath: string) => {
@@ -1557,7 +1581,7 @@ app.post("/batch-scan-pii", async (c) => {
           return { path: normalized, findings: [], approved: true };
         }
         try {
-          const fullPath = resolveCasePath(caseFolder, normalized);
+          const fullPath = resolvePath(normalized);
           const scan = await scanPdfForSensitiveData(fullPath, normalized);
           return {
             path: normalized,

@@ -60,6 +60,8 @@ export interface BuildEvidencePacketOptions {
   pageStampPrefix?: string;
   pageStampStart?: number;
   firmBlockLines?: string[];
+  /** Override default path resolution (for year-based cases). */
+  resolveDocPath?: (relativePath: string) => string;
 }
 
 export interface EvidencePacketTocEntry {
@@ -154,7 +156,9 @@ export async function buildEvidencePacket(
   const processedDocs: ProcessedDocument[] = [];
 
   for (const doc of orderedDocs) {
-    const absolutePath = resolveCasePath(options.caseFolder, doc.path);
+    const absolutePath = options.resolveDocPath
+      ? options.resolveDocPath(doc.path)
+      : resolveCasePath(options.caseFolder, doc.path);
     if (!doc.path.toLowerCase().endsWith(".pdf")) {
       throw new Error(`Only PDF documents are supported in packets: ${doc.path}`);
     }
