@@ -1812,7 +1812,11 @@ async function executeTool(
           docCount += files.length;
         }
 
-        return JSON.stringify({
+        // Load evidence packet rules from knowledge bank
+        const firmRoot = resolveFirmRoot(caseFolder);
+        const packetKnowledge = await loadKnowledgeEvidencePacketConfig(firmRoot);
+
+        const result: Record<string, any> = {
           success: true,
           totalIndexedDocuments: docCount,
           hearingNumber: hearingNumber || null,
@@ -1824,12 +1828,21 @@ async function executeTool(
             "2. Determine the hearing type: Read the hearing notice to check if this is an AO (Appeals Officer) or HO (Hearing Officer) hearing. Also check the hearing number format — a suffix like '-RA' indicates a reconsideration/appeal (AO). Otherwise default to HO.",
             "3. Review the meta-index folders in your context — look at filenames, types, dates, and facts to identify which documents belong in the packet.",
             "4. For folders with relevant documents, use read_file(\".ai_tool/indexes/{FolderName}.json\") to get doc_id values for the specific files you want to include.",
-            "5. Check the EVIDENCE PACKET RULES section in your context for packet ordering rules.",
+            "5. IMPORTANT: Review the EVIDENCE PACKET RULES included below in this response. Follow these rules for document ordering, inclusion/exclusion, and packet structure.",
             "6. Present the proposed ordered document list to the user for review. Show title, folder, and why each was included.",
             "7. After the user confirms (or adjusts), call build_evidence_packet with the verified ordered list using doc_id for each document. Set hearing_type to 'AO' or 'HO' based on step 2.",
             "Do NOT skip straight to build_evidence_packet without showing the user the proposed list first.",
           ].join("\n"),
-        });
+        };
+
+        if (packetKnowledge.rawText) {
+          result.evidencePacketRules = {
+            source: packetKnowledge.source,
+            content: packetKnowledge.rawText,
+          };
+        }
+
+        return JSON.stringify(result);
       }
 
       case "build_evidence_packet": {
