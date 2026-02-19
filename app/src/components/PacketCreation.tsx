@@ -245,6 +245,7 @@ export default function PacketCreation({
           frontMatter,
           documents: documents.map(d => ({ title: d.title, date: d.date })),
           firmRoot: firmRoot || undefined,
+          templateId: frontMatter.templateId || undefined,
         }),
       })
       if (res.ok) {
@@ -358,6 +359,7 @@ export default function PacketCreation({
           frontMatter,
           redactionMode: 'best_effort',
           firmRoot: firmRoot || undefined,
+          templateId: frontMatter.templateId || undefined,
         }),
       })
       if (res.ok) {
@@ -447,6 +449,8 @@ export default function PacketCreation({
             onUpdateFirmBlockLine={updateFirmBlockLine}
             onPreview={handlePreviewFrontMatter}
             isPreviewing={isPreviewing}
+            apiUrl={apiUrl}
+            firmRoot={firmRoot}
           />
         )}
         {activeTab === 'pii' && (
@@ -615,6 +619,20 @@ function DocumentsTab({
   )
 }
 
+// Template type for dropdown display
+interface TemplateOption {
+  id: string
+  name: string
+  heading: string
+  builtIn?: boolean
+  extraSections?: Array<{ title: string; key: string }>
+}
+
+interface AttorneyOption {
+  name: string
+  barNo: string
+}
+
 // --- Front Matter Tab ---
 function FrontMatterTab({
   frontMatter,
@@ -625,6 +643,8 @@ function FrontMatterTab({
   onUpdateFirmBlockLine,
   onPreview,
   isPreviewing,
+  apiUrl,
+  firmRoot,
 }: {
   frontMatter: PacketFrontMatter
   onUpdate: (field: keyof PacketFrontMatter, value: unknown) => void
@@ -634,9 +654,69 @@ function FrontMatterTab({
   onUpdateFirmBlockLine: (index: number, value: string) => void
   onPreview: () => void
   isPreviewing: boolean
+  apiUrl: string
+  firmRoot?: string
 }) {
   const inputClass = "w-full text-sm border border-surface-200 rounded-lg px-3 py-2 bg-white text-brand-700 focus:outline-none focus:ring-2 focus:ring-accent-500"
   const labelClass = "block text-xs font-medium text-brand-700 mb-1"
+
+  // Fetch templates and attorneys
+  const [templates, setTemplates] = useState<TemplateOption[]>([])
+  const [attorneys, setAttorneys] = useState<AttorneyOption[]>([])
+  const templatesLoadedRef = useRef(false)
+
+  useEffect(() => {
+    if (templatesLoadedRef.current || !firmRoot) return
+    templatesLoadedRef.current = true
+    // Load templates
+    fetch(`${apiUrl}/api/docs/packet-templates?root=${encodeURIComponent(firmRoot)}`)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data?.templates) setTemplates(data.templates)
+      })
+      .catch(() => {})
+    // Load attorneys
+    fetch(`${apiUrl}/api/knowledge/firm-config?root=${encodeURIComponent(firmRoot)}`)
+      .then(res => res.ok ? res.json() : null)
+      .then(config => {
+        if (Array.isArray(config?.attorneys)) {
+          setAttorneys(config.attorneys.filter((a: AttorneyOption) => a.name?.trim()))
+        }
+      })
+      .catch(() => {})
+  }, [apiUrl, firmRoot])
+
+  // Find selected template to check for extra sections
+  const selectedTemplate = templates.find(t => t.id === frontMatter.templateId)
+
+  const handleTemplateChange = (templateId: string) => {
+    onUpdate('templateId', templateId)
+    // Clear extra section values when switching templates
+    onUpdate('extraSectionValues', {})
+    onUpdate('issueOnAppeal', '')
+  }
+
+  const handleSignerChange = (signerName: string) => {
+    onUpdate('signerName', signerName)
+    // Update firm block lines 0-1 to match selected attorney
+    const attorney = attorneys.find(a => a.name === signerName)
+    if (attorney) {
+      const lines = [...frontMatter.firmBlockLines]
+      while (lines.length < 7) lines.push('')
+      lines[0] = attorney.name
+      lines[1] = attorney.barNo ? `NV Bar No. ${attorney.barNo}` : lines[1]
+      onUpdate('firmBlockLines', lines)
+    }
+  }
+
+  const handleExtraSectionChange = (key: string, value: string) => {
+    const updated = { ...(frontMatter.extraSectionValues || {}), [key]: value }
+    onUpdate('extraSectionValues', updated)
+    // Also set issueOnAppeal shortcut for backward compat
+    if (key === 'issueOnAppeal') {
+      onUpdate('issueOnAppeal', value)
+    }
+  }
 
   // Ensure 7 firm block lines
   const firmLines = [...frontMatter.firmBlockLines]
@@ -644,6 +724,47 @@ function FrontMatterTab({
 
   return (
     <div className="p-4 space-y-4">
+      {/* Template and Signer dropdowns */}
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <label className={labelClass}>Template</label>
+          <select
+            className={inputClass}
+            value={frontMatter.templateId || ''}
+            onChange={e => handleTemplateChange(e.target.value)}
+          >
+            <option value="">Default (HO)</option>
+            {templates.map(t => (
+              <option key={t.id} value={t.id}>
+                {t.name}{t.builtIn ? '' : ' (Custom)'}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className={labelClass}>Signer</label>
+          {attorneys.length > 0 ? (
+            <select
+              className={inputClass}
+              value={frontMatter.signerName || ''}
+              onChange={e => handleSignerChange(e.target.value)}
+            >
+              <option value="">Select signer...</option>
+              {attorneys.map((a, i) => (
+                <option key={i} value={a.name}>{a.name}</option>
+              ))}
+            </select>
+          ) : (
+            <input
+              className={inputClass}
+              value={frontMatter.signerName || ''}
+              onChange={e => onUpdate('signerName', e.target.value)}
+              placeholder="Attorney name"
+            />
+          )}
+        </div>
+      </div>
+
       <div className="grid grid-cols-2 gap-4">
         <div>
           <label className={labelClass}>Claimant Name *</label>
@@ -662,7 +783,7 @@ function FrontMatterTab({
           />
         </div>
         <div>
-          <label className={labelClass}>Hearing Number</label>
+          <label className={labelClass}>Hearing / Appeal Number</label>
           <input
             className={inputClass}
             value={frontMatter.hearingNumber}
@@ -695,6 +816,23 @@ function FrontMatterTab({
           />
         </div>
       </div>
+
+      {/* Dynamic extra sections from template (e.g. Issue on Appeal) */}
+      {selectedTemplate?.extraSections && selectedTemplate.extraSections.length > 0 && (
+        <div className="space-y-3 p-3 bg-accent-50 rounded-lg border border-accent-200">
+          {selectedTemplate.extraSections.map(section => (
+            <div key={section.key}>
+              <label className={labelClass}>{section.title}</label>
+              <textarea
+                className={`${inputClass} min-h-[60px]`}
+                value={frontMatter.extraSectionValues?.[section.key] || ''}
+                onChange={e => handleExtraSectionChange(section.key, e.target.value)}
+                placeholder={`Enter ${section.title.toLowerCase()}...`}
+              />
+            </div>
+          ))}
+        </div>
+      )}
 
       <div>
         <label className={labelClass}>Introductory Counsel Line</label>

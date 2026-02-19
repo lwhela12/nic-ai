@@ -154,6 +154,8 @@ interface Props {
   } | null
   // Incremented when a case finishes indexing — triggers case list refresh
   firmCasesVersion?: number
+  // When set, the firmCasesVersion effect refreshes only this case instead of all cases
+  lastIndexedCasePath?: string | null
   // Batch indexing state — lifted to App.tsx so it survives navigation
   batchProgress?: BatchProgress | null
   showBatchModal?: boolean
@@ -258,6 +260,7 @@ export default function FirmDashboard({
   teamContext,
   indexingProgress,
   firmCasesVersion,
+  lastIndexedCasePath,
   batchProgress: batchProgressProp,
   showBatchModal: showBatchModalProp,
   onBatchProgressChange,
@@ -270,10 +273,43 @@ export default function FirmDashboard({
   const [firmData, setFirmDataState] = useState<FirmData | null>(
     hasCachedData ? firmDataCache!.data : null
   )
-  const setFirmData = useCallback((data: FirmData) => {
-    setFirmDataState(data)
-    firmDataCache = { root: firmRoot, data, fetchedAt: Date.now() }
+  const setFirmData = useCallback((dataOrUpdater: FirmData | ((prev: FirmData | null) => FirmData | null)) => {
+    if (typeof dataOrUpdater === 'function') {
+      setFirmDataState(prev => {
+        const next = dataOrUpdater(prev)
+        if (next) {
+          firmDataCache = { root: firmRoot, data: next, fetchedAt: Date.now() }
+        }
+        return next
+      })
+    } else {
+      setFirmDataState(dataOrUpdater)
+      firmDataCache = { root: firmRoot, data: dataOrUpdater, fetchedAt: Date.now() }
+    }
   }, [firmRoot])
+
+  const refreshSingleCase = useCallback(async (casePath: string) => {
+    try {
+      const res = await fetch(`${apiUrl}/api/firm/case-summary?root=${encodeURIComponent(firmRoot)}&path=${encodeURIComponent(casePath)}`)
+      if (!res.ok) return
+      const updated: CaseSummary = await res.json()
+      setFirmData(prev => {
+        if (!prev) return prev
+        const idx = prev.cases.findIndex(c => c.path === casePath)
+        if (idx < 0) return prev
+        const cases = [...prev.cases]
+        cases[idx] = { ...cases[idx], ...updated }
+        const indexedCount = cases.filter(c => c.indexed && !c.isContainer).length
+        return {
+          ...prev,
+          cases,
+          summary: { ...prev.summary, indexed: indexedCount },
+        }
+      })
+    } catch {
+      // Silently fail — full loadCases will catch up
+    }
+  }, [apiUrl, firmRoot, setFirmData])
   const [loading, setLoading] = useState(!hasCachedData)
   const [error, setError] = useState<string | null>(null)
   const [tableDensity, setTableDensity] = useState<TableDensity>('comfortable')
@@ -340,11 +376,13 @@ export default function FirmDashboard({
   const [selectedCases, setSelectedCases] = useState<Set<string>>(new Set())
   const [knowledgeExists, setKnowledgeExists] = useState<boolean | null>(null)
   const [showFirmConfig, setShowFirmConfig] = useState(false)
-  const [firmConfig, setFirmConfig] = useState<Record<string, string>>({})
+  const [firmConfig, setFirmConfig] = useState<Record<string, any>>({})
   const [firmConfigSaving, setFirmConfigSaving] = useState(false)
   const [logoPreview, setLogoPreview] = useState<string | null>(null)
   const [uploadingLogo, setUploadingLogo] = useState(false)
   const [logoDragOver, setLogoDragOver] = useState(false)
+  const [packetTemplates, setPacketTemplates] = useState<Array<{ id: string; name: string; heading: string; builtIn?: boolean }>>([])
+  const [uploadingTemplate, setUploadingTemplate] = useState(false)
 
   // Team management state
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
@@ -499,7 +537,12 @@ export default function FirmDashboard({
   useEffect(() => {
     if (firmCasesVersion === firmCasesVersionRef.current) return
     firmCasesVersionRef.current = firmCasesVersion
-    loadCases()
+    // If a specific case was just indexed and we already have data, refresh only that case
+    if (lastIndexedCasePath && firmData) {
+      refreshSingleCase(lastIndexedCasePath)
+    } else {
+      loadCases()
+    }
   }, [firmCasesVersion]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -554,6 +597,16 @@ export default function FirmDashboard({
     }
   }, [apiUrl, firmRoot])
 
+  const loadPacketTemplates = useCallback(async () => {
+    try {
+      const res = await fetch(`${apiUrl}/api/docs/packet-templates?root=${encodeURIComponent(firmRoot)}`)
+      if (res.ok) {
+        const data = await res.json()
+        setPacketTemplates(data.templates || [])
+      }
+    } catch {}
+  }, [apiUrl, firmRoot])
+
   const openFirmSettings = useCallback((tab: 'firm' | 'team' = 'firm') => {
     setView('knowledge')
     setKnowledgeSubTab('editor')
@@ -561,9 +614,10 @@ export default function FirmDashboard({
     loadFirmConfig()
     loadFirmLogo()
     loadTeamMembers()
+    loadPacketTemplates()
     setShowFirmConfig(true)
     setUrlParam('openSettings', null, false)
-  }, [loadFirmConfig, loadFirmLogo, loadTeamMembers])
+  }, [loadFirmConfig, loadFirmLogo, loadTeamMembers, loadPacketTemplates])
 
   useEffect(() => {
     const shouldOpenSettings = getUrlParam('openSettings') === '1'
@@ -731,6 +785,10 @@ export default function FirmDashboard({
               } : prev)
             }
 
+            if (data.type === 'case_done' && data.casePath) {
+              refreshSingleCase(data.casePath)
+            }
+
             if (data.type === 'done') {
               setBatchProgress(prev => prev ? {
                 ...prev,
@@ -797,7 +855,6 @@ export default function FirmDashboard({
         }
       }
 
-      await loadCases()
     } catch (err) {
       setBatchProgress(prev => prev ? {
         ...prev,
@@ -1686,7 +1743,7 @@ export default function FirmDashboard({
       {/* Firm Settings modal with tabs */}
       {showFirmConfig && (
         <div className="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl shadow-elevated w-full max-w-lg overflow-hidden">
+          <div className="bg-white rounded-2xl shadow-elevated w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden">
             {/* Tabs header */}
             <div className="flex border-b border-surface-200">
               <button
@@ -1713,7 +1770,7 @@ export default function FirmDashboard({
 
             {/* Tab content */}
             {settingsTab === 'firm' ? (
-              <div className="p-6">
+              <div className="p-6 overflow-y-auto flex-1">
                 <div className="space-y-3">
                   {[
                     { key: 'firmName', label: 'Firm Name' },
@@ -1777,6 +1834,129 @@ export default function FirmDashboard({
                         )}
                       </div>
                     )}
+                  </div>
+
+                  {/* Attorneys / Signers section */}
+                  <div className="pt-3 border-t border-surface-200 mt-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-xs font-medium text-brand-600">Attorneys / Signers</label>
+                      <button
+                        onClick={() => {
+                          const attorneys = Array.isArray(firmConfig.attorneys) ? [...firmConfig.attorneys] : []
+                          attorneys.push({ name: '', barNo: '' })
+                          setFirmConfig(prev => ({ ...prev, attorneys }))
+                        }}
+                        className="text-xs text-accent-600 hover:text-accent-800 font-medium"
+                      >
+                        + Add
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {(Array.isArray(firmConfig.attorneys) ? firmConfig.attorneys : []).map((attorney: { name: string; barNo: string }, i: number) => (
+                        <div key={i} className="flex gap-2 items-center">
+                          <input
+                            value={attorney.name || ''}
+                            onChange={(e) => {
+                              const attorneys = [...(firmConfig.attorneys || [])]
+                              attorneys[i] = { ...attorneys[i], name: e.target.value }
+                              setFirmConfig(prev => ({ ...prev, attorneys }))
+                            }}
+                            placeholder="Attorney Name, Esq."
+                            className="flex-1 border border-surface-200 rounded-lg px-3 py-1.5 text-sm
+                                       focus:outline-none focus:ring-2 focus:ring-accent-500"
+                          />
+                          <input
+                            value={attorney.barNo || ''}
+                            onChange={(e) => {
+                              const attorneys = [...(firmConfig.attorneys || [])]
+                              attorneys[i] = { ...attorneys[i], barNo: e.target.value }
+                              setFirmConfig(prev => ({ ...prev, attorneys }))
+                            }}
+                            placeholder="Bar No."
+                            className="w-28 border border-surface-200 rounded-lg px-3 py-1.5 text-sm
+                                       focus:outline-none focus:ring-2 focus:ring-accent-500"
+                          />
+                          <button
+                            onClick={() => {
+                              const attorneys = (firmConfig.attorneys || []).filter((_: unknown, idx: number) => idx !== i)
+                              setFirmConfig(prev => ({ ...prev, attorneys }))
+                            }}
+                            className="p-1 text-brand-400 hover:text-red-500 transition-colors"
+                          >
+                            <XMarkIcon />
+                          </button>
+                          {i === 0 && (
+                            <span className="text-[10px] text-brand-400 whitespace-nowrap">Primary</span>
+                          )}
+                        </div>
+                      ))}
+                      {(!Array.isArray(firmConfig.attorneys) || firmConfig.attorneys.length === 0) && (
+                        <p className="text-xs text-brand-400 italic">No attorneys added</p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Packet Templates section */}
+                  <div className="pt-3 border-t border-surface-200 mt-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-xs font-medium text-brand-600">Packet Templates</label>
+                      <label className={`text-xs text-accent-600 hover:text-accent-800 font-medium cursor-pointer ${uploadingTemplate ? 'opacity-50 pointer-events-none' : ''}`}>
+                        {uploadingTemplate ? 'Analyzing...' : '+ Upload Template'}
+                        <input
+                          type="file"
+                          accept=".pdf"
+                          className="hidden"
+                          disabled={uploadingTemplate}
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0]
+                            if (!file) return
+                            setUploadingTemplate(true)
+                            try {
+                              const formData = new FormData()
+                              formData.append('firmRoot', firmRoot)
+                              formData.append('file', file)
+                              const res = await fetch(`${apiUrl}/api/docs/analyze-template`, {
+                                method: 'POST',
+                                body: formData,
+                              })
+                              if (res.ok) {
+                                await loadPacketTemplates()
+                              }
+                            } catch {}
+                            setUploadingTemplate(false)
+                            e.target.value = ''
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <div className="space-y-1">
+                      {packetTemplates.map(t => (
+                        <div key={t.id} className="flex items-center justify-between px-3 py-2 rounded-lg border border-surface-200 bg-white">
+                          <div>
+                            <p className="text-sm text-brand-800">{t.name}</p>
+                            <p className="text-[11px] text-brand-400">{t.heading}{t.builtIn ? ' (Built-in)' : ''}</p>
+                          </div>
+                          {!t.builtIn && (
+                            <button
+                              onClick={async () => {
+                                try {
+                                  await fetch(`${apiUrl}/api/docs/packet-templates/${t.id}?root=${encodeURIComponent(firmRoot)}`, {
+                                    method: 'DELETE',
+                                  })
+                                  await loadPacketTemplates()
+                                } catch {}
+                              }}
+                              className="text-xs text-red-400 hover:text-red-600 transition-colors"
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                      {packetTemplates.length === 0 && (
+                        <p className="text-xs text-brand-400 italic">Loading templates...</p>
+                      )}
+                    </div>
                   </div>
                 </div>
                 <div className="flex justify-end gap-2 mt-5">

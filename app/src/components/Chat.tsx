@@ -11,6 +11,8 @@ interface EvidencePacketPlanData {
   frontMatter: Partial<{
     claimantName: string
     claimNumber: string
+    issueOnAppeal: string
+    extraSectionValues: Record<string, string>
   }>
 }
 
@@ -696,6 +698,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                 const proposed = data.plan.proposedDocuments || []
                 const caption = data.plan.caption || {}
                 const service = data.plan.service || {}
+                const issueOnAppeal = data.plan.issueOnAppeal || ''
                 onEvidencePacketPlanned({
                   documents: proposed
                     .map((d: { docId?: string; doc_id?: string; path?: string; title?: string }) => ({
@@ -712,6 +715,8 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                     serviceDate: service.serviceDate,
                     serviceMethod: service.serviceMethod,
                     recipients: service.recipients,
+                    issueOnAppeal,
+                    ...(issueOnAppeal ? { extraSectionValues: { issueOnAppeal } } : {}),
                   },
                 })
               }

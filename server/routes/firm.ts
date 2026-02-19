@@ -26,12 +26,13 @@ import { homedir } from "os";
 import { getFirmSession, saveFirmSession } from "../sessions";
 import { PHASE_RULES, getPhaseRules } from "../shared/phase-rules";
 import { loadPracticeGuide, loadSectionsByIds, clearKnowledgeCache } from "./knowledge";
-import { extractTextFromFile } from "../lib/extract";
+import { extractTextFromFile, isImageFile } from "../lib/extract";
 import { generateCaseSummary } from "../lib/case-summary";
 import { mergeToIndex, diffIndexes, type HypergraphResult, type IndexDiff } from "../lib/merge-index";
-import { 
+import {
   extractWithGptOss,
   extractWithVision,
+  extractImageFileWithVision,
   generateHypergraphWithGptOss,
   generateHypergraphConflictReviewWithGptOss,
 } from "../lib/groq-extract";
@@ -945,6 +946,55 @@ app.get("/cases", async (c) => {
   }
 });
 
+// Single-case summary — lightweight alternative to /cases for incremental refresh
+app.get("/case-summary", async (c) => {
+  const root = c.req.query("root");
+  const casePath = c.req.query("path");
+
+  if (!root || !casePath) {
+    return c.json({ error: "root and path query params required" }, 400);
+  }
+
+  const access = await requireFirmAccess(c, root);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  const practiceArea = (await resolveFirmPracticeArea(root)) || PRACTICE_AREAS.PI;
+
+  try {
+    const yearMode = await detectYearBasedMode(root);
+    let summary: CaseSummary;
+
+    if (yearMode) {
+      const slug = getClientSlug(casePath);
+      const registry = await loadClientRegistry(root);
+      if (!registry || !registry.clients[slug]) {
+        return c.json({ error: "Client not found in registry" }, 404);
+      }
+      summary = await buildCaseSummary(casePath, registry.clients[slug].name, {
+        practiceArea,
+        yearRegistry: { firmRoot: root, registry, slug },
+      });
+      const years = registry.clients[slug].sourceFolders
+        .map((sf: string) => yearFromFolder(sf.split("/")[0]))
+        .filter((y: number | null): y is number => y !== null);
+      summary.latestYear = years.length > 0 ? Math.max(...years) : undefined;
+    } else {
+      const caseName = casePath.split("/").pop() || casePath;
+      summary = await buildCaseSummary(casePath, caseName, { practiceArea });
+    }
+
+    // We just indexed — override stale reindex flag
+    summary.needsReindex = false;
+
+    return c.json(summary);
+  } catch (error) {
+    console.error("Case summary error:", error);
+    return c.json({ error: "Could not build case summary" }, 500);
+  }
+});
+
 // Scan for new clients in year-based folder structures
 app.post("/scan-clients", async (c) => {
   const { root } = await c.req.json();
@@ -1655,6 +1705,7 @@ interface ClassifiedFile {
   fullPath: string;
   useText: boolean;       // true = text extraction (GPT-OSS), false = vision (Scout/Maverick)
   isPdf: boolean;
+  isImage: boolean;       // true for standalone image files (jpg, png, tiff, etc.)
   extractedText: string;  // pre-extracted text (only meaningful when useText=true)
   fileSizeMB: number;
 }
@@ -1666,6 +1717,7 @@ async function classifyFile(
 ): Promise<ClassifiedFile> {
   const filename = filePath.split('/').pop() || filePath;
   const isPdf = filename.toLowerCase().endsWith(".pdf");
+  const isImage = isImageFile(filename);
   const rawFolder = dirname(filePath).replace(/\\/g, '/');
   const folder = rawFolder === '.' ? '.' : rawFolder;
 
@@ -1691,6 +1743,7 @@ async function classifyFile(
       fullPath,
       useText: false,
       isPdf,
+      isImage,
       extractedText: '',
       fileSizeMB: 0
     };
@@ -1714,7 +1767,7 @@ async function classifyFile(
     extractedText = extractedText.slice(0, MAX_CHARS) + '\n\n[... truncated ...]';
   }
 
-  return { filePath, filename, folder, fullPath, useText, isPdf, extractedText, fileSizeMB };
+  return { filePath, filename, folder, fullPath, useText, isPdf, isImage, extractedText, fileSizeMB };
 }
 
 // ============================================================================
@@ -1809,7 +1862,7 @@ async function extractFileVision(
   practiceArea?: string,
   onProgress?: (event: { type: string; [key: string]: any }) => void,
 ): Promise<FileExtraction> {
-  const { filename, folder, fullPath, isPdf } = classified;
+  const { filename, folder, fullPath, isPdf, isImage } = classified;
   const startTime = Date.now();
 
   onProgress?.({ type: "file_start", fileIndex, totalFiles, filename, folder });
@@ -1828,10 +1881,10 @@ async function extractFileVision(
     filename,
     folder,
     type: 'other',
-    key_info: 'Skipped: vision supports PDF files only',
+    key_info: 'Skipped: vision supports PDF and image files only',
     has_handwritten_data: false,
     handwritten_fields: [],
-    error: 'SKIPPED_NON_PDF',
+    error: 'SKIPPED_NON_VISUAL',
   };
 
   // Pre-flight: check file exists
@@ -1854,8 +1907,8 @@ async function extractFileVision(
 
   console.log(`[${fileIndex + 1}/${totalFiles}] [groq-vision] ${filename}`);
 
-  if (!isPdf) {
-    console.log(`[Vision] Skipping ${filename}: not a PDF`);
+  if (!isPdf && !isImage) {
+    console.log(`[Vision] Skipping ${filename}: not a PDF or image`);
     result.usage = usage;
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`[${fileIndex + 1}/${totalFiles}] ✓ Done: ${filename} (${elapsed}s) - ${result.type} [groq-vision]`);
@@ -1874,13 +1927,20 @@ async function extractFileVision(
   }
 
   try {
-    const groqResult = await extractWithVision(
-      fullPath,
-      filename,
-      folder,
-      classified.fileSizeMB,
-      getFileExtractionSystemPrompt(practiceArea)
-    );
+    const groqResult = isImage
+      ? await extractImageFileWithVision(
+          fullPath,
+          filename,
+          folder,
+          getFileExtractionSystemPrompt(practiceArea)
+        )
+      : await extractWithVision(
+          fullPath,
+          filename,
+          folder,
+          classified.fileSizeMB,
+          getFileExtractionSystemPrompt(practiceArea)
+        );
 
     const handwrittenFields = normalizeHandwrittenFields(groqResult.result.handwritten_fields);
     const hasHandwrittenData = handwrittenFields.length > 0;
@@ -2441,7 +2501,7 @@ async function indexCase(
     }
 
     if (files.length === 0) {
-      onProgress({ type: "case_done", caseName, success: false, error: "No files found" });
+      onProgress({ type: "case_done", caseName, casePath: caseFolder, success: false, error: "No files found" });
       return { success: false, error: "No files found in case folder" };
     }
 
@@ -2909,7 +2969,7 @@ async function indexCase(
       }
     }
 
-    onProgress({ type: "case_done", caseName, success: true, diff: indexDiff });
+    onProgress({ type: "case_done", caseName, casePath: caseFolder, success: true, diff: indexDiff });
     return { success: true, diff: indexDiff };
 
   } catch (err) {

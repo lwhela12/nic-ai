@@ -4,6 +4,19 @@ import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
 import { extractPdfText } from "./pdftotext";
 
+export const IMAGE_EXTENSIONS = new Set([
+  "jpg",
+  "jpeg",
+  "png",
+  "tif",
+  "tiff",
+  "bmp",
+  "gif",
+  "webp",
+  "heic",
+  "heif",
+]);
+
 const BINARY_FILE_EXTENSIONS = new Set([
   "avi",
   "mp4",
@@ -21,14 +34,7 @@ const BINARY_FILE_EXTENSIONS = new Set([
   "aac",
   "flac",
   "ogg",
-  "jpg",
-  "jpeg",
-  "png",
-  "tif",
-  "tiff",
-  "bmp",
-  "gif",
-  "webp",
+  ...IMAGE_EXTENSIONS,
   "zip",
   "rar",
   "7z",
@@ -41,6 +47,37 @@ const BINARY_FILE_EXTENSIONS = new Set([
 
 function isBinaryFileByExtension(ext: string | undefined): boolean {
   return !!ext && BINARY_FILE_EXTENSIONS.has(ext.toLowerCase());
+}
+
+export function isImageFile(filename: string): boolean {
+  const ext = filename.toLowerCase().split(".").pop();
+  return !!ext && IMAGE_EXTENSIONS.has(ext);
+}
+
+export function getImageMimeType(filename: string): string {
+  const ext = filename.toLowerCase().split(".").pop();
+  switch (ext) {
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "png":
+      return "image/png";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "tif":
+    case "tiff":
+      return "image/tiff";
+    case "bmp":
+      return "image/bmp";
+    case "heic":
+      return "image/heic";
+    case "heif":
+      return "image/heif";
+    default:
+      return "image/jpeg";
+  }
 }
 
 /**

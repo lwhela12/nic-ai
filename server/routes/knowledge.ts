@@ -568,6 +568,10 @@ app.get("/firm-config", async (c) => {
   try {
     const configPath = join(root, ".ai_tool", "firm-config.json");
     const config = JSON.parse(await readFile(configPath, "utf-8"));
+    // Synthesize attorneys[] from legacy attorneyName/nevadaBarNo if missing
+    if (!Array.isArray(config.attorneys) && config.attorneyName) {
+      config.attorneys = [{ name: config.attorneyName, barNo: config.nevadaBarNo || "" }];
+    }
     return c.json(config);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -581,6 +585,7 @@ app.get("/firm-config", async (c) => {
         practiceArea: "",
         jurisdiction: "",
         feeStructure: "",
+        attorneys: [],
       });
     }
     return c.json({ error: "Failed to load firm config" }, 500);
@@ -590,6 +595,13 @@ app.get("/firm-config", async (c) => {
 app.put("/firm-config", async (c) => {
   const { root, ...config } = await c.req.json();
   if (!root) return c.json({ error: "root required" }, 400);
+
+  // Sync attorneys[0] back to legacy attorneyName/nevadaBarNo for backward compat
+  if (Array.isArray(config.attorneys) && config.attorneys.length > 0) {
+    const primary = config.attorneys[0];
+    if (primary?.name) config.attorneyName = primary.name;
+    if (primary?.barNo !== undefined) config.nevadaBarNo = primary.barNo;
+  }
 
   try {
     const piToolDir = join(root, ".ai_tool");

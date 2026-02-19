@@ -20,10 +20,14 @@ import {
   applyManualRedactionBoxes,
   buildEvidencePacket,
   buildFrontMatterPreview,
+  BUILT_IN_TEMPLATES,
+  type PacketTemplate,
   type EvidencePacketManualRedactionBox,
   type EvidencePacketCaption,
   type EvidencePacketServiceInfo,
 } from "../lib/evidence-packet";
+import { getGroqClient } from "../lib/groq-client";
+import { pdfToImages, getPdfPageCount as getPdfPageCountPoppler } from "../lib/pdftoppm";
 
 const execAsync = promisify(exec);
 
@@ -1353,7 +1357,7 @@ app.delete("/packet-draft/:id", async (c) => {
 
 // Preview front matter PDF
 app.post("/preview-front-matter", async (c) => {
-  const { caseFolder, frontMatter, documents, documentCount, firmRoot } = await c.req.json();
+  const { caseFolder, frontMatter, documents, documentCount, firmRoot, templateId } = await c.req.json();
 
   if (!caseFolder || !frontMatter) {
     return c.json({ error: "caseFolder and frontMatter required" }, 400);
@@ -1417,12 +1421,22 @@ app.post("/preview-front-matter", async (c) => {
       recipients: frontMatter.recipients,
     };
 
+    // Load template if specified
+    const configRoot = firmRoot || resolveFirmRoot(caseFolder);
+    let template: PacketTemplate | undefined;
+    if (templateId) {
+      template = (await findTemplateById(configRoot, templateId)) ?? undefined;
+    }
+
     const pdfBytes = await buildFrontMatterPreview({
       caption,
       firmBlockLines,
       service,
       tocEntries: placeholderEntries,
       includeAffirmationPage: true,
+      template,
+      signerName: frontMatter.signerName,
+      extraSectionValues: frontMatter.extraSectionValues,
     });
 
     // Write to .ai_tool so the preview can be served via GET /api/files/view
@@ -1442,7 +1456,7 @@ app.post("/preview-front-matter", async (c) => {
 
 // Generate final evidence packet
 app.post("/generate-packet", async (c) => {
-  const { caseFolder, documents, frontMatter, redactionMode, firmRoot } = await c.req.json();
+  const { caseFolder, documents, frontMatter, redactionMode, firmRoot, templateId } = await c.req.json();
 
   if (!caseFolder || !documents || !frontMatter) {
     return c.json({ error: "caseFolder, documents, and frontMatter required" }, 400);
@@ -1509,6 +1523,13 @@ app.post("/generate-packet", async (c) => {
 
     const resolveDocPath = await buildDocPathResolver(caseFolder);
 
+    // Load template if specified
+    const configRoot = firmRoot || resolveFirmRoot(caseFolder);
+    let template: PacketTemplate | undefined;
+    if (templateId || frontMatter.templateId) {
+      template = (await findTemplateById(configRoot, templateId || frontMatter.templateId)) ?? undefined;
+    }
+
     const result = await buildEvidencePacket({
       caseFolder,
       documents: canonicalDocuments,
@@ -1520,6 +1541,9 @@ app.post("/generate-packet", async (c) => {
       includeAffirmationPage: true,
       firmBlockLines: frontMatter.firmBlockLines,
       resolveDocPath,
+      template,
+      signerName: frontMatter.signerName,
+      extraSectionValues: frontMatter.extraSectionValues,
     });
 
     // Determine output path
@@ -1602,6 +1626,212 @@ app.post("/batch-scan-pii", async (c) => {
   } catch (err) {
     console.error("batch-scan-pii error:", err);
     return c.json({ error: `Batch scan failed: ${err}` }, 500);
+  }
+});
+
+// ============================================================================
+// PACKET TEMPLATE ENDPOINTS
+// ============================================================================
+
+const TEMPLATES_DIR = "packet-templates";
+
+async function loadCustomTemplates(firmRoot: string): Promise<PacketTemplate[]> {
+  const dir = join(firmRoot, ".ai_tool", TEMPLATES_DIR);
+  const templates: PacketTemplate[] = [];
+  try {
+    const entries = await readdir(dir);
+    for (const entry of entries) {
+      if (!entry.endsWith(".json")) continue;
+      try {
+        const content = await readFile(join(dir, entry), "utf-8");
+        templates.push(JSON.parse(content));
+      } catch { /* skip invalid files */ }
+    }
+  } catch { /* directory doesn't exist */ }
+  return templates;
+}
+
+async function findTemplateById(firmRoot: string, id: string): Promise<PacketTemplate | null> {
+  const builtIn = BUILT_IN_TEMPLATES.find(t => t.id === id);
+  if (builtIn) return builtIn;
+  try {
+    const filePath = join(firmRoot, ".ai_tool", TEMPLATES_DIR, `${id}.json`);
+    const content = await readFile(filePath, "utf-8");
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+// List all templates (built-in + custom)
+app.get("/packet-templates", async (c) => {
+  const firmRoot = c.req.query("root");
+  if (!firmRoot) return c.json({ error: "root query param required" }, 400);
+
+  const custom = await loadCustomTemplates(firmRoot);
+  const all = [...BUILT_IN_TEMPLATES, ...custom];
+  return c.json({ templates: all });
+});
+
+// Analyze uploaded PDF to extract template structure
+app.post("/analyze-template", async (c) => {
+  const formData = await c.req.formData();
+  const firmRoot = formData.get("firmRoot") as string;
+  const file = formData.get("file") as File;
+
+  if (!firmRoot || !file) {
+    return c.json({ error: "firmRoot and file are required" }, 400);
+  }
+
+  try {
+    // Save uploaded PDF to temp location
+    const tmpPath = join(firmRoot, ".ai_tool", `tmp-template-${Date.now()}.pdf`);
+    await mkdir(dirname(tmpPath), { recursive: true });
+    const arrayBuffer = await file.arrayBuffer();
+    await writeFile(tmpPath, Buffer.from(arrayBuffer));
+
+    // Convert to images
+    const pageCount = await getPdfPageCountPoppler(tmpPath);
+    const pagesToConvert = Math.min(pageCount, 3); // Only need first few pages
+    const images = await pdfToImages(tmpPath, 1, pagesToConvert, 200);
+
+    // Clean up temp file
+    await unlink(tmpPath).catch(() => {});
+
+    if (images.length === 0) {
+      return c.json({ error: "Could not convert PDF to images" }, 500);
+    }
+
+    // Send to Groq vision for structured extraction
+    const groq = getGroqClient();
+    const imageContent = images.map(img => ({
+      type: "image_url" as const,
+      image_url: { url: `data:image/jpeg;base64,${img.base64}` },
+    }));
+
+    const response = await groq.chat.completions.create({
+      model: "meta-llama/llama-4-scout-17b-16e-instruct",
+      messages: [
+        {
+          role: "user",
+          content: [
+            ...imageContent,
+            {
+              type: "text",
+              text: `Analyze this legal front matter document and extract its structure into JSON. This is a workers' compensation evidence packet front matter page.
+
+Extract:
+- "heading": The main heading (e.g. "BEFORE THE HEARING OFFICER" or "BEFORE THE APPEALS OFFICER")
+- "captionPreambleLines": Array of lines above the claimant name on the left side (e.g. ["In the Matter of the Contested", "Industrial Insurance Claim of"])
+- "captionFields": Array of {label, key} for right-side fields. Use camelCase keys: claimNumber, hearingNumber, hearingDateTime, appearance. The label should include the colon (e.g. "Claim No.:")
+- "extraSections": Array of {title, key} for any sections between the caption and document index (e.g. "ISSUE ON APPEAL" with key "issueOnAppeal"). Empty array if none.
+- "indexTitle": The document index heading (usually "DOCUMENT INDEX")
+- "counselPreamble": The introductory paragraph using {{claimantName}} as placeholder for the claimant name
+- "affirmationTitle": Title of the affirmation section (usually "AFFIRMATION")
+- "affirmationText": The affirmation paragraph text
+- "certTitle": Title of certificate of service section
+- "certIntro": The certificate of service introductory text
+
+Respond with ONLY valid JSON, no markdown fences.`,
+            },
+          ],
+        },
+      ],
+      temperature: 0.1,
+      max_tokens: 2000,
+    });
+
+    const rawText = response.choices?.[0]?.message?.content || "";
+    // Strip markdown fences if present
+    const jsonText = rawText.replace(/^```(?:json)?\s*/m, "").replace(/\s*```$/m, "").trim();
+
+    let extracted: Record<string, unknown>;
+    try {
+      extracted = JSON.parse(jsonText);
+    } catch {
+      return c.json({ error: "Failed to parse LLM response as JSON", rawResponse: rawText }, 500);
+    }
+
+    // Build template
+    const id = `custom-${Date.now()}`;
+    const template: PacketTemplate = {
+      id,
+      name: file.name.replace(/\.pdf$/i, ""),
+      heading: String(extracted.heading || "BEFORE THE HEARING OFFICER"),
+      captionPreambleLines: Array.isArray(extracted.captionPreambleLines)
+        ? extracted.captionPreambleLines.map(String)
+        : ["In the Matter of the Contested", "Industrial Insurance Claim of"],
+      captionFields: Array.isArray(extracted.captionFields)
+        ? extracted.captionFields.map((f: any) => ({ label: String(f?.label || ""), key: String(f?.key || "") }))
+        : [],
+      extraSections: Array.isArray(extracted.extraSections)
+        ? extracted.extraSections.map((s: any) => ({ title: String(s?.title || ""), key: String(s?.key || "") }))
+        : [],
+      indexTitle: String(extracted.indexTitle || "DOCUMENT INDEX"),
+      counselPreamble: String(extracted.counselPreamble || ""),
+      affirmationTitle: String(extracted.affirmationTitle || "AFFIRMATION"),
+      affirmationText: String(extracted.affirmationText || ""),
+      certTitle: String(extracted.certTitle || "CERTIFICATE OF SERVICE"),
+      certIntro: String(extracted.certIntro || ""),
+      sourceFile: file.name,
+    };
+
+    // Save to disk
+    const templatesDir = join(firmRoot, ".ai_tool", TEMPLATES_DIR);
+    await mkdir(templatesDir, { recursive: true });
+    await writeFile(join(templatesDir, `${id}.json`), JSON.stringify(template, null, 2));
+
+    return c.json({ template });
+  } catch (err) {
+    console.error("analyze-template error:", err);
+    return c.json({ error: `Template analysis failed: ${err}` }, 500);
+  }
+});
+
+// Update a custom template
+app.put("/packet-templates/:id", async (c) => {
+  const { root, ...updates } = await c.req.json();
+  const templateId = c.req.param("id");
+
+  if (!root || !templateId) {
+    return c.json({ error: "root and template id required" }, 400);
+  }
+
+  // Can't edit built-in templates
+  if (BUILT_IN_TEMPLATES.some(t => t.id === templateId)) {
+    return c.json({ error: "Cannot edit built-in templates" }, 400);
+  }
+
+  try {
+    const filePath = join(root, ".ai_tool", TEMPLATES_DIR, `${templateId}.json`);
+    const existing = JSON.parse(await readFile(filePath, "utf-8"));
+    const merged = { ...existing, ...updates, id: templateId };
+    await writeFile(filePath, JSON.stringify(merged, null, 2));
+    return c.json({ template: merged });
+  } catch {
+    return c.json({ error: "Template not found" }, 404);
+  }
+});
+
+// Delete a custom template
+app.delete("/packet-templates/:id", async (c) => {
+  const root = c.req.query("root");
+  const templateId = c.req.param("id");
+
+  if (!root || !templateId) {
+    return c.json({ error: "root and template id required" }, 400);
+  }
+
+  if (BUILT_IN_TEMPLATES.some(t => t.id === templateId)) {
+    return c.json({ error: "Cannot delete built-in templates" }, 400);
+  }
+
+  try {
+    const filePath = join(root, ".ai_tool", TEMPLATES_DIR, `${templateId}.json`);
+    await unlink(filePath);
+    return c.json({ success: true });
+  } catch {
+    return c.json({ error: "Template not found" }, 404);
   }
 });
 

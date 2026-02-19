@@ -610,9 +610,11 @@ function App() {
     const summary = documentIndex?.summary
     const fm: PacketFrontMatter = {
       claimantName: summary?.client || '',
-      claimNumber: (summary?.claim_numbers && typeof summary.claim_numbers === 'object'
-        ? Object.values(summary.claim_numbers).find(v => typeof v === 'string') as string || ''
-        : '') || '',
+      claimNumber:
+        (typeof summary?.wc_carrier?.claim_number === 'string' && summary.wc_carrier.claim_number) ||
+        (summary?.claim_numbers && typeof summary.claim_numbers === 'object'
+          ? Object.values(summary.claim_numbers).find(v => typeof v === 'string') as string || ''
+          : '') || '',
       hearingNumber: '',
       hearingDateTime: '',
       appearance: 'Telephonic',
@@ -621,8 +623,12 @@ function App() {
       serviceMethod: 'Via E-File',
       recipients: [],
       firmBlockLines: [],
+      templateId: 'ho-standard',
+      signerName: '',
+      issueOnAppeal: '',
+      extraSectionValues: {},
     }
-    // Try to load firm config for firm block lines
+    // Try to load firm config for firm block lines + default signer
     if (firmRoot) {
       try {
         const res = await fetch(`${API_URL}/api/knowledge/firm-config?root=${encodeURIComponent(firmRoot)}`)
@@ -647,6 +653,12 @@ function App() {
           }
           if (Array.isArray(config?.serviceRecipients)) {
             fm.recipients = config.serviceRecipients
+          }
+          // Default signer from primary attorney
+          if (Array.isArray(config?.attorneys) && config.attorneys.length > 0) {
+            fm.signerName = config.attorneys[0].name || ''
+          } else if (config?.attorneyName) {
+            fm.signerName = config.attorneyName
           }
         }
       } catch { /* ignore */ }
@@ -721,7 +733,7 @@ function App() {
   ) => {
     const defaultFm = await createDefaultFrontMatter()
     const cleaned = Object.fromEntries(
-      Object.entries(frontMatter).filter(([, v]) => v !== undefined)
+      Object.entries(frontMatter).filter(([, v]) => v !== undefined && v !== '')
     )
     const resolvedDocs = proposedDocs.flatMap((doc) => {
       const canonicalPath =
@@ -895,6 +907,7 @@ function App() {
   const [showIndexingModal, setShowIndexingModal] = useState(false)
   const indexingAbortRef = useRef<AbortController | null>(null)
   const [firmCasesVersion, setFirmCasesVersion] = useState(0)
+  const [lastIndexedCasePath, setLastIndexedCasePath] = useState<string | null>(null)
 
   // Batch indexing state — lifted from FirmDashboard so it survives navigation
   const [batchProgress, setBatchProgress] = useState<{
@@ -1216,7 +1229,8 @@ function App() {
               } : prev)
               // Auto-reopen modal so user sees completion
               setShowIndexingModal(true)
-              // Refresh dashboard case list
+              // Refresh dashboard — use incremental single-case refresh
+              setLastIndexedCasePath(targetFolder)
               setFirmCasesVersion(v => v + 1)
             }
 
@@ -1790,11 +1804,12 @@ function App() {
           teamContext={authState?.team}
           indexingProgress={indexingProgress}
           firmCasesVersion={firmCasesVersion}
+          lastIndexedCasePath={lastIndexedCasePath}
           batchProgress={batchProgress}
           showBatchModal={showBatchModal}
           onBatchProgressChange={setBatchProgress}
           onShowBatchModalChange={setShowBatchModal}
-          onBatchComplete={() => setFirmCasesVersion(v => v + 1)}
+          onBatchComplete={() => { setLastIndexedCasePath(null); setFirmCasesVersion(v => v + 1) }}
         />
         {showPicker && (
           <FolderPicker

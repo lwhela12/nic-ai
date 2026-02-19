@@ -8,9 +8,11 @@
  * - generateCaseSummaryWithGptOss: Case summary generation via GPT-OSS 120B
  */
 
+import { readFile } from "fs/promises";
 import { getGroqClient } from "./groq-client";
 import { pdfToImages, getPdfPageCount, type PdfPageImage } from "./pdftoppm";
 import { FILE_EXTRACTION_TOOL_SCHEMA } from "./index-schema";
+import { getImageMimeType } from "./extract";
 
 // ============================================================================
 // Types
@@ -608,6 +610,65 @@ export async function extractWithVision(
   const merged = mergeExtractions(batchResults, filename);
 
   return { result: merged, usage: totalUsage };
+}
+
+/**
+ * Extract information from a standalone image file (JPG, PNG, etc.) using vision models.
+ * Reads the image directly and sends it to Scout → Maverick fallback.
+ */
+export async function extractImageFileWithVision(
+  imagePath: string,
+  filename: string,
+  folder: string,
+  systemPrompt: string
+): Promise<{ result: ExtractionResult; usage: GroqUsage }> {
+  const totalUsage: GroqUsage = { inputTokens: 0, outputTokens: 0 };
+
+  const imageBuffer = await readFile(imagePath);
+  const base64 = imageBuffer.toString("base64");
+  const mimeType = getImageMimeType(filename);
+
+  console.log(`[Vision] ${filename}: standalone image (${(imageBuffer.length / 1024).toFixed(0)}KB, ${mimeType})`);
+
+  const messages = [
+    {
+      role: "system",
+      content: `${systemPrompt}\n\nYou must respond with a single JSON object. No markdown, no explanation.\nRequired fields: type, key_info, has_handwritten_data, handwritten_fields, extracted_data.`,
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "text" as const,
+          text: `Extract information from this image document.\n\nFILENAME: ${filename}\nFOLDER: ${folder}\n\nCRITICAL:\n- Include extracted_data.document_date for this specific document's own date.\n- If multiple dates appear, include extracted_data.document_date_confidence and extracted_data.document_date_reason.\n- Set has_handwritten_data to true only for substantive handwritten extracted values.\n- Include handwritten_fields as non-signature extracted field names that are handwritten (use [] when none).\n\nReturn the JSON extraction now.`,
+        },
+        {
+          type: "image_url" as const,
+          image_url: {
+            url: `data:${mimeType};base64,${base64}`,
+          },
+        },
+      ],
+    },
+  ];
+
+  const visionResult = await callVisionWithFallback(messages, filename, "image");
+  const parsed = JSON.parse(visionResult.content);
+
+  console.log(`[Vision] ${filename}: done [groq-${visionResult.model}]`);
+  totalUsage.inputTokens += visionResult.usage.inputTokens;
+  totalUsage.outputTokens += visionResult.usage.outputTokens;
+
+  return {
+    result: {
+      type: parsed.type || "other",
+      key_info: parsed.key_info || "",
+      has_handwritten_data: parsed.has_handwritten_data === true,
+      handwritten_fields: Array.isArray(parsed.handwritten_fields) ? parsed.handwritten_fields : [],
+      extracted_data: parsed.extracted_data || {},
+    },
+    usage: totalUsage,
+  };
 }
 
 /**

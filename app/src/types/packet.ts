@@ -21,6 +21,10 @@ export interface PacketFrontMatter {
   serviceMethod: string
   recipients: string[]
   firmBlockLines: string[]
+  templateId?: string
+  signerName?: string
+  issueOnAppeal?: string
+  extraSectionValues?: Record<string, string>
 }
 
 export interface PacketPiiResult {

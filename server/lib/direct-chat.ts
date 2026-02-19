@@ -400,6 +400,14 @@ const TOOLS: Anthropic.Tool[] = [
           type: "number",
           description: "Optional exhibit page start number."
         },
+        claim_number: {
+          type: "string",
+          description: "The workers' compensation claim number (e.g. 'WC-2024-001234'). Extracted from the document index or case documents."
+        },
+        issue_on_appeal: {
+          type: "string",
+          description: "For Appeals Officer (AO) hearings: a 1-2 sentence summary of the issue on appeal. Leave empty for Hearing Officer (HO) hearings."
+        },
         service: {
           type: "object",
           properties: {
@@ -1786,6 +1794,10 @@ async function executeTool(
         const claimantName = indexData?.summary?.client || "";
         const claimNumbers = indexData?.summary?.claim_numbers || {};
         const firstClaimNumber = Object.values(claimNumbers).find((v: unknown) => typeof v === "string") as string || "";
+        const resolvedClaimNumber =
+          (typeof indexData?.summary?.wc_carrier?.claim_number === "string"
+            && indexData.summary.wc_carrier.claim_number.trim()) ||
+          firstClaimNumber;
 
         // Count total documents for reference (without returning them all)
         const folders = indexData?.folders || {};
@@ -1799,7 +1811,7 @@ async function executeTool(
           success: true,
           totalIndexedDocuments: docCount,
           hearingNumber: hearingNumber || null,
-          caption: { claimantName, claimNumber: firstClaimNumber },
+          caption: { claimantName, claimNumber: resolvedClaimNumber },
           instruction: [
             "This is a PLANNING step only — no PDF has been generated yet.",
             "Use the meta-index already in your context to identify relevant documents for this packet:",
@@ -1854,6 +1866,11 @@ async function executeTool(
         const claimantName = indexData?.summary?.client || "";
         const claimNumbers = indexData?.summary?.claim_numbers || {};
         const firstClaimNumber = Object.values(claimNumbers).find((v: unknown) => typeof v === "string") as string || "";
+        const resolvedClaimNumber =
+          (typeof toolInput.claim_number === "string" && toolInput.claim_number.trim()) ||
+          (typeof indexData?.summary?.wc_carrier?.claim_number === "string" && indexData.summary.wc_carrier.claim_number.trim()) ||
+          firstClaimNumber;
+        const issueOnAppeal = typeof toolInput.issue_on_appeal === "string" ? toolInput.issue_on_appeal : "";
 
         const proposedDocuments = documents.map((doc) => ({
           docId: buildDocumentIdFromPath(doc.path),
@@ -1871,11 +1888,12 @@ async function executeTool(
           invalidSelectors: unresolvedSelectors.length > 0 ? unresolvedSelectors : undefined,
           caption: {
             claimantName,
-            claimNumber: firstClaimNumber,
+            claimNumber: resolvedClaimNumber,
             hearingNumber: hearingNumber || undefined,
             hearingDateTime: typeof toolInput.hearing_datetime === "string" ? toolInput.hearing_datetime : undefined,
             appearance: typeof toolInput.appearance === "string" ? toolInput.appearance : undefined,
           },
+          issueOnAppeal,
           service: inputService,
           instruction: "The Packet Creation UI has opened with the curated documents pre-loaded. Let the user know they can review the order, edit front matter, run a PII scan, and generate the final PDF from the interface.",
         });
@@ -2567,6 +2585,8 @@ Requirements:
 - Pass \`doc_id\` values into build_evidence_packet documents[].
 - If \`doc_id\` is unavailable, pass exact \`filename\` + \`folder\` from the index.
 - Compatibility: exact indexed \`path\` is accepted, but do not invent/synthesize paths.
+- When calling build_evidence_packet, include \`claim_number\` from the document index (check \`wc_carrier.claim_number\` first, then \`claim_numbers\`).
+- For AO hearings, include \`issue_on_appeal\` with a 1-2 sentence summary of the contested issue based on case documents. Leave it empty for HO hearings.
 - Do NOT claim the Packet Creation UI opened unless build_evidence_packet returns \`success: true\`.
 - After build_evidence_packet succeeds, let the user know the Packet Creation interface has opened with their documents pre-loaded.
 
@@ -2866,6 +2886,7 @@ export async function* directChat(
               fileName: string;
             }>;
             caption?: { claimantName: string; claimNumber: string; hearingNumber?: string; hearingDateTime?: string; appearance?: string };
+            issueOnAppeal?: string;
             service?: EvidencePacketServiceInfo;
           }>(result);
           if ((parsed?.success || parsed?.packetModeOpened) && Array.isArray(parsed.proposedDocuments)) {
@@ -2874,6 +2895,7 @@ export async function* directChat(
               plan: {
                 proposedDocuments: parsed.proposedDocuments,
                 caption: parsed.caption,
+                issueOnAppeal: parsed.issueOnAppeal || "",
                 service: parsed.service,
               },
             };

@@ -6,6 +6,85 @@ import { runPdftotext } from "./pdftotext";
 type SortBy = "none" | "date" | "title" | "path";
 type SortDirection = "asc" | "desc";
 
+export interface PacketTemplate {
+  id: string;
+  name: string;
+  heading: string;
+  captionPreambleLines: string[];
+  captionFields: Array<{
+    label: string;
+    key: string;
+  }>;
+  extraSections?: Array<{
+    title: string;
+    key: string;
+  }>;
+  indexTitle: string;
+  counselPreamble: string;
+  affirmationTitle: string;
+  affirmationText: string;
+  certTitle: string;
+  certIntro: string;
+  sourceFile?: string;
+  builtIn?: boolean;
+}
+
+export const BUILT_IN_TEMPLATES: PacketTemplate[] = [
+  {
+    id: "ho-standard",
+    name: "HO - Hearing Officer",
+    heading: "BEFORE THE HEARING OFFICER",
+    captionPreambleLines: [
+      "In the Matter of the Contested",
+      "Industrial Insurance Claim of",
+    ],
+    captionFields: [
+      { label: "Claim No.:", key: "claimNumber" },
+      { label: "Hearing No.:", key: "hearingNumber" },
+      { label: "Date/Time:", key: "hearingDateTime" },
+      { label: "Appearance:", key: "appearance" },
+    ],
+    indexTitle: "DOCUMENT INDEX",
+    counselPreamble:
+      "COMES NOW, {{claimantName}}, by and through counsel, and submits the attached documentation for consideration in the above-cited matter.",
+    affirmationTitle: "AFFIRMATION",
+    affirmationText:
+      "Pursuant to NRS 239B, the undersigned affirms the attached documents do not expose the personal information of any person.",
+    certTitle: "CERTIFICATE OF SERVICE",
+    certIntro:
+      "I certify that a true and correct copy of the foregoing Claimant Document Index was served on the following:",
+    builtIn: true,
+  },
+  {
+    id: "ao-standard",
+    name: "AO - Appeals Officer",
+    heading: "BEFORE THE APPEALS OFFICER",
+    captionPreambleLines: [
+      "In the Matter of the Contested",
+      "Industrial Insurance Claim of",
+    ],
+    captionFields: [
+      { label: "Claim No.:", key: "claimNumber" },
+      { label: "Appeal No.:", key: "hearingNumber" },
+      { label: "Date/Time:", key: "hearingDateTime" },
+      { label: "Appearance:", key: "appearance" },
+    ],
+    extraSections: [
+      { title: "ISSUE ON APPEAL", key: "issueOnAppeal" },
+    ],
+    indexTitle: "DOCUMENT INDEX",
+    counselPreamble:
+      "COMES NOW, {{claimantName}}, by and through counsel, and submits the attached documentation for consideration in the above-cited matter.",
+    affirmationTitle: "AFFIRMATION",
+    affirmationText:
+      "Pursuant to NRS 239B, the undersigned affirms the attached documents do not expose the personal information of any person.",
+    certTitle: "CERTIFICATE OF SERVICE",
+    certIntro:
+      "I certify that a true and correct copy of the foregoing Claimant Document Index was served on the following:",
+    builtIn: true,
+  },
+];
+
 export interface EvidencePacketDocumentInput {
   path: string;
   title: string;
@@ -62,6 +141,12 @@ export interface BuildEvidencePacketOptions {
   firmBlockLines?: string[];
   /** Override default path resolution (for year-based cases). */
   resolveDocPath?: (relativePath: string) => string;
+  /** Template to drive front matter heading, caption layout, and boilerplate. */
+  template?: PacketTemplate;
+  /** Name to display in the signer block (overrides introductoryCounselLine). */
+  signerName?: string;
+  /** Values for template extraSections, keyed by section key (e.g. "issueOnAppeal"). */
+  extraSectionValues?: Record<string, string>;
 }
 
 export interface EvidencePacketTocEntry {
@@ -269,6 +354,9 @@ export async function buildFrontMatterPreview(options: {
   service?: EvidencePacketServiceInfo;
   tocEntries: Array<{ title: string; startPage: number; endPage: number }>;
   includeAffirmationPage?: boolean;
+  template?: PacketTemplate;
+  signerName?: string;
+  extraSectionValues?: Record<string, string>;
 }): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const regularFont = await pdf.embedFont(StandardFonts.TimesRoman);
@@ -280,6 +368,9 @@ export async function buildFrontMatterPreview(options: {
     caption: options.caption,
     firmBlockLines: options.firmBlockLines,
     service: options.service,
+    template: options.template,
+    signerName: options.signerName,
+    extraSectionValues: options.extraSectionValues,
   };
 
   const tocEntries: EvidencePacketTocEntry[] = options.tocEntries.map((e) => ({
@@ -715,27 +806,63 @@ function addIndexPages(
     : preferredExtraDrop;
   const cy = (y: number) => y - captionYOffset;
 
-  drawCentered(page, boldFont, "BEFORE THE HEARING OFFICER", 12, cy(724));
+  const tpl = options.template;
+  drawCentered(page, boldFont, tpl?.heading ?? "BEFORE THE HEARING OFFICER", 12, cy(724));
 
   drawCaptionDivider(page, regularFont, captionYOffset);
 
-  page.drawText("In the Matter of the Contested", { x: 84, y: cy(693), size: 12, font: regularFont });
-  page.drawText("Industrial Insurance Claim of", { x: 84, y: cy(678), size: 12, font: regularFont });
-  page.drawText(`${options.caption.claimantName},`, { x: 84, y: cy(646), size: 12, font: regularFont });
-  page.drawText("Claimant.", { x: 84, y: cy(631), size: 12, font: regularFont });
+  // Caption preamble (left side)
+  const preambleLines = tpl?.captionPreambleLines ?? [
+    "In the Matter of the Contested",
+    "Industrial Insurance Claim of",
+  ];
+  const preambleStartY = cy(693);
+  for (let i = 0; i < preambleLines.length; i++) {
+    page.drawText(preambleLines[i], { x: 84, y: preambleStartY - i * 15, size: 12, font: regularFont });
+  }
+  const afterPreambleY = preambleStartY - preambleLines.length * 15 - 17;
+  page.drawText(`${options.caption.claimantName},`, { x: 84, y: afterPreambleY, size: 12, font: regularFont });
+  page.drawText("Claimant.", { x: 84, y: afterPreambleY - 15, size: 12, font: regularFont });
 
+  // Caption fields (right side)
   const rightX = 362;
-  drawRightField(page, boldFont, regularFont, rightX, cy(693), "Claim No.:", options.caption.claimNumber ?? "", 12);
-  drawRightField(page, boldFont, regularFont, rightX, cy(673), "Hearing No.:", options.caption.hearingNumber ?? "", 12);
-  drawRightField(page, boldFont, regularFont, rightX, cy(653), "Date/Time:", options.caption.hearingDateTime ?? "", 12);
-  drawRightField(page, boldFont, regularFont, rightX, cy(633), "Appearance:", options.caption.appearance ?? "", 12);
+  const captionFieldDefs = tpl?.captionFields ?? [
+    { label: "Claim No.:", key: "claimNumber" },
+    { label: "Hearing No.:", key: "hearingNumber" },
+    { label: "Date/Time:", key: "hearingDateTime" },
+    { label: "Appearance:", key: "appearance" },
+  ];
+  const captionFieldSpacing = 20;
+  for (let i = 0; i < captionFieldDefs.length; i++) {
+    const field = captionFieldDefs[i];
+    const value = (options.caption as Record<string, unknown>)[field.key];
+    drawRightField(page, boldFont, regularFont, rightX, cy(693) - i * captionFieldSpacing, field.label, String(value ?? ""), 12);
+  }
 
   const captionBottomY = 618 - captionYOffset;
-  const docIndexY = captionBottomY - 20;
-  drawCentered(page, boldFont, "DOCUMENT INDEX", 14, docIndexY);
+  let sectionY = captionBottomY;
 
-  const intro = options.caption.introductoryCounselLine ||
-    `COMES NOW, ${options.caption.claimantName}, by and through counsel, and submits the attached documentation for consideration in the above-cited matter.`;
+  // Extra sections (e.g. "ISSUE ON APPEAL" for AO template)
+  if (tpl?.extraSections && tpl.extraSections.length > 0) {
+    for (const section of tpl.extraSections) {
+      sectionY -= 10;
+      drawCentered(page, boldFont, section.title, 13, sectionY);
+      sectionY -= 20;
+      const sectionValue = options.extraSectionValues?.[section.key] || "";
+      if (sectionValue) {
+        sectionY = drawWrappedText(page, sectionValue, 84, sectionY, 470, regularFont, 12, 16);
+        sectionY -= 8;
+      }
+    }
+  }
+
+  const docIndexY = sectionY - 20;
+  drawCentered(page, boldFont, tpl?.indexTitle ?? "DOCUMENT INDEX", 14, docIndexY);
+
+  const counselPreambleRaw = tpl?.counselPreamble
+    ?? options.caption.introductoryCounselLine
+    ?? "COMES NOW, {{claimantName}}, by and through counsel, and submits the attached documentation for consideration in the above-cited matter.";
+  const intro = counselPreambleRaw.replace(/\{\{claimantName\}\}/g, options.caption.claimantName);
   const introStartY = docIndexY - 48;
   let currentY = drawWrappedText(page, intro, 84, introStartY, 470, regularFont, 12, 16);
   currentY -= 12;
@@ -779,19 +906,21 @@ function addAffirmationPage(
   const page = pdf.addPage([612, 792]);
   drawPleadingPaper(page, regularFont, options.firmBlockLines, frontMatterPageNumber, false);
 
-  drawCentered(page, boldFont, "AFFIRMATION", 14, 726);
+  const tpl = options.template;
+  drawCentered(page, boldFont, tpl?.affirmationTitle ?? "AFFIRMATION", 14, 726);
 
   const serviceDate = options.service?.serviceDate || new Date().toLocaleDateString("en-US");
-  const affirmationText =
+  const affirmationText = tpl?.affirmationText ??
     "Pursuant to NRS 239B, the undersigned affirms the attached documents do not expose the personal information of any person.";
   let y = drawWrappedText(page, affirmationText, 84, 702, 470, regularFont, 11, 14);
   y -= 20;
   page.drawText(`Dated: ${serviceDate}`, { x: 84, y, size: 11, font: regularFont });
 
   const signY = y - 65;
+  const signerDisplayName = options.signerName || options.caption.introductoryCounselLine || "";
   const signerBlock = [
     "Claimant's Counsel",
-    options.caption.introductoryCounselLine || "",
+    signerDisplayName,
   ].filter(Boolean);
   let sigLineY = signY;
   for (const line of signerBlock) {
@@ -799,8 +928,8 @@ function addAffirmationPage(
     sigLineY -= 14;
   }
 
-  drawCentered(page, boldFont, "CERTIFICATE OF SERVICE", 13, 430);
-  const serviceIntro =
+  drawCentered(page, boldFont, tpl?.certTitle ?? "CERTIFICATE OF SERVICE", 13, 430);
+  const serviceIntro = tpl?.certIntro ??
     "I certify that a true and correct copy of the foregoing Claimant Document Index was served on the following:";
   y = drawWrappedText(page, serviceIntro, 84, 406, 470, regularFont, 11, 14);
   y -= 12;
