@@ -1830,7 +1830,8 @@ async function executeTool(
             "4. For folders with relevant documents, use read_file(\".ai_tool/indexes/{FolderName}.json\") to get doc_id values for the specific files you want to include.",
             "5. IMPORTANT: Review the EVIDENCE PACKET RULES included below in this response. Follow these rules for document ordering, inclusion/exclusion, and packet structure.",
             "6. Present the proposed ordered document list to the user for review. Show title, folder, and why each was included.",
-            "7. After the user confirms (or adjusts), call build_evidence_packet with the verified ordered list using doc_id for each document. Set hearing_type to 'AO' or 'HO' based on step 2.",
+            "7. EXPLAIN YOUR REASONING: Before showing the document list, explain which evidence packet rules you found and how you applied them. Cite specific rules that influenced document ordering, inclusion, or exclusion. If no rules were provided, state that and explain the default ordering logic you used.",
+            "8. After the user confirms (or adjusts), call build_evidence_packet with the verified ordered list using doc_id for each document. Set hearing_type to 'AO' or 'HO' based on step 2.",
             "Do NOT skip straight to build_evidence_packet without showing the user the proposed list first.",
           ].join("\n"),
         };
