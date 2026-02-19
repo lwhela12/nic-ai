@@ -699,6 +699,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                 const caption = data.plan.caption || {}
                 const service = data.plan.service || {}
                 const issueOnAppeal = data.plan.issueOnAppeal || ''
+                const templateId = data.plan.templateId || ''
                 onEvidencePacketPlanned({
                   documents: proposed
                     .map((d: { docId?: string; doc_id?: string; path?: string; title?: string }) => ({
@@ -716,6 +717,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                     serviceMethod: service.serviceMethod,
                     recipients: service.recipients,
                     issueOnAppeal,
+                    ...(templateId ? { templateId } : {}),
                     ...(issueOnAppeal ? { extraSectionValues: { issueOnAppeal } } : {}),
                   },
                 })

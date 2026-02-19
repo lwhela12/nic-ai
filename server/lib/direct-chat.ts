@@ -404,6 +404,11 @@ const TOOLS: Anthropic.Tool[] = [
           type: "string",
           description: "The workers' compensation claim number (e.g. 'WC-2024-001234'). Extracted from the document index or case documents."
         },
+        hearing_type: {
+          type: "string",
+          enum: ["HO", "AO"],
+          description: "Type of hearing: 'HO' for Hearing Officer (default), 'AO' for Appeals Officer (appeal of a previous decision)."
+        },
         issue_on_appeal: {
           type: "string",
           description: "For Appeals Officer (AO) hearings: a 1-2 sentence summary of the issue on appeal. Leave empty for Hearing Officer (HO) hearings."
@@ -1816,11 +1821,12 @@ async function executeTool(
             "This is a PLANNING step only — no PDF has been generated yet.",
             "Use the meta-index already in your context to identify relevant documents for this packet:",
             "1. If a hearing number was provided, find and read the hearing notice using read_file or read_document to understand what this hearing is for.",
-            "2. Review the meta-index folders in your context — look at filenames, types, dates, and facts to identify which documents belong in the packet.",
-            "3. For folders with relevant documents, use read_file(\".ai_tool/indexes/{FolderName}.json\") to get doc_id values for the specific files you want to include.",
-            "4. Check the EVIDENCE PACKET RULES section in your context for packet ordering rules.",
-            "5. Present the proposed ordered document list to the user for review. Show title, folder, and why each was included.",
-            "6. After the user confirms (or adjusts), call build_evidence_packet with the verified ordered list using doc_id for each document.",
+            "2. Determine the hearing type: Read the hearing notice to check if this is an AO (Appeals Officer) or HO (Hearing Officer) hearing. Also check the hearing number format — a suffix like '-RA' indicates a reconsideration/appeal (AO). Otherwise default to HO.",
+            "3. Review the meta-index folders in your context — look at filenames, types, dates, and facts to identify which documents belong in the packet.",
+            "4. For folders with relevant documents, use read_file(\".ai_tool/indexes/{FolderName}.json\") to get doc_id values for the specific files you want to include.",
+            "5. Check the EVIDENCE PACKET RULES section in your context for packet ordering rules.",
+            "6. Present the proposed ordered document list to the user for review. Show title, folder, and why each was included.",
+            "7. After the user confirms (or adjusts), call build_evidence_packet with the verified ordered list using doc_id for each document. Set hearing_type to 'AO' or 'HO' based on step 2.",
             "Do NOT skip straight to build_evidence_packet without showing the user the proposed list first.",
           ].join("\n"),
         });
@@ -1872,6 +1878,19 @@ async function executeTool(
           firstClaimNumber;
         const issueOnAppeal = typeof toolInput.issue_on_appeal === "string" ? toolInput.issue_on_appeal : "";
 
+        // Determine hearing type and derive templateId
+        let hearingType = typeof toolInput.hearing_type === "string"
+          ? toolInput.hearing_type.toUpperCase()
+          : "";
+        // Fallback: infer from hearing number if agent didn't specify
+        if (!hearingType && hearingNumber) {
+          const isAppealFormat = /-(RA|AP|APPEAL)/i.test(hearingNumber);
+          if (isAppealFormat) hearingType = "AO";
+        }
+        const templateId = (hearingType === "AO" || issueOnAppeal.trim())
+          ? "ao-standard"
+          : "ho-standard";
+
         const proposedDocuments = documents.map((doc) => ({
           docId: buildDocumentIdFromPath(doc.path),
           path: doc.path,
@@ -1894,6 +1913,7 @@ async function executeTool(
             appearance: typeof toolInput.appearance === "string" ? toolInput.appearance : undefined,
           },
           issueOnAppeal,
+          templateId,
           service: inputService,
           instruction: "The Packet Creation UI has opened with the curated documents pre-loaded. Let the user know they can review the order, edit front matter, run a PII scan, and generate the final PDF from the interface.",
         });
@@ -2586,7 +2606,8 @@ Requirements:
 - If \`doc_id\` is unavailable, pass exact \`filename\` + \`folder\` from the index.
 - Compatibility: exact indexed \`path\` is accepted, but do not invent/synthesize paths.
 - When calling build_evidence_packet, include \`claim_number\` from the document index (check \`wc_carrier.claim_number\` first, then \`claim_numbers\`).
-- For AO hearings, include \`issue_on_appeal\` with a 1-2 sentence summary of the contested issue based on case documents. Leave it empty for HO hearings.
+- When calling build_evidence_packet, set \`hearing_type\` to "AO" for Appeals Officer hearings or "HO" for Hearing Officer hearings.
+- For AO hearings, also include \`issue_on_appeal\` with a 1-2 sentence summary of the contested issue based on case documents. Leave both empty for HO hearings.
 - Do NOT claim the Packet Creation UI opened unless build_evidence_packet returns \`success: true\`.
 - After build_evidence_packet succeeds, let the user know the Packet Creation interface has opened with their documents pre-loaded.
 
@@ -2887,6 +2908,7 @@ export async function* directChat(
             }>;
             caption?: { claimantName: string; claimNumber: string; hearingNumber?: string; hearingDateTime?: string; appearance?: string };
             issueOnAppeal?: string;
+            templateId?: string;
             service?: EvidencePacketServiceInfo;
           }>(result);
           if ((parsed?.success || parsed?.packetModeOpened) && Array.isArray(parsed.proposedDocuments)) {
@@ -2896,6 +2918,7 @@ export async function* directChat(
                 proposedDocuments: parsed.proposedDocuments,
                 caption: parsed.caption,
                 issueOnAppeal: parsed.issueOnAppeal || "",
+                templateId: parsed.templateId,
                 service: parsed.service,
               },
             };
