@@ -9,6 +9,8 @@ import { readdir, readFile, writeFile, mkdir, copyFile, unlink, stat } from "fs/
 import { join, dirname, basename, extname } from "path";
 import { extractTextFromPdf, extractTextFromDocx, extractStylesFromDocx, DocxStyles } from "../lib/extract";
 import { requireFirmAccess } from "../lib/team-access";
+import { generateSectionTags, generateTagsForAllSections } from "../lib/knowledge-tagger";
+import { updateMetaIndexSectionTags } from "../lib/direct-chat";
 
 // Lazy client creation - API key is set by auth middleware before requests
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -144,6 +146,59 @@ app.post("/init", async (c) => {
       await writeFile(firmConfigPath, JSON.stringify(defaultConfig, null, 2));
     }
 
+    // Generate semantic tags for all sections (non-blocking)
+    (async () => {
+      try {
+        const tagInputs: Array<{ filename: string; title: string; content: string }> = [];
+        for (const section of manifest.sections) {
+          try {
+            const content = await readFile(join(knowledgeDir, section.filename), "utf-8");
+            tagInputs.push({ filename: section.filename, title: section.title, content });
+          } catch { /* skip */ }
+        }
+        if (tagInputs.length > 0) {
+          const tagsMap = await generateTagsForAllSections(tagInputs);
+
+          // Build and save meta-index with tags
+          const metaIndexPath = join(root, ".ai_tool", "knowledge", "meta_index.json");
+          const manifestMtime = (await stat(join(knowledgeDir, "manifest.json"))).mtimeMs;
+          const sectionMtimes: Record<string, number> = {};
+          const sections: Array<any> = [];
+          for (const section of manifest.sections) {
+            try {
+              const st = await stat(join(knowledgeDir, section.filename));
+              sectionMtimes[section.filename] = st.mtimeMs;
+            } catch { /* skip */ }
+            const tags = tagsMap.get(section.filename);
+            const content = await readFile(join(knowledgeDir, section.filename), "utf-8").catch(() => "");
+            sections.push({
+              id: section.id,
+              title: section.title,
+              filename: section.filename,
+              path: `.ai_tool/knowledge/${section.filename}`,
+              preview: content.replace(/\s+/g, " ").trim().slice(0, 420),
+              char_count: content.length,
+              ...(tags ? { topics: tags.topics, applies_to: tags.applies_to, summary: tags.summary } : {}),
+            });
+          }
+          const metaIndex = {
+            indexed_at: new Date().toISOString(),
+            source: ".ai_tool/knowledge/manifest.json",
+            source_mtime: manifestMtime,
+            practice_area: manifest.practiceArea,
+            jurisdiction: manifest.jurisdiction,
+            section_count: sections.length,
+            sections,
+            section_mtimes: sectionMtimes,
+            has_semantic_tags: tagsMap.size > 0,
+          };
+          await writeFile(metaIndexPath, JSON.stringify(metaIndex, null, 2));
+        }
+      } catch (err) {
+        console.warn("[knowledge/init] Failed to generate semantic tags:", err instanceof Error ? err.message : err);
+      }
+    })();
+
     return c.json({ success: true, practiceArea: manifest.practiceArea });
   } catch (error) {
     console.error("Knowledge init error:", error);
@@ -238,6 +293,11 @@ app.put("/section/:id", async (c) => {
     // Clear knowledge cache
     clearKnowledgeCache(root);
 
+    // Generate semantic tags for the updated section (non-blocking)
+    generateSectionTags(section.title, content)
+      .then((tags) => updateMetaIndexSectionTags(root, section.filename, tags))
+      .catch((err) => console.warn("[knowledge] Failed to tag section:", err instanceof Error ? err.message : err));
+
     return c.json({ success: true });
   } catch (error) {
     return c.json({ error: "Failed to save section" }, 500);
@@ -266,9 +326,15 @@ app.post("/section", async (c) => {
 
     manifest.sections.push({ id, title, filename, order });
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
-    await writeFile(join(knowledgeDir, filename), content || `## ${title}\n\n`);
+    const sectionContent = content || `## ${title}\n\n`;
+    await writeFile(join(knowledgeDir, filename), sectionContent);
 
     clearKnowledgeCache(root);
+
+    // Generate semantic tags for the new section (non-blocking)
+    generateSectionTags(title, sectionContent)
+      .then((tags) => updateMetaIndexSectionTags(root, filename, tags))
+      .catch((err) => console.warn("[knowledge] Failed to tag new section:", err instanceof Error ? err.message : err));
 
     return c.json({ success: true, filename });
   } catch (error) {
@@ -1547,6 +1613,85 @@ Format everything as clean markdown. The goal is to help an AI agent understand 
 
   return { markdown, description };
 }
+
+// Reindex meta with semantic tags
+app.post("/reindex-meta", async (c) => {
+  const { root } = await c.req.json();
+  if (!root) {
+    return c.json({ error: "root required" }, 400);
+  }
+
+  try {
+    const knowledgeDir = join(root, ".ai_tool", "knowledge");
+    const manifestPath = join(knowledgeDir, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
+
+    const tagInputs: Array<{ filename: string; title: string; content: string }> = [];
+    for (const section of manifest.sections || []) {
+      const filename = section.filename;
+      if (!filename) continue;
+      try {
+        const content = await readFile(join(knowledgeDir, filename), "utf-8");
+        tagInputs.push({ filename, title: section.title || filename, content });
+      } catch { /* skip */ }
+    }
+
+    const tagsMap = tagInputs.length > 0 ? await generateTagsForAllSections(tagInputs) : new Map();
+
+    // Build section entries
+    const manifestMtime = (await stat(manifestPath)).mtimeMs;
+    const sectionMtimes: Record<string, number> = {};
+    const sections: Array<any> = [];
+
+    for (const section of manifest.sections || []) {
+      const filename = section.filename;
+      if (!filename) continue;
+      try {
+        const st = await stat(join(knowledgeDir, filename));
+        sectionMtimes[filename] = st.mtimeMs;
+      } catch { /* skip */ }
+      const content = await readFile(join(knowledgeDir, filename), "utf-8").catch(() => "");
+      const tags = tagsMap.get(filename);
+      sections.push({
+        id: section.id,
+        title: section.title || filename,
+        filename,
+        path: `.ai_tool/knowledge/${filename}`,
+        preview: content.replace(/\s+/g, " ").trim().slice(0, 420),
+        char_count: content.length,
+        ...(tags ? { topics: tags.topics, applies_to: tags.applies_to, summary: tags.summary } : {}),
+      });
+    }
+
+    const metaIndex = {
+      indexed_at: new Date().toISOString(),
+      source: ".ai_tool/knowledge/manifest.json",
+      source_mtime: manifestMtime,
+      practice_area: manifest.practiceArea,
+      jurisdiction: manifest.jurisdiction,
+      section_count: sections.length,
+      sections,
+      section_mtimes: sectionMtimes,
+      has_semantic_tags: tagsMap.size > 0,
+    };
+
+    const metaIndexPath = join(knowledgeDir, "meta_index.json");
+    await writeFile(metaIndexPath, JSON.stringify(metaIndex, null, 2));
+
+    clearKnowledgeCache(root);
+
+    return c.json({
+      success: true,
+      section_count: sections.length,
+      tagged_count: tagsMap.size,
+    });
+  } catch (error) {
+    console.error("Reindex meta error:", error);
+    return c.json({
+      error: error instanceof Error ? error.message : String(error),
+    }, 500);
+  }
+});
 
 /**
  * Load document templates for agent context.

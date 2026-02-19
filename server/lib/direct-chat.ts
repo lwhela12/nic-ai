@@ -30,6 +30,7 @@ import { extractTextFromDocx } from "./extract";
 import { generateMetaIndex, splitIndexToFolders, buildMetaIndexPromptView, writeIndexDerivedFiles } from "./meta-index";
 import { generateHypergraph } from "../routes/firm";
 import { buildDocumentId, buildDocumentIdFromPath } from "./document-id";
+import { generateTagsForAllSections, type SectionSemanticTags } from "./knowledge-tagger";
 
 // Client creation - recreated when API key changes
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -81,7 +82,7 @@ const INDEX_SLICE_MAX_CHARS = 12000;
 const CONFLICT_BATCH_DEFAULT = 25;
 const CONFLICT_BATCH_MAX = 80;
 const KNOWLEDGE_PREVIEW_CHARS = 420;
-const KNOWLEDGE_META_INDEX_MAX_CHARS = 12000;
+const KNOWLEDGE_META_INDEX_MAX_CHARS = 16000;
 const KNOWLEDGE_META_INDEX_PATH = ".ai_tool/knowledge/meta_index.json";
 
 interface MetaKnowledgeSection {
@@ -91,6 +92,9 @@ interface MetaKnowledgeSection {
   path: string;
   preview: string;
   char_count: number;
+  topics?: string[];
+  applies_to?: string[];
+  summary?: string;
 }
 
 interface MetaKnowledgeIndex {
@@ -102,6 +106,7 @@ interface MetaKnowledgeIndex {
   sections: MetaKnowledgeSection[];
   source_mtime?: number;
   section_mtimes?: Record<string, number>;
+  has_semantic_tags?: boolean;
 }
 
 // Tool definitions
@@ -623,11 +628,6 @@ interface IndexedPdfDoc {
   docType?: string;
 }
 
-interface LoadedKnowledgePacketConfig {
-  config: KnowledgeEvidencePacketConfig | null;
-  source: string | null;
-  rawText: string | null;
-}
 
 function safeJsonParse<T = any>(value: string): T | null {
   try {
@@ -640,60 +640,6 @@ function safeJsonParse<T = any>(value: string): T | null {
 function normalizeSectionFilename(section: any): string | null {
   const filename = typeof section?.filename === "string" ? section.filename : section?.file;
   return typeof filename === "string" && filename.trim() ? filename.trim() : null;
-}
-
-function normalizeOrderRulesInput(raw: any): EvidencePacketOrderRule[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-
-  const normalized = raw
-    .filter((rule) => rule && typeof rule.id === "string")
-    .map((rule) => {
-      const match = rule.match && typeof rule.match === "object"
-        ? {
-          docTypes: Array.isArray(rule.match.docTypes)
-            ? rule.match.docTypes.filter((v: any) => typeof v === "string")
-            : Array.isArray(rule.match.doc_types)
-              ? rule.match.doc_types.filter((v: any) => typeof v === "string")
-              : undefined,
-          pathRegex: typeof rule.match.pathRegex === "string"
-            ? rule.match.pathRegex
-            : typeof rule.match.path_regex === "string"
-              ? rule.match.path_regex
-              : undefined,
-          titleRegex: typeof rule.match.titleRegex === "string"
-            ? rule.match.titleRegex
-            : typeof rule.match.title_regex === "string"
-              ? rule.match.title_regex
-              : undefined,
-        }
-        : undefined;
-
-      const sortBy = typeof rule.sortBy === "string"
-        ? rule.sortBy
-        : typeof rule.sort_by === "string"
-          ? rule.sort_by
-          : undefined;
-
-      const sortDirection = typeof rule.sortDirection === "string"
-        ? rule.sortDirection
-        : typeof rule.sort_direction === "string"
-          ? rule.sort_direction
-          : undefined;
-
-      return {
-        id: rule.id,
-        required: Boolean(rule.required),
-        match,
-        sortBy: sortBy === "none" || sortBy === "date" || sortBy === "title" || sortBy === "path"
-          ? sortBy
-          : undefined,
-        sortDirection: sortDirection === "asc" || sortDirection === "desc"
-          ? sortDirection
-          : undefined,
-      } satisfies EvidencePacketOrderRule;
-    });
-
-  return normalized.length > 0 ? normalized : undefined;
 }
 
 function normalizeServiceInput(raw: any): EvidencePacketServiceInfo | undefined {
@@ -890,7 +836,8 @@ function getManifestSections(manifest: Record<string, any> | null): any[] {
 async function buildMetaKnowledgeIndex(
   firmRoot: string,
   manifest?: Record<string, any>,
-  manifestMtimeMs?: number
+  manifestMtimeMs?: number,
+  precomputedTags?: Map<string, SectionSemanticTags>
 ): Promise<MetaKnowledgeIndex | null> {
   const knowledgeDir = join(firmRoot, ".ai_tool", "knowledge");
   const manifestPath = join(knowledgeDir, "manifest.json");
@@ -938,15 +885,26 @@ async function buildMetaKnowledgeIndex(
         }
       }
 
-      sections.push({
+      const sectionEntry: MetaKnowledgeSection = {
         id: typeof section.id === "string" ? section.id : undefined,
         title,
         filename,
         path: toMetaKnowledgePath(filename),
         preview: snippet,
         char_count: charCount,
-      } satisfies MetaKnowledgeSection);
+      };
+
+      const tags = precomputedTags?.get(filename);
+      if (tags) {
+        sectionEntry.topics = tags.topics;
+        sectionEntry.applies_to = tags.applies_to;
+        sectionEntry.summary = tags.summary;
+      }
+
+      sections.push(sectionEntry);
     }
+
+    const hasSemanticTags = precomputedTags !== undefined && precomputedTags.size > 0;
 
     return {
       indexed_at: new Date().toISOString(),
@@ -965,6 +923,7 @@ async function buildMetaKnowledgeIndex(
       section_count: sections.length,
       sections,
       section_mtimes: sectionMtimes,
+      has_semantic_tags: hasSemanticTags || undefined,
     };
   } catch {
     return null;
@@ -1028,16 +987,84 @@ async function getOrBuildMetaKnowledgeIndex(firmRoot: string): Promise<MetaKnowl
     if (matches) {
       const cachedFiles = Object.keys(cached.section_mtimes || {});
       if (seen.size === cachedFiles.length && cachedFiles.every((file) => seen.has(file))) {
-        return cached;
+        // If cached index has semantic tags, it's fully valid
+        if (cached.has_semantic_tags) {
+          return cached;
+        }
+        // Otherwise fall through to rebuild with tags
       }
     }
   }
 
-  const rebuilt = await buildMetaKnowledgeIndex(firmRoot, manifest, sourceMtime);
+  // Read all section contents for Haiku tagging
+  let precomputedTags: Map<string, SectionSemanticTags> | undefined;
+  try {
+    const tagInputs: Array<{ filename: string; title: string; content: string }> = [];
+    for (const section of sectionsData) {
+      const filename = normalizeSectionFilename(section) || "";
+      if (!filename) continue;
+      try {
+        const content = await readFile(join(knowledgeDir, filename), "utf-8");
+        const title = typeof section.title === "string" ? section.title : filename;
+        tagInputs.push({ filename, title, content });
+      } catch {
+        // Skip unreadable sections
+      }
+    }
+    if (tagInputs.length > 0) {
+      precomputedTags = await generateTagsForAllSections(tagInputs);
+    }
+  } catch (err) {
+    console.warn("[meta-index] Semantic tagging failed, building without tags:", err instanceof Error ? err.message : err);
+  }
+
+  const rebuilt = await buildMetaKnowledgeIndex(firmRoot, manifest, sourceMtime, precomputedTags);
   if (!rebuilt) return null;
 
   await writeFile(cachePath, JSON.stringify(rebuilt, null, 2)).catch(() => {});
   return rebuilt;
+}
+
+/**
+ * Patch a single section's semantic tags in the persisted meta_index.json
+ * without rebuilding the entire index. Used by CRUD hooks for incremental updates.
+ */
+export async function updateMetaIndexSectionTags(
+  firmRoot: string,
+  filename: string,
+  tags: SectionSemanticTags
+): Promise<void> {
+  const cachePath = join(firmRoot, KNOWLEDGE_META_INDEX_PATH);
+  try {
+    const raw = await readFile(cachePath, "utf-8");
+    const index = safeJsonParse<MetaKnowledgeIndex>(raw);
+    if (!index || !Array.isArray(index.sections)) return;
+
+    const section = index.sections.find((s) => s.filename === filename);
+    if (section) {
+      section.topics = tags.topics;
+      section.applies_to = tags.applies_to;
+      section.summary = tags.summary;
+      index.has_semantic_tags = index.sections.some(
+        (s) => s.topics || s.applies_to || s.summary
+      );
+      await writeFile(cachePath, JSON.stringify(index, null, 2));
+    }
+  } catch {
+    // meta_index.json doesn't exist yet or is invalid — will be rebuilt on next access
+  }
+}
+
+/**
+ * Find knowledge sections matching a given applies_to tag.
+ */
+export async function findKnowledgeSectionsByTag(
+  firmRoot: string,
+  tag: string
+): Promise<MetaKnowledgeSection[]> {
+  const metaIndex = await getOrBuildMetaKnowledgeIndex(firmRoot);
+  if (!metaIndex) return [];
+  return metaIndex.sections.filter((s) => s.applies_to?.includes(tag));
 }
 
 function buildMetaKnowledgeIndexText(index: MetaKnowledgeIndex | null): string {
@@ -1058,7 +1085,17 @@ function buildMetaKnowledgeIndexText(index: MetaKnowledgeIndex | null): string {
     for (const section of index.sections) {
       const header = section.id ? `${section.title} (${section.id})` : section.title;
       lines.push(`- ${header}: ${section.path} (${section.char_count} chars)`);
-      if (section.preview) lines.push(`  Preview: ${section.preview}`);
+      if (section.summary) {
+        lines.push(`  Purpose: ${section.summary}`);
+      } else if (section.preview) {
+        lines.push(`  Preview: ${section.preview}`);
+      }
+      if (section.applies_to && section.applies_to.length > 0) {
+        lines.push(`  Applies to: ${section.applies_to.join(", ")}`);
+      }
+      if (section.topics && section.topics.length > 0) {
+        lines.push(`  Topics: ${section.topics.join(", ")}`);
+      }
     }
     lines.push(
       "Use read_file(\".ai_tool/knowledge/<filename>\") to load any section you need for full context."
@@ -1090,59 +1127,6 @@ function buildMetaToolIndexText(): string {
   ].join("\n");
 }
 
-function extractFirstJsonCodeFence(content: string): Record<string, any> | null {
-  const fenceRegex = /```json\s*([\s\S]*?)```/gi;
-  let match: RegExpExecArray | null;
-  while ((match = fenceRegex.exec(content)) !== null) {
-    const parsed = safeJsonParse<Record<string, any>>(match[1]);
-    if (parsed && typeof parsed === "object") {
-      return parsed;
-    }
-  }
-  return null;
-}
-
-function normalizeKnowledgePacketConfig(input: any): KnowledgeEvidencePacketConfig | null {
-  if (!input || typeof input !== "object") return null;
-
-  const raw =
-    (input.evidencePacket && typeof input.evidencePacket === "object" && input.evidencePacket) ||
-    (input.evidence_packet && typeof input.evidence_packet === "object" && input.evidence_packet) ||
-    (input.evidencePacketRules && typeof input.evidencePacketRules === "object" && input.evidencePacketRules) ||
-    input;
-
-  const normalized: KnowledgeEvidencePacketConfig = {};
-
-  normalized.orderRules = normalizeOrderRulesInput(raw.orderRules || raw.order_rules);
-  if (Array.isArray(raw.includePathRegexes)) {
-    normalized.includePathRegexes = raw.includePathRegexes.filter((v: any) => typeof v === "string");
-  } else if (Array.isArray(raw.include_path_regexes)) {
-    normalized.includePathRegexes = raw.include_path_regexes.filter((v: any) => typeof v === "string");
-  }
-  if (Array.isArray(raw.excludePathRegexes)) {
-    normalized.excludePathRegexes = raw.excludePathRegexes.filter((v: any) => typeof v === "string");
-  } else if (Array.isArray(raw.exclude_path_regexes)) {
-    normalized.excludePathRegexes = raw.exclude_path_regexes.filter((v: any) => typeof v === "string");
-  }
-  if (typeof raw.includeAffirmationPage === "boolean") {
-    normalized.includeAffirmationPage = raw.includeAffirmationPage;
-  } else if (typeof raw.include_affirmation_page === "boolean") {
-    normalized.includeAffirmationPage = raw.include_affirmation_page;
-  }
-  if (typeof raw.pageStampStart === "number") {
-    normalized.pageStampStart = raw.pageStampStart;
-  } else if (typeof raw.page_stamp_start === "number") {
-    normalized.pageStampStart = raw.page_stamp_start;
-  }
-  normalized.service = normalizeServiceInput(raw.service);
-  if (raw.defaultRedactionMode === "off" || raw.defaultRedactionMode === "detect_only" || raw.defaultRedactionMode === "best_effort") {
-    normalized.defaultRedactionMode = raw.defaultRedactionMode;
-  } else if (raw.default_redaction_mode === "off" || raw.default_redaction_mode === "detect_only" || raw.default_redaction_mode === "best_effort") {
-    normalized.defaultRedactionMode = raw.default_redaction_mode;
-  }
-
-  return normalized;
-}
 
 function summarizeCommonFolder(paths: string[]): string | null {
   if (paths.length === 0) return null;
@@ -1158,76 +1142,6 @@ function summarizeCommonFolder(paths: string[]): string | null {
   return first.slice(0, idx).join("/");
 }
 
-async function loadKnowledgeEvidencePacketConfig(firmRoot: string): Promise<LoadedKnowledgePacketConfig> {
-  const explicitPath = join(firmRoot, ".ai_tool", "knowledge", "evidence-packet-rules.json");
-  try {
-    const explicitContent = await readFile(explicitPath, "utf-8");
-    const explicitJson = safeJsonParse<Record<string, any>>(explicitContent);
-    const normalized = normalizeKnowledgePacketConfig(explicitJson);
-    if (normalized) {
-      return {
-        config: normalized,
-        source: ".ai_tool/knowledge/evidence-packet-rules.json",
-        rawText: explicitContent,
-      };
-    }
-    return {
-      config: null,
-      source: ".ai_tool/knowledge/evidence-packet-rules.json",
-      rawText: explicitContent,
-    };
-  } catch {
-    // Continue to manifest sections
-  }
-
-  let firstRelevantText: { source: string; rawText: string } | null = null;
-  try {
-    const manifestPath = join(firmRoot, ".ai_tool", "knowledge", "manifest.json");
-    const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
-    for (const section of manifest.sections || []) {
-      const label = `${section?.id || ""} ${section?.title || ""}`.toLowerCase();
-      const sectionFile = normalizeSectionFilename(section);
-      if (!sectionFile) continue;
-
-      try {
-        const content = await readFile(join(firmRoot, ".ai_tool", "knowledge", sectionFile), "utf-8");
-        const contentSnippet = content.slice(0, 4000).toLowerCase();
-        const isPacketSection =
-          /evidence|hearing|packet|exhibit|document index/.test(label) ||
-          /evidence packet|hearing packet|document index|claimant index|exhibit order|h\.?o\.|hearing officer/.test(contentSnippet);
-        if (!isPacketSection) continue;
-
-        if (!firstRelevantText) {
-          firstRelevantText = { source: `.ai_tool/knowledge/${sectionFile}`, rawText: content };
-        }
-        const parsedWhole = safeJsonParse<Record<string, any>>(content);
-        const parsedFenced = parsedWhole || extractFirstJsonCodeFence(content);
-        const normalized = normalizeKnowledgePacketConfig(parsedFenced);
-        if (normalized) {
-          return {
-            config: normalized,
-            source: `.ai_tool/knowledge/${sectionFile}`,
-            rawText: content,
-          };
-        }
-      } catch {
-        // Try next section
-      }
-    }
-  } catch {
-    // No knowledge manifest or sections
-  }
-
-  if (firstRelevantText) {
-    return {
-      config: null,
-      source: firstRelevantText.source,
-      rawText: firstRelevantText.rawText,
-    };
-  }
-
-  return { config: null, source: null, rawText: null };
-}
 
 function inferHearingNumberFromDocs(docs: IndexedPdfDoc[]): string | null {
   const hearingCandidates = new Map<string, number>();
@@ -1812,10 +1726,6 @@ async function executeTool(
           docCount += files.length;
         }
 
-        // Load evidence packet rules from knowledge bank
-        const firmRoot = resolveFirmRoot(caseFolder);
-        const packetKnowledge = await loadKnowledgeEvidencePacketConfig(firmRoot);
-
         const result: Record<string, any> = {
           success: true,
           totalIndexedDocuments: docCount,
@@ -1826,22 +1736,15 @@ async function executeTool(
             "Use the meta-index already in your context to identify relevant documents for this packet:",
             "1. If a hearing number was provided, find and read the hearing notice using read_file or read_document to understand what this hearing is for.",
             "2. Determine the hearing type: Read the hearing notice to check if this is an AO (Appeals Officer) or HO (Hearing Officer) hearing. Also check the hearing number format — a suffix like '-RA' indicates a reconsideration/appeal (AO). Otherwise default to HO.",
-            "3. Review the meta-index folders in your context — look at filenames, types, dates, and facts to identify which documents belong in the packet.",
-            "4. For folders with relevant documents, use read_file(\".ai_tool/indexes/{FolderName}.json\") to get doc_id values for the specific files you want to include.",
-            "5. IMPORTANT: Review the EVIDENCE PACKET RULES included below in this response. Follow these rules for document ordering, inclusion/exclusion, and packet structure.",
+            "3. LOAD EVIDENCE PACKET RULES: Check the PRACTICE KNOWLEDGE meta-index in your context. Find the section tagged with 'Applies to: evidence_packet' and use read_file to load its full content. Follow those rules for document ordering, inclusion/exclusion, and packet structure.",
+            "4. Review the meta-index folders in your context — look at filenames, types, dates, and facts to identify which documents belong in the packet.",
+            "5. For folders with relevant documents, use read_file(\".ai_tool/indexes/{FolderName}.json\") to get doc_id values for the specific files you want to include.",
             "6. Present the proposed ordered document list to the user for review. Show title, folder, and why each was included.",
-            "7. EXPLAIN YOUR REASONING: Before showing the document list, explain which evidence packet rules you found and how you applied them. Cite specific rules that influenced document ordering, inclusion, or exclusion. If no rules were provided, state that and explain the default ordering logic you used.",
+            "7. EXPLAIN YOUR REASONING: Before showing the document list, explain which evidence packet rules you found and how you applied them. Cite specific rules that influenced document ordering, inclusion, or exclusion. If no rules were found in the knowledge base, state that and explain the default ordering logic you used.",
             "8. After the user confirms (or adjusts), call build_evidence_packet with the verified ordered list using doc_id for each document. Set hearing_type to 'AO' or 'HO' based on step 2.",
             "Do NOT skip straight to build_evidence_packet without showing the user the proposed list first.",
           ].join("\n"),
         };
-
-        if (packetKnowledge.rawText) {
-          result.evidencePacketRules = {
-            source: packetKnowledge.source,
-            content: packetKnowledge.rawText,
-          };
-        }
 
         return JSON.stringify(result);
       }
@@ -2614,7 +2517,7 @@ Two-step flow:
 
 Requirements:
 - ALWAYS start with create_evidence_packet — never skip straight to build_evidence_packet.
-- Use the evidence/hearing packet rules from knowledge to determine document order.
+- Use the PRACTICE KNOWLEDGE meta-index to find the section tagged with "Applies to: evidence_packet", then read_file it to get the full evidence packet rules. Follow those rules for document ordering, inclusion/exclusion, and packet structure.
 - Present the proposed document list to the user and wait for confirmation before building.
 - Pass \`doc_id\` values into build_evidence_packet documents[].
 - If \`doc_id\` is unavailable, pass exact \`filename\` + \`folder\` from the index.
