@@ -1904,7 +1904,7 @@ export default function FirmDashboard({
                         {uploadingTemplate ? 'Analyzing...' : '+ Upload Template'}
                         <input
                           type="file"
-                          accept=".pdf"
+                          accept=".pdf,.docx"
                           className="hidden"
                           disabled={uploadingTemplate}
                           onChange={async (e) => {

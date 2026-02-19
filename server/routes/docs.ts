@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { readdir, readFile, writeFile, mkdir, stat, unlink } from "fs/promises";
-import { join, dirname, basename, resolve, sep } from "path";
+import { join, dirname, basename, resolve, sep, extname } from "path";
+import mammoth from "mammoth";
 import { resolveFirmRoot, getClientSlug, loadClientRegistry, scanAndBuildRegistry, resolveYearFilePath } from "../lib/year-mode";
 import { exec } from "child_process";
 import { promisify } from "util";
@@ -1684,19 +1685,38 @@ app.post("/analyze-template", async (c) => {
   }
 
   try {
-    // Save uploaded PDF to temp location
-    const tmpPath = join(firmRoot, ".ai_tool", `tmp-template-${Date.now()}.pdf`);
-    await mkdir(dirname(tmpPath), { recursive: true });
+    const ext = extname(file.name).toLowerCase();
     const arrayBuffer = await file.arrayBuffer();
-    await writeFile(tmpPath, Buffer.from(arrayBuffer));
+    const tmpBase = join(firmRoot, ".ai_tool", `tmp-template-${Date.now()}`);
+    await mkdir(dirname(tmpBase), { recursive: true });
+
+    let pdfPath: string;
+    let extraCleanup: string | null = null;
+
+    if (ext === ".docx") {
+      // DOCX → HTML → PDF → images
+      const docxPath = tmpBase + ".docx";
+      await writeFile(docxPath, Buffer.from(arrayBuffer));
+      extraCleanup = docxPath;
+
+      const { value: html } = await mammoth.convertToHtml({ path: docxPath });
+      pdfPath = tmpBase + ".pdf";
+      const pdfBuffer = await htmlToPdf(html, "template");
+      await writeFile(pdfPath, pdfBuffer);
+    } else {
+      // PDF path (default)
+      pdfPath = tmpBase + ".pdf";
+      await writeFile(pdfPath, Buffer.from(arrayBuffer));
+    }
 
     // Convert to images
-    const pageCount = await getPdfPageCountPoppler(tmpPath);
+    const pageCount = await getPdfPageCountPoppler(pdfPath);
     const pagesToConvert = Math.min(pageCount, 3); // Only need first few pages
-    const images = await pdfToImages(tmpPath, 1, pagesToConvert, 200);
+    const images = await pdfToImages(pdfPath, 1, pagesToConvert, 200);
 
-    // Clean up temp file
-    await unlink(tmpPath).catch(() => {});
+    // Clean up temp files
+    await unlink(pdfPath).catch(() => {});
+    if (extraCleanup) await unlink(extraCleanup).catch(() => {});
 
     if (images.length === 0) {
       return c.json({ error: "Could not convert PDF to images" }, 500);
@@ -1756,7 +1776,7 @@ Respond with ONLY valid JSON, no markdown fences.`,
     const id = `custom-${Date.now()}`;
     const template: PacketTemplate = {
       id,
-      name: file.name.replace(/\.pdf$/i, ""),
+      name: file.name.replace(/\.(pdf|docx)$/i, ""),
       heading: String(extracted.heading || "BEFORE THE HEARING OFFICER"),
       captionPreambleLines: Array.isArray(extracted.captionPreambleLines)
         ? extracted.captionPreambleLines.map(String)
