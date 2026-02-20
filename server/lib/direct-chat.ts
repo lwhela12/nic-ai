@@ -1538,10 +1538,14 @@ async function executeTool(
   try {
     switch (toolName) {
       case "read_file": {
-        const filePath = join(caseFolder, toolInput.path);
-        // Security check - ensure path is within case folder
-        if (!filePath.startsWith(caseFolder)) {
-          return "Error: Cannot read files outside the case folder";
+        // Knowledge files live at firm root, not case folder
+        const requestedPath = typeof toolInput.path === "string" ? toolInput.path : "";
+        const isKnowledgePath = requestedPath.startsWith(".ai_tool/knowledge/");
+        const baseDir = isKnowledgePath ? resolveFirmRoot(caseFolder) : caseFolder;
+        const filePath = join(baseDir, requestedPath);
+        // Security check - ensure path is within allowed directory
+        if (!filePath.startsWith(baseDir)) {
+          return `Error: Cannot read files outside the ${isKnowledgePath ? "firm" : "case"} folder`;
         }
 
         // Handle DOCX and PDFs as non-text binaries
