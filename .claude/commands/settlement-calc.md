@@ -55,13 +55,13 @@ Calculate the complete settlement disbursement showing all deductions and client
 
 ---
 
-## DEDUCT AND RETAIN TO PAY MUSLUSKY LAW
+## DEDUCT AND RETAIN TO PAY [FIRM NAME]
 
 ### Attorney Fees
 
 | Item | Note | Fee | Reduced | Due |
 |------|------|-----|---------|-----|
-| Muslusky Law | XX% | $X,XXX.XX | $0.00 | $X,XXX.XX |
+| [Firm Name] | XX% | $X,XXX.XX | $0.00 | $X,XXX.XX |
 | **Total Attorney Fees** | | | | **$X,XXX.XX** |
 
 ### Case Expenses
@@ -104,10 +104,10 @@ reimbursed if noted above. I understand that any copay or medical bill(s) I
 paid have contributed to the net settlement. I hereby approve the above
 settlement and distribution of proceeds. I understand that any outstanding
 medical expenses related to this case unknown or not listed in this settlement
-memo will be my sole responsibility. Muslusky Law is only accountable for the
+memo will be my sole responsibility. [Firm Name] is only accountable for the
 charges listed above.
 
-Thank you for retaining MUSLUSKY LAW. It was our desire to deliver the best
+Thank you for retaining [FIRM NAME]. It was our desire to deliver the best
 possible results for you!
 
 _________________________    _________________________

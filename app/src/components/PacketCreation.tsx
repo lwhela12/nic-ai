@@ -61,6 +61,18 @@ const WarningBadge = ({ reason }: { reason?: string }) => (
   </span>
 )
 
+const SparklesPenIcon = () => (
+  <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="none">
+    {/* Pen body */}
+    <path d="M3 17l1.5-4.5L14 3l3 3-9.5 9.5L3 17z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    <path d="M11 6l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    {/* Sparkles */}
+    <path d="M16 2l.5 1.5L18 4l-1.5.5L16 6l-.5-1.5L14 4l1.5-.5L16 2z" fill="#d97706" />
+    <path d="M7 1l.35 1.05L8.4 2.4l-1.05.35L7 3.8l-.35-1.05L5.6 2.4l1.05-.35L7 1z" fill="#7c3aed" />
+    <path d="M18 10l.35 1.05 1.05.35-1.05.35L18 12.8l-.35-1.05-1.05-.35 1.05-.35L18 10z" fill="#3b82f6" />
+  </svg>
+)
+
 export default function PacketCreation({
   packetState,
   onUpdateState,
@@ -451,6 +463,7 @@ export default function PacketCreation({
             isPreviewing={isPreviewing}
             apiUrl={apiUrl}
             firmRoot={firmRoot}
+            caseFolder={caseFolder}
           />
         )}
         {activeTab === 'pii' && (
@@ -728,6 +741,7 @@ function FrontMatterTab({
   isPreviewing,
   apiUrl,
   firmRoot,
+  caseFolder,
 }: {
   frontMatter: PacketFrontMatter
   onUpdate: (field: keyof PacketFrontMatter, value: unknown) => void
@@ -739,6 +753,7 @@ function FrontMatterTab({
   isPreviewing: boolean
   apiUrl: string
   firmRoot?: string
+  caseFolder: string
 }) {
   const inputClass = "w-full text-sm border border-surface-200 rounded-lg px-3 py-2 bg-white text-brand-700 focus:outline-none focus:ring-2 focus:ring-accent-500"
   const labelClass = "block text-xs font-medium text-brand-700 mb-1"
@@ -802,6 +817,29 @@ function FrontMatterTab({
     }
   }
 
+  // AI generate issue on appeal
+  const [isGeneratingIssue, setIsGeneratingIssue] = useState(false)
+  const handleGenerateIssue = async () => {
+    setIsGeneratingIssue(true)
+    try {
+      const res = await fetch(`${apiUrl}/api/docs/generate-issue`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseFolder,
+          hearingNumber: frontMatter.hearingNumber || frontMatter.captionValues?.hearingNumber || '',
+        }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.issue) {
+          handleExtraSectionChange('issueOnAppeal', data.issue)
+        }
+      }
+    } catch { /* ignore */ }
+    setIsGeneratingIssue(false)
+  }
+
   // Ensure 7 firm block lines
   const firmLines = [...frontMatter.firmBlockLines]
   while (firmLines.length < 7) firmLines.push('')
@@ -862,7 +900,23 @@ function FrontMatterTab({
         <div className="space-y-3 p-3 bg-accent-50 rounded-lg border border-accent-200">
           {selectedTemplate.extraSections.map(section => (
             <div key={section.key}>
-              <label className={labelClass}>{section.title}</label>
+              <div className="flex items-center gap-1.5 mb-1">
+                <label className="text-xs font-medium text-brand-700">{section.title}</label>
+                {section.key === 'issueOnAppeal' && (
+                  <button
+                    onClick={handleGenerateIssue}
+                    disabled={isGeneratingIssue}
+                    className="p-0.5 rounded hover:bg-accent-100 text-brand-400 hover:text-accent-600 transition-colors disabled:opacity-50"
+                    title="Auto-generate issue statement from case data"
+                  >
+                    {isGeneratingIssue ? (
+                      <div className="w-3.5 h-3.5 border-2 border-accent-600 border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <SparklesPenIcon />
+                    )}
+                  </button>
+                )}
+              </div>
               <textarea
                 className={`${inputClass} min-h-[60px]`}
                 value={frontMatter.extraSectionValues?.[section.key] || ''}

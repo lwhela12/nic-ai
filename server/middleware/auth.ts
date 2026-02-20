@@ -133,7 +133,7 @@ export async function authMiddleware(c: Context, next: Next) {
         {
           error: "authentication_required",
           reauthRequired: true,
-          message: "Please log in to use Claude PI",
+          message: "Please log in to use Jason AI",
         },
         401
       );
@@ -167,7 +167,7 @@ export async function authMiddleware(c: Context, next: Next) {
       {
         error: "authentication_required",
         reauthRequired: true,
-        message: "Please log in to use Claude PI",
+        message: "Please log in to use Jason AI",
       },
       401
     );

@@ -227,12 +227,12 @@ the demand deadline date of this letter with an evaluation of this claim.
 
 Sincerely,
 
-MUSLUSKY LAW
+[FIRM NAME]
 
 
-Adam L. Muslusky, Esq.
+[Attorney Name, Esq.]
 
-ALM/tl
+[Initials]/tl
 Enclosures: supporting documents
 ```
 
@@ -310,12 +310,12 @@ for $[DEMAND AMOUNT - must be less than 3P per-person limit].
 
 Sincerely,
 
-MUSLUSKY LAW
+[FIRM NAME]
 
 
-Adam L. Muslusky, Esq.
+[Attorney Name, Esq.]
 
-ALM/tl
+[Initials]/tl
 Enclosures: supporting documents
 ```
 

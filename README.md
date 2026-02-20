@@ -1,10 +1,10 @@
-# Claude PI
+# Jason AI
 
 Personal Injury case management tool powered by Claude agents.
 
 ## Overview
 
-Claude PI helps law firms manage personal injury cases by:
+Jason AI helps law firms manage personal injury cases by:
 - **Document Indexing** - Automatically parses and indexes case documents (PDFs, images)
 - **Case Analysis** - Answers questions about cases using indexed data
 - **Work Product Generation** - Drafts demand letters, case memos, and settlement calculations

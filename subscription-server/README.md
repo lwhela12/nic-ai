@@ -1,6 +1,6 @@
-# Claude PI Subscription Server
+# Jason AI Subscription Server
 
-Backend service for managing user subscriptions, authentication, and API key distribution for Claude PI.
+Backend service for managing user subscriptions, authentication, and API key distribution for Jason AI.
 
 ## Setup
 

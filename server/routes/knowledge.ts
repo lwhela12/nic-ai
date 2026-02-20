@@ -7,7 +7,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getSDKCliOptions } from "../lib/sdk-cli-options";
 import { readdir, readFile, writeFile, mkdir, copyFile, unlink, stat } from "fs/promises";
 import { join, dirname, basename, extname } from "path";
-import { extractTextFromPdf, extractTextFromDocx, extractStylesFromDocx, DocxStyles } from "../lib/extract";
+import { extractTextFromPdf, extractTextFromDocx, extractStylesFromDocx, extractHtmlFromDocx, DocxStyles, DocxHtmlExtract } from "../lib/extract";
 import { requireFirmAccess } from "../lib/team-access";
 import { BUILT_IN_TEMPLATES, type PacketTemplate } from "../lib/evidence-packet";
 import { generateSectionTags, generateTagsForAllSections, generateKnowledgeSummary } from "../lib/knowledge-tagger";
@@ -801,6 +801,90 @@ interface TemplateEntry {
   packetConfig?: PacketTemplate;      // structured metadata, only for packet type
 }
 
+interface PacketTemplateAnalysisResult {
+  template: PacketTemplate;
+  sampleClaimantName?: string;
+  sampleFirmName?: string;
+  sampleAttorneyNames: string[];
+  sampleCaptionValues: Record<string, string>;
+}
+
+const DOCUMENT_INDEX_HEADING_RE = /\bDOCUMENT\s+INDEX\b/i;
+
+function escapeRegExp(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceTextInsensitive(source: string, target: string, replacement: string): string {
+  if (!target) return source;
+  return source.replace(new RegExp(escapeRegExp(target), "gi"), replacement);
+}
+
+function sanitizePacketHtml(html: string): string {
+  let normalized = html
+    .replace(/^[\s\S]*?<body[^>]*>/i, "")
+    .replace(/<\/body>\s*<\/html>\s*$/i, "")
+    .replace(/<\/body>/i, "")
+    .trim();
+
+  return normalized || html.trim();
+}
+
+function applyPacketTemplatePlaceholders(
+  html: string,
+  analysis: PacketTemplateAnalysisResult
+): string {
+  let result = sanitizePacketHtml(html);
+
+  result = replaceTextInsensitive(
+    result,
+    analysis.sampleClaimantName || "",
+    "{{claimantName}}"
+  );
+
+  for (const [key, value] of Object.entries(analysis.sampleCaptionValues || {})) {
+    if (!value) continue;
+    result = replaceTextInsensitive(result, value, `{{${key}}}`);
+  }
+
+  if (analysis.sampleFirmName) {
+    result = replaceTextInsensitive(result, analysis.sampleFirmName, "counsel");
+  }
+
+  for (const attorney of analysis.sampleAttorneyNames) {
+    if (!attorney) continue;
+    result = replaceTextInsensitive(result, attorney, "counsel");
+  }
+
+  // If the template text already includes a document index heading, avoid
+  // forcing a duplicate section by inserting a marker for the HTML renderer.
+  if (!DOCUMENT_INDEX_HEADING_RE.test(result)) {
+    result = `${result}\n\n{{documentIndex}}`;
+  }
+
+  return result.trim();
+}
+
+function applyPacketHtmlTemplate(
+  packetTemplate: PacketTemplate,
+  html: DocxHtmlExtract | null,
+  analysis: PacketTemplateAnalysisResult | undefined
+): PacketTemplate {
+  if (!html || !analysis) return packetTemplate;
+
+  const templateHtml = applyPacketTemplatePlaceholders(html.html, analysis);
+
+  const templateCss = html.css;
+  if (templateHtml) {
+    packetTemplate.htmlTemplate = templateHtml;
+  }
+  if (templateCss) {
+    packetTemplate.htmlTemplateCss = templateCss;
+  }
+
+  return packetTemplate;
+}
+
 interface TemplatesIndex {
   templates: TemplateEntry[];
 }
@@ -961,6 +1045,7 @@ app.post("/doc-templates/:id/parse", async (c) => {
     // Extract text based on file type
     let extractedText: string;
     let extractedStyles: DocxStyles | null = null;
+    let extractedHtml: DocxHtmlExtract | null = null;
 
     if (ext === ".pdf") {
       extractedText = await extractTextFromPdf(sourceFilePath);
@@ -971,6 +1056,11 @@ app.post("/doc-templates/:id/parse", async (c) => {
         extractedStyles = await extractStylesFromDocx(sourceFilePath);
       } catch (styleErr) {
         console.error("Style extraction failed (non-fatal):", styleErr);
+      }
+      try {
+        extractedHtml = await extractHtmlFromDocx(sourceFilePath);
+      } catch (htmlErr) {
+        console.error("DOCX HTML extraction failed (non-fatal):", htmlErr);
       }
     } else {
       return c.json({ error: "Unsupported file format" }, 400);
@@ -983,9 +1073,16 @@ app.post("/doc-templates/:id/parse", async (c) => {
     // Auto-detect if this is an evidence packet front matter template
     const detectedAsPacket = isPacketTemplate(extractedText);
     let packetConfig: PacketTemplate | undefined;
+    let packetAnalysis: PacketTemplateAnalysisResult | undefined;
     if (detectedAsPacket) {
       try {
-        packetConfig = await analyzePacketTemplateWithAI(extractedText, templateName);
+        packetAnalysis = await analyzePacketTemplateWithAI(extractedText, templateName);
+        packetConfig = packetAnalysis.template;
+        if (extractedHtml) {
+          packetConfig = applyPacketHtmlTemplate(packetConfig, extractedHtml, packetAnalysis);
+          packetConfig.renderMode = "template-native";
+          packetConfig.suppressPleadingLineNumbers = !detectPleadingLineNumbers(extractedText, extractedHtml.html);
+        }
       } catch (err) {
         console.warn("[Parse] Packet template analysis failed (non-fatal):", err instanceof Error ? err.message : err);
       }
@@ -1019,6 +1116,9 @@ app.post("/doc-templates/:id/parse", async (c) => {
 
     const existingIdx = index.templates.findIndex((t) => t.id === templateId);
     const existing = existingIdx >= 0 ? index.templates[existingIdx] : null;
+    if (packetConfig) {
+      packetConfig = normalizeParsedPacketTemplateIds(packetConfig, templateId, existing?.packetConfig);
+    }
 
     // Only preserve description if user manually set it; regenerate AI descriptions
     const isUserDescription = existing?.descriptionSource === "user";
@@ -1113,10 +1213,12 @@ async function processTemplatesWithLimit(
         const sourceFilePath = join(sourceDir, sourceFile);
         const sourceStat = await stat(sourceFilePath);
         const ext = extname(sourceFile).toLowerCase();
+        const isDocxSource = ext === ".docx";
 
         // Extract text
         let extractedText: string;
         let extractedStyles: DocxStyles | null = null;
+        let extractedHtml: DocxHtmlExtract | null = null;
 
         if (ext === ".pdf") {
           extractedText = await extractTextFromPdf(sourceFilePath);
@@ -1126,6 +1228,11 @@ async function processTemplatesWithLimit(
             extractedStyles = await extractStylesFromDocx(sourceFilePath);
           } catch {
             // Non-fatal
+          }
+          try {
+            extractedHtml = await extractHtmlFromDocx(sourceFilePath);
+          } catch (htmlErr) {
+            console.warn(`[Batch Parse] DOCX HTML extraction failed for ${template.id} (non-fatal):`, htmlErr instanceof Error ? htmlErr.message : htmlErr);
           }
         } else {
           results[index] = { id: template.id, success: false, error: "Unsupported format" };
@@ -1139,9 +1246,19 @@ async function processTemplatesWithLimit(
         // Auto-detect if this is an evidence packet front matter template
         const detectedAsPacket = isPacketTemplate(extractedText);
         let packetConfig: PacketTemplate | undefined;
+        let packetAnalysis: PacketTemplateAnalysisResult | undefined;
         if (detectedAsPacket) {
           try {
-            packetConfig = await analyzePacketTemplateWithAI(extractedText, templateName);
+            packetAnalysis = await analyzePacketTemplateWithAI(extractedText, templateName);
+            packetConfig = packetAnalysis.template;
+            if (extractedHtml) {
+              packetConfig = applyPacketHtmlTemplate(packetConfig, extractedHtml, packetAnalysis);
+              packetConfig.renderMode = "template-native";
+              packetConfig.suppressPleadingLineNumbers = !detectPleadingLineNumbers(extractedText, extractedHtml.html);
+            } else if (isDocxSource) {
+              packetConfig.renderMode = "template-native";
+              packetConfig.suppressPleadingLineNumbers = true;
+            }
           } catch (err) {
             console.warn(`[Batch Parse] Packet analysis failed for ${template.id} (non-fatal):`, err instanceof Error ? err.message : err);
           }
@@ -1175,6 +1292,9 @@ async function processTemplatesWithLimit(
 
         const existingIdx = indexData.templates.findIndex((t) => t.id === template.id);
         const existing = existingIdx >= 0 ? indexData.templates[existingIdx] : null;
+        if (packetConfig) {
+          packetConfig = normalizeParsedPacketTemplateIds(packetConfig, template.id, existing?.packetConfig);
+        }
 
         // Only preserve description if user manually set it; regenerate AI descriptions
         const isUserDescription = existing?.descriptionSource === "user";
@@ -1677,11 +1797,79 @@ function isPacketTemplate(extractedText: string): boolean {
   return false;
 }
 
+function detectPleadingLineNumbers(extractedText: string, extractedHtml?: string | null): boolean {
+  const htmlText = (extractedHtml ?? "")
+    .replace(/<[^>]*>/g, "\n")
+    .replace(/\u00a0/g, " ")
+    .replace(/&nbsp;/g, " ");
+  const allText = `${extractedText}\n${htmlText}`;
+  const normalizedLines = allText
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const standaloneLineNumbers = normalizedLines.filter((line) => /^\d{1,3}$/.test(line)).length;
+  const gutterAlignedLines = normalizedLines.filter((line) => /^\d{1,3}\s{2,}\S/.test(line)).length;
+  const shortNumberHeadings = normalizedLines.filter((line) => /^\d{1,3}\s*\S{1,30}$/.test(line)).length;
+  const repeatedStandaloneNumbers = (allText.match(/(?:^|\n)\s*\d{1,3}\s*(?:\n)/g) || []).length;
+  const sequentialNumbers = Array.from(allText.matchAll(/(?:^|\n)\s*(\d{1,3})\s*(?:\n)/g))
+    .map((match) => Number.parseInt(match[1], 10))
+    .filter((value) => Number.isFinite(value));
+
+  let consecutiveRun = 0;
+  let maxConsecutiveRun = 0;
+  let previous: number | null = null;
+  for (const value of sequentialNumbers) {
+    if (previous !== null && value === previous + 1) {
+      consecutiveRun += 1;
+    } else {
+      consecutiveRun = 1;
+    }
+    previous = value;
+    if (consecutiveRun > maxConsecutiveRun) {
+      maxConsecutiveRun = consecutiveRun;
+    }
+  }
+
+  return Math.max(
+    standaloneLineNumbers,
+    gutterAlignedLines,
+    shortNumberHeadings,
+    repeatedStandaloneNumbers,
+    maxConsecutiveRun * 2
+  ) >= 8;
+}
+
+function normalizeParsedPacketTemplateIds(
+  packetConfig: PacketTemplate,
+  sourceTemplateId: string,
+  existingPacketConfig?: PacketTemplate
+): PacketTemplate {
+  const legacyIds = new Set<string>();
+
+  if (existingPacketConfig?.id) legacyIds.add(existingPacketConfig.id);
+  if (Array.isArray(existingPacketConfig?.legacyPacketIds)) {
+    for (const legacy of existingPacketConfig.legacyPacketIds) {
+      if (legacy) legacyIds.add(legacy);
+    }
+  }
+
+  packetConfig.id = sourceTemplateId;
+  if (legacyIds.size > 0) {
+    packetConfig.legacyPacketIds = [...legacyIds].filter((id) => id !== sourceTemplateId);
+  } else {
+    delete packetConfig.legacyPacketIds;
+  }
+
+  return packetConfig;
+}
+
 // Analyze extracted text to produce structured PacketTemplate metadata
 async function analyzePacketTemplateWithAI(
   rawText: string,
   templateName: string
-): Promise<PacketTemplate> {
+): Promise<PacketTemplateAnalysisResult> {
   // Provide the built-in AO template as a reference example so the AI
   // understands the expected output format — especially genericized text.
   const referenceExample = JSON.stringify({
@@ -1910,7 +2098,14 @@ Respond with ONLY valid JSON, no markdown fences.`;
     template[field] = text;
   }
 
-  return template;
+  // Keep extracted exemplar values for DOCX HTML genericization.
+  return {
+    template,
+    sampleClaimantName: sampleName,
+    sampleFirmName: sampleFirmName,
+    sampleAttorneyNames,
+    sampleCaptionValues,
+  };
 }
 
 // Reindex meta with semantic tags

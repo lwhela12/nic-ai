@@ -137,7 +137,23 @@ export function buildFirmBlockHtml(firmBlockLines: string[]): string {
 // Full HTML wrapper with pleading paper CSS
 // ---------------------------------------------------------------------------
 
-export function wrapWithPleadingCss(bodyHtml: string, extraCss?: string): string {
+type PleadingRenderMode = "template-native" | "pleading-legacy";
+
+interface PleadingRenderOptions {
+  renderMode?: PleadingRenderMode;
+  suppressPleadingLineNumbers?: boolean;
+}
+
+export function wrapWithPleadingCss(
+  bodyHtml: string,
+  extraCss?: string,
+  options: PleadingRenderOptions = {}
+): string {
+  const renderMode = options.renderMode ?? "pleading-legacy";
+  const suppressPleadingLineNumbers = options.suppressPleadingLineNumbers ?? false;
+  const isTemplateNative = renderMode === "template-native";
+  const showPleadingGutter = !isTemplateNative || !suppressPleadingLineNumbers;
+
   const lineNumbers = Array.from({ length: 28 }, (_, i) =>
     `<div class="pleading-line-number">${i + 1}</div>`
   ).join("\n");
@@ -161,6 +177,7 @@ export function wrapWithPleadingCss(bodyHtml: string, extraCss?: string): string
     padding: 0;
   }
 
+${showPleadingGutter ? `
   /* Pleading paper gutter + line numbers */
   .pleading-gutter {
     position: fixed;
@@ -190,11 +207,11 @@ export function wrapWithPleadingCss(bodyHtml: string, extraCss?: string): string
     padding-right: 0.09in;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
-  }
+  }` : ""}
 
   /* Main content area */
   .pleading-content {
-    margin-left: 0.60in;
+    margin-left: ${showPleadingGutter ? "0.60in" : "0in"};
     margin-right: 0.30in;
     padding-top: 0.38in;
   }
@@ -331,9 +348,10 @@ export function wrapWithPleadingCss(bodyHtml: string, extraCss?: string): string
 </style>
 </head>
 <body>
+${showPleadingGutter ? `
   <div class="pleading-gutter" aria-hidden="true">
     ${lineNumbers}
-  </div>
+  </div>` : ""}
   <div class="pleading-content">
     ${bodyHtml}
   </div>
@@ -459,7 +477,8 @@ export async function renderHtmlFrontMatter(
   // If template doesn't include dynamic sections, append them.
   // Templates that render affirmation/certificate directly (detected by
   // presence of affirmation keywords) should not get them auto-appended.
-  if (!tpl.htmlTemplate!.includes("{{documentIndex}}")) {
+  const templateHasDocumentIndexHeading = /document\s*index/i.test(tpl.htmlTemplate!);
+  if (!tpl.htmlTemplate!.includes("{{documentIndex}}") && !templateHasDocumentIndexHeading) {
     htmlBody += documentIndexHtml;
   }
   const templateHandlesAffirmation = tpl.htmlTemplate!.includes("{{affirmationSection}}")
@@ -468,7 +487,12 @@ export async function renderHtmlFrontMatter(
     htmlBody += affirmationHtml;
   }
 
-  const fullHtml = wrapWithPleadingCss(htmlBody, tpl.htmlTemplateCss);
+  const fullHtml = wrapWithPleadingCss(htmlBody, tpl.htmlTemplateCss, {
+    renderMode: tpl.renderMode ?? "pleading-legacy",
+    suppressPleadingLineNumbers: tpl.renderMode === "template-native"
+      ? (tpl.suppressPleadingLineNumbers ?? true)
+      : false,
+  });
   return htmlToPdf(fullHtml, "front-matter", {
     documentType: "hearing_decision",
   });

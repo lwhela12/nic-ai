@@ -105,7 +105,7 @@ export default function Login({ apiUrl, onLoginSuccess, initialError, firmRoot }
           <div className="w-10 h-10 rounded-xl bg-brand-900 flex items-center justify-center text-white">
             <ScaleIcon />
           </div>
-          <h1 className="font-serif text-3xl text-brand-900">Claude PI</h1>
+          <h1 className="font-serif text-3xl text-brand-900">Jason AI</h1>
         </div>
         <p className="text-brand-500 mb-8">Personal Injury Case Management</p>
 

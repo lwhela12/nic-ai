@@ -88,7 +88,7 @@ function createSplashWindow(): void {
       <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Claude PI</title>
+        <title>Jason AI</title>
         <style>
           :root {
             color-scheme: light;
@@ -146,7 +146,7 @@ function createSplashWindow(): void {
       </head>
       <body>
         <div class="card">
-          <h1>Claude PI</h1>
+          <h1>Jason AI</h1>
           <p>Starting services...</p>
           <div class="row">
             <div class="spinner"></div>
@@ -178,7 +178,7 @@ function createWindow(): void {
     height: 900,
     minWidth: 1000,
     minHeight: 600,
-    title: "Claude PI",
+    title: "Jason AI",
     webPreferences: {
       preload: join(__dirname, "preload.js"),
       nodeIntegration: false,
@@ -259,7 +259,7 @@ async function ensureCLIAvailable(): Promise<string | null> {
       title: "Node.js Required",
       message: "Node.js is not installed",
       detail:
-        "Claude PI requires Node.js to be installed.\n\n" +
+        "Jason AI requires Node.js to be installed.\n\n" +
         "Please install Node.js from https://nodejs.org and restart the app.\n\n" +
         "After installing, you may need to restart your computer for PATH changes to take effect.",
       buttons: ["OK"],
@@ -276,7 +276,7 @@ async function ensureCLIAvailable(): Promise<string | null> {
     title: "Setup Required",
     message: "Claude Code CLI is required",
     detail:
-      "Claude PI needs the Claude Code CLI to process documents.\n\n" +
+      "Jason AI needs the Claude Code CLI to process documents.\n\n" +
       "Would you like to install it now? This will run:\n" +
       "npm install -g @anthropic-ai/claude-code\n\n" +
       "This may take a few minutes.",
@@ -401,7 +401,7 @@ async function ensureCLIAvailable(): Promise<string | null> {
       "Please try installing manually:\n\n" +
       "1. Open Command Prompt (Windows) or Terminal (Mac/Linux)\n" +
       "2. Run: npm install -g @anthropic-ai/claude-code\n" +
-      "3. Restart Claude PI\n\n" +
+      "3. Restart Jason AI\n\n" +
       "On Mac/Linux, you may need to use: sudo npm install -g @anthropic-ai/claude-code",
     buttons: ["OK"],
   });

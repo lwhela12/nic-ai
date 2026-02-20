@@ -27,11 +27,11 @@
 
 ### Firm Information
 ```
-Muslusky Law
-3030 S. Jones Blvd., #108
-Las Vegas, Nevada 89146
-Phone: 702.302.2277 | Fax: 702.912.5410
-www.musluskylaw.com
+[Firm Name]
+[Street Address]
+[City, State ZIP]
+Phone: [Phone] | Fax: [Fax]
+[Website]
 
-Attorney: Adam L. Muslusky, Esq.
+Attorney: [Attorney Name, Esq.]
 ```

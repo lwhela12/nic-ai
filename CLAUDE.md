@@ -1,4 +1,4 @@
-# Claude PI - Development Guide
+# Jason AI - Development Guide
 
 This repo contains a Personal Injury case management tool powered by Claude agents.
 

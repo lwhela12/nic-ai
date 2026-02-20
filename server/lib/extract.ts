@@ -113,6 +113,11 @@ export interface DocxStyles {
   letterheadImage?: string; // base64 data URI
 }
 
+export interface DocxHtmlExtract {
+  html: string;
+  css: string;
+}
+
 /**
  * Extract text content from a PDF file using pdftotext (poppler).
  * For scanned/image PDFs, returns empty string to trigger agent fallback
@@ -148,6 +153,39 @@ export async function extractTextFromDocx(filePath: string): Promise<string> {
   const dataBuffer = await readFile(filePath);
   const result = await mammoth.extractRawText({ buffer: dataBuffer });
   return result.value;
+}
+
+/**
+ * Extract rendered HTML and embedded CSS from a DOCX file.
+ */
+export async function extractHtmlFromDocx(filePath: string): Promise<DocxHtmlExtract> {
+  const dataBuffer = await readFile(filePath);
+  const result = await mammoth.convertToHtml(
+    { buffer: dataBuffer },
+    {
+      convertImage: mammoth.images.inline(async (image) => {
+        const base64 = await image.read("base64");
+        return {
+          src: `data:${image.contentType};base64,${base64}`,
+        };
+      }),
+    }
+  );
+
+  let html = result.value || "";
+  const cssFragments: string[] = [];
+
+  // Pull style blocks into a separate stylesheet while keeping body html clean.
+  html = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, (match) => {
+    const style = match.replace(/^<style[^>]*>/i, "").replace(/<\/style>$/i, "").trim();
+    if (style) cssFragments.push(style);
+    return "";
+  });
+
+  return {
+    html: html.trim(),
+    css: cssFragments.join("\n\n"),
+  };
 }
 
 /**

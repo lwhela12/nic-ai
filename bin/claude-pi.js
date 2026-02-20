@@ -103,7 +103,7 @@ function displayOfflineWarning(config) {
  * Main entry point
  */
 async function main() {
-  console.log('\n🏛️  Claude PI - Personal Injury Case Management\n');
+  console.log('\n🏛️  Jason AI - Personal Injury Case Management\n');
 
   // Load existing config
   let config = loadConfig();
@@ -187,7 +187,7 @@ async function startServer() {
 
     const port = server.default?.port || 3001;
     console.log(`\n🚀 Server running at http://localhost:${port}`);
-    console.log('   Open this URL in your browser to use Claude PI\n');
+    console.log('   Open this URL in your browser to use Jason AI\n');
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);
