@@ -666,7 +666,7 @@ function CaptionFieldsGrid({
 
   const getValue = (key: string): string => {
     if (key in WELL_KNOWN_KEYS) {
-      return String((frontMatter as Record<string, unknown>)[key] || '')
+      return String((frontMatter as unknown as Record<string, unknown>)[key] || '')
     }
     return frontMatter.captionValues?.[key] || ''
   }
