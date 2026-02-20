@@ -49,10 +49,13 @@ export function buildDocumentIndexHtml(
     })
     .join("\n");
 
+  const preambleHtml = counselPreamble
+    ? `\n  <p class="counsel-preamble">${escapeHtml(counselPreamble)}</p>`
+    : "";
+
   return `
 <div class="document-index-section">
-  <h2 class="section-title">${escapeHtml(indexTitle)}</h2>
-  <p class="counsel-preamble">${escapeHtml(counselPreamble)}</p>
+  <h2 class="section-title">${escapeHtml(indexTitle)}</h2>${preambleHtml}
   <table class="toc-table">
     <thead>
       <tr><th class="toc-doc-header">Document</th><th class="toc-pages-header">Page(s)</th></tr>
@@ -77,11 +80,19 @@ export function buildAffirmationHtml(options: {
   serviceMethod: string;
   recipients: string[];
   signerName: string;
+  signerBlockAlign?: "left" | "right";
+  signatureFirmBlock?: string;
   servedBy?: string;
 }): string {
   const recipientItems = options.recipients.length > 0
     ? options.recipients.map(r => `<p class="recipient">${escapeHtml(r)}</p>`).join("\n")
     : `<p class="recipient">Recipient details to be provided by counsel.</p>`;
+  const signerAlign = options.signerBlockAlign === "left" ? "left" : "right";
+  const signatureFirmBlock = (options.signatureFirmBlock || "").trim()
+    ? `<div class="signature-firm-block">${options.signatureFirmBlock}</div>`
+    : "";
+  const signerClass = `signer-block signer-block-${signerAlign}`;
+  const signerStyle = `text-align: ${signerAlign};`;
 
   return `
 <div class="affirmation-section" style="page-break-before: always;">
@@ -89,9 +100,10 @@ export function buildAffirmationHtml(options: {
   <p>${escapeHtml(options.affirmationText)}</p>
   <p class="dated-line">Dated: ${escapeHtml(options.serviceDate)}</p>
 
-  <div class="signer-block">
+  <div class="${signerClass}" style="${signerStyle}">
     <p>Claimant's Counsel</p>
     <p>${escapeHtml(options.signerName)}</p>
+    ${signatureFirmBlock}
   </div>
 
   <h2 class="section-title cert-title">${escapeHtml(options.certTitle)}</h2>
@@ -243,8 +255,45 @@ export function wrapWithPleadingCss(bodyHtml: string, extraCss?: string): string
     width: 80pt;
   }
 
+  /* Caption two-column layout */
+  .caption-grid {
+    display: flex;
+    margin: 8pt 0 12pt;
+    font-size: 12pt;
+  }
+  .caption-left {
+    flex: 1;
+    max-width: 52%;
+  }
+  .caption-divider {
+    width: 20pt;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    font-size: 11pt;
+    line-height: 1.4;
+    color: #666;
+  }
+  .caption-right {
+    flex: 1;
+    padding-left: 4pt;
+  }
+  .caption-field {
+    margin-bottom: 6pt;
+  }
+  .caption-field-label {
+    font-weight: bold;
+  }
+  .caption-vs {
+    margin: 4pt 0;
+  }
+
   /* Affirmation section */
   .affirmation-section .dated-line {
+    margin-top: 16pt;
+    margin-bottom: 6pt;
+  }
+  .dated-line {
     margin-top: 16pt;
     margin-bottom: 6pt;
   }
@@ -253,6 +302,15 @@ export function wrapWithPleadingCss(bodyHtml: string, extraCss?: string): string
     margin-top: 40pt;
     margin-bottom: 24pt;
     font-size: 10.5pt;
+  }
+  .signer-block-left {
+    text-align: left;
+  }
+  .signer-block-right {
+    text-align: right;
+  }
+  .signature-firm-block {
+    margin-top: 12pt;
   }
   .cert-title {
     margin-top: 24pt;
@@ -327,9 +385,37 @@ export async function renderHtmlFrontMatter(
     }
   }
 
+  // Service-related values (available to HTML templates that render these directly)
+  const serviceDate = options.service?.serviceDate || new Date().toLocaleDateString("en-US");
+  values.serviceDate = serviceDate;
+  values.serviceMethod = options.service?.serviceMethod || "Via E-File";
+  values.servedBy = options.service?.servedBy || "An employee of counsel";
+  if (options.service?.recipients && options.service.recipients.length > 0) {
+    values.recipients = options.service.recipients.map(r => `<p class="recipient">${escapeHtml(r)}</p>`).join("\n");
+  } else {
+    values.recipients = `<p class="recipient">Recipient details to be provided by counsel.</p>`;
+  }
+
   // Build firm block
+  const firmBlock = options.firmBlockLines
+    ? buildFirmBlockHtml(options.firmBlockLines)
+    : "";
+  const firmPos = tpl.firmBlockPosition ?? "header";
+  const signatureFirmBlock = firmPos === "signature" ? firmBlock : "";
+
+  // Build firm block (backward-compatible placeholder when template expects
+  // `{{firmBlock}}` while intentionally using signature placement).
   if (options.firmBlockLines) {
-    values.firmBlock = buildFirmBlockHtml(options.firmBlockLines);
+    if (firmPos === "header") {
+      values.firmBlock = firmBlock;
+      values.signatureFirmBlock = "";
+    } else {
+      values.firmBlock = "";
+      values.signatureFirmBlock = firmBlock;
+    }
+  } else {
+    values.firmBlock = "";
+    values.signatureFirmBlock = "";
   }
 
   // Build document index HTML
@@ -337,15 +423,21 @@ export async function renderHtmlFrontMatter(
     || "COMES NOW, {{claimantName}}, by and through counsel, and submits the attached documentation for consideration in the above-cited matter.";
   const counselPreamble = counselPreambleRaw.replace(/\{\{claimantName\}\}/g, options.caption.claimantName);
 
+  // If the htmlTemplate already contains a "COMES NOW" paragraph (from the
+  // original DOCX), skip adding the counsel preamble inside the document index
+  // to avoid duplicating it.  The template's own copy will be interpolated
+  // with {{claimantName}} during the normal placeholder pass.
+  const templateAlreadyHasPreamble = /comes\s+now/i.test(tpl.htmlTemplate!);
+  const effectivePreamble = templateAlreadyHasPreamble ? "" : counselPreamble;
+
   const documentIndexHtml = buildDocumentIndexHtml(
     tocEntries,
     tpl.indexTitle || "DOCUMENT INDEX",
-    counselPreamble,
+    effectivePreamble,
   );
   values.documentIndex = documentIndexHtml;
 
   // Build affirmation HTML
-  const serviceDate = options.service?.serviceDate || new Date().toLocaleDateString("en-US");
   const affirmationHtml = buildAffirmationHtml({
     affirmationTitle: tpl.affirmationTitle || "AFFIRMATION",
     affirmationText: tpl.affirmationText || "Pursuant to NRS 239B, the undersigned affirms the attached documents do not expose the personal information of any person.",
@@ -355,6 +447,8 @@ export async function renderHtmlFrontMatter(
     serviceMethod: options.service?.serviceMethod || "Via E-File",
     recipients: options.service?.recipients || [],
     signerName: values.signerName,
+    signerBlockAlign: tpl.signerBlockAlign ?? "right",
+    signatureFirmBlock,
     servedBy: options.service?.servedBy,
   });
   values.affirmationSection = affirmationHtml;
@@ -362,16 +456,22 @@ export async function renderHtmlFrontMatter(
   // Interpolate template
   let htmlBody = interpolateTemplate(tpl.htmlTemplate!, values);
 
-  // If template doesn't include dynamic sections, append them
+  // If template doesn't include dynamic sections, append them.
+  // Templates that render affirmation/certificate directly (detected by
+  // presence of affirmation keywords) should not get them auto-appended.
   if (!tpl.htmlTemplate!.includes("{{documentIndex}}")) {
     htmlBody += documentIndexHtml;
   }
-  if (options.includeAffirmationPage !== false && !tpl.htmlTemplate!.includes("{{affirmationSection}}")) {
+  const templateHandlesAffirmation = tpl.htmlTemplate!.includes("{{affirmationSection}}")
+    || /affirmation|certificate\s+of\s+(service|mailing)/i.test(tpl.htmlTemplate!);
+  if (options.includeAffirmationPage !== false && !templateHandlesAffirmation) {
     htmlBody += affirmationHtml;
   }
 
   const fullHtml = wrapWithPleadingCss(htmlBody, tpl.htmlTemplateCss);
-  return htmlToPdf(fullHtml, "front-matter");
+  return htmlToPdf(fullHtml, "front-matter", {
+    documentType: "hearing_decision",
+  });
 }
 
 // ---------------------------------------------------------------------------

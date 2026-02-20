@@ -30,6 +30,12 @@ export interface PacketTemplate {
   builtIn?: boolean;
   htmlTemplate?: string;
   htmlTemplateCss?: string;
+  /** Where to place the firm/attorney info block.
+   *  "header"    – top-left of first page (default, standard HO templates)
+   *  "signature" – in the signer block on the affirmation page only */
+  firmBlockPosition?: "header" | "signature";
+  /** Alignment of the signer/attorney block on the affirmation page. */
+  signerBlockAlign?: "left" | "right";
 }
 
 export const BUILT_IN_TEMPLATES: PacketTemplate[] = [
@@ -829,6 +835,23 @@ function maskSensitive(value: string): string {
   return `${"*".repeat(Math.max(4, value.length - 4))}${value.slice(-4)}`;
 }
 
+/**
+ * Replace {{key}} placeholders in template text with values from the caption.
+ * Checks top-level caption properties first, then captionValues map.
+ */
+function interpolateTemplateText(
+  text: string,
+  caption: EvidencePacketCaption,
+): string {
+  return text.replace(/\{\{(\w+)\}\}/g, (match, key) => {
+    const topLevel = (caption as Record<string, unknown>)[key];
+    if (typeof topLevel === "string" && topLevel) return topLevel;
+    const fromValues = caption.captionValues?.[key];
+    if (typeof fromValues === "string" && fromValues) return fromValues;
+    return match; // leave placeholder if no value available
+  });
+}
+
 function addIndexPages(
   pdf: PDFDocument,
   regularFont: PDFFont,
@@ -839,7 +862,8 @@ function addIndexPages(
   const pages: PDFPage[] = [];
   let page = pdf.addPage([612, 792]);
   pages.push(page);
-  const firmBlockBottomY = drawPleadingPaper(page, regularFont, options.firmBlockLines, 1, true);
+  const showFirmAtTop = (options.template?.firmBlockPosition ?? "header") === "header";
+  const firmBlockBottomY = drawPleadingPaper(page, regularFont, options.firmBlockLines, 1, showFirmAtTop);
   const baseFirstCaptionLineY = 693;
   const requiredCaptionGap = 16;
   const preferredExtraDrop = 64;
@@ -877,7 +901,8 @@ function addIndexPages(
   const captionFieldSpacing = 20;
   for (let i = 0; i < captionFieldDefs.length; i++) {
     const field = captionFieldDefs[i];
-    const value = (options.caption as Record<string, unknown>)[field.key];
+    const value = (options.caption as Record<string, unknown>)[field.key]
+      ?? options.caption.captionValues?.[field.key];
     drawRightField(page, boldFont, regularFont, rightX, cy(693) - i * captionFieldSpacing, field.label, String(value ?? ""), 12);
   }
 
@@ -904,7 +929,7 @@ function addIndexPages(
   const counselPreambleRaw = tpl?.counselPreamble
     ?? options.caption.introductoryCounselLine
     ?? "COMES NOW, {{claimantName}}, by and through counsel, and submits the attached documentation for consideration in the above-cited matter.";
-  const intro = counselPreambleRaw.replace(/\{\{claimantName\}\}/g, options.caption.claimantName);
+  const intro = interpolateTemplateText(counselPreambleRaw, options.caption);
   const introStartY = docIndexY - 48;
   let currentY = drawWrappedText(page, intro, 84, introStartY, 470, regularFont, 12, 16);
   currentY -= 12;
@@ -952,27 +977,45 @@ function addAffirmationPage(
   drawCentered(page, boldFont, tpl?.affirmationTitle ?? "AFFIRMATION", 14, 726);
 
   const serviceDate = options.service?.serviceDate || new Date().toLocaleDateString("en-US");
-  const affirmationText = tpl?.affirmationText ??
+  const affirmationTextRaw = tpl?.affirmationText ??
     "Pursuant to NRS 239B, the undersigned affirms the attached documents do not expose the personal information of any person.";
+  const affirmationText = interpolateTemplateText(affirmationTextRaw, options.caption);
   let y = drawWrappedText(page, affirmationText, 84, 702, 470, regularFont, 11, 14);
   y -= 20;
   page.drawText(`Dated: ${serviceDate}`, { x: 84, y, size: 11, font: regularFont });
 
   const signY = y - 65;
   const signerDisplayName = options.signerName || options.caption.introductoryCounselLine || "";
-  const signerBlock = [
+  const signerLines = [
     "Claimant's Counsel",
     signerDisplayName,
   ].filter(Boolean);
+
+  // When firm info belongs in the signature block (not the page header),
+  // append the firm block lines below the signer name.
+  if (tpl?.firmBlockPosition === "signature" && options.firmBlockLines) {
+    const cleaned = options.firmBlockLines
+      .map((l) => l.trim().replace(/\[[^\]]+\]/g, "").trim())
+      .filter((l) => l && !/not configured/i.test(l));
+    // Skip lines that duplicate the signer name already shown
+    for (const line of cleaned) {
+      if (signerDisplayName && line.toLowerCase() === signerDisplayName.toLowerCase()) continue;
+      signerLines.push(line);
+    }
+  }
+
+  const signerAlign = tpl?.signerBlockAlign ?? "right";
+  const signerX = signerAlign === "left" ? 84 : 360;
   let sigLineY = signY;
-  for (const line of signerBlock) {
-    page.drawText(line, { x: 360, y: sigLineY, size: 10.5, font: regularFont });
+  for (const line of signerLines) {
+    page.drawText(line, { x: signerX, y: sigLineY, size: 10.5, font: regularFont });
     sigLineY -= 14;
   }
 
   drawCentered(page, boldFont, tpl?.certTitle ?? "CERTIFICATE OF SERVICE", 13, 430);
-  const serviceIntro = tpl?.certIntro ??
+  const serviceIntroRaw = tpl?.certIntro ??
     "I certify that a true and correct copy of the foregoing Claimant Document Index was served on the following:";
+  const serviceIntro = interpolateTemplateText(serviceIntroRaw, options.caption);
   y = drawWrappedText(page, serviceIntro, 84, 406, 470, regularFont, 11, 14);
   y -= 12;
 

@@ -382,7 +382,6 @@ export default function FirmDashboard({
   const [uploadingLogo, setUploadingLogo] = useState(false)
   const [logoDragOver, setLogoDragOver] = useState(false)
   const [packetTemplates, setPacketTemplates] = useState<Array<{ id: string; name: string; heading: string; builtIn?: boolean }>>([])
-  const [uploadingTemplate, setUploadingTemplate] = useState(false)
 
   // Team management state
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
@@ -599,7 +598,7 @@ export default function FirmDashboard({
 
   const loadPacketTemplates = useCallback(async () => {
     try {
-      const res = await fetch(`${apiUrl}/api/docs/packet-templates?root=${encodeURIComponent(firmRoot)}`)
+      const res = await fetch(`${apiUrl}/api/knowledge/packet-templates?root=${encodeURIComponent(firmRoot)}`)
       if (res.ok) {
         const data = await res.json()
         setPacketTemplates(data.templates || [])
@@ -1896,38 +1895,11 @@ export default function FirmDashboard({
                     </div>
                   </div>
 
-                  {/* Packet Templates section */}
+                  {/* Packet Templates section (auto-detected from doc-templates) */}
                   <div className="pt-3 border-t border-surface-200 mt-3">
                     <div className="flex items-center justify-between mb-2">
                       <label className="text-xs font-medium text-brand-600">Packet Templates</label>
-                      <label className={`text-xs text-accent-600 hover:text-accent-800 font-medium cursor-pointer ${uploadingTemplate ? 'opacity-50 pointer-events-none' : ''}`}>
-                        {uploadingTemplate ? 'Analyzing...' : '+ Upload Template'}
-                        <input
-                          type="file"
-                          accept=".pdf,.docx"
-                          className="hidden"
-                          disabled={uploadingTemplate}
-                          onChange={async (e) => {
-                            const file = e.target.files?.[0]
-                            if (!file) return
-                            setUploadingTemplate(true)
-                            try {
-                              const formData = new FormData()
-                              formData.append('firmRoot', firmRoot)
-                              formData.append('file', file)
-                              const res = await fetch(`${apiUrl}/api/docs/analyze-template`, {
-                                method: 'POST',
-                                body: formData,
-                              })
-                              if (res.ok) {
-                                await loadPacketTemplates()
-                              }
-                            } catch {}
-                            setUploadingTemplate(false)
-                            e.target.value = ''
-                          }}
-                        />
-                      </label>
+                      <span className="text-[10px] text-brand-400">Auto-detected from uploads</span>
                     </div>
                     <div className="space-y-1">
                       {packetTemplates.map(t => (
@@ -1936,21 +1908,6 @@ export default function FirmDashboard({
                             <p className="text-sm text-brand-800">{t.name}</p>
                             <p className="text-[11px] text-brand-400">{t.heading}{t.builtIn ? ' (Built-in)' : ''}</p>
                           </div>
-                          {!t.builtIn && (
-                            <button
-                              onClick={async () => {
-                                try {
-                                  await fetch(`${apiUrl}/api/docs/packet-templates/${t.id}?root=${encodeURIComponent(firmRoot)}`, {
-                                    method: 'DELETE',
-                                  })
-                                  await loadPacketTemplates()
-                                } catch {}
-                              }}
-                              className="text-xs text-red-400 hover:text-red-600 transition-colors"
-                            >
-                              Delete
-                            </button>
-                          )}
                         </div>
                       ))}
                       {packetTemplates.length === 0 && (

@@ -752,7 +752,7 @@ function FrontMatterTab({
     if (templatesLoadedRef.current || !firmRoot) return
     templatesLoadedRef.current = true
     // Load templates
-    fetch(`${apiUrl}/api/docs/packet-templates?root=${encodeURIComponent(firmRoot)}`)
+    fetch(`${apiUrl}/api/knowledge/packet-templates?root=${encodeURIComponent(firmRoot)}`)
       .then(res => res.ok ? res.json() : null)
       .then(data => {
         if (data?.templates) setTemplates(data.templates)

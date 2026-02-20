@@ -9,6 +9,7 @@ import { readdir, readFile, writeFile, mkdir, copyFile, unlink, stat } from "fs/
 import { join, dirname, basename, extname } from "path";
 import { extractTextFromPdf, extractTextFromDocx, extractStylesFromDocx, DocxStyles } from "../lib/extract";
 import { requireFirmAccess } from "../lib/team-access";
+import { BUILT_IN_TEMPLATES, type PacketTemplate } from "../lib/evidence-packet";
 import { generateSectionTags, generateTagsForAllSections, generateKnowledgeSummary } from "../lib/knowledge-tagger";
 import { updateMetaIndexSectionTags } from "../lib/direct-chat";
 
@@ -796,6 +797,8 @@ interface TemplateEntry {
   descriptionSource?: "ai" | "user";  // Track if description was AI-generated or user-edited
   parsedAt: string | null;
   sourceModified: string;
+  type?: "document" | "packet";       // auto-detected during parse
+  packetConfig?: PacketTemplate;      // structured metadata, only for packet type
 }
 
 interface TemplatesIndex {
@@ -977,6 +980,17 @@ app.post("/doc-templates/:id/parse", async (c) => {
     const templateName = formatTemplateName(templateId);
     const analysis = await analyzeTemplateWithAI(extractedText, templateName);
 
+    // Auto-detect if this is an evidence packet front matter template
+    const detectedAsPacket = isPacketTemplate(extractedText);
+    let packetConfig: PacketTemplate | undefined;
+    if (detectedAsPacket) {
+      try {
+        packetConfig = await analyzePacketTemplateWithAI(extractedText, templateName);
+      } catch (err) {
+        console.warn("[Parse] Packet template analysis failed (non-fatal):", err instanceof Error ? err.message : err);
+      }
+    }
+
     // Save parsed file
     const parsedFilename = `${templateId}.md`;
     const parsedFilePath = join(parsedDir, parsedFilename);
@@ -1019,6 +1033,8 @@ app.post("/doc-templates/:id/parse", async (c) => {
       descriptionSource: isUserDescription ? "user" : "ai",
       parsedAt: new Date().toISOString(),
       sourceModified: sourceStat.mtime.toISOString(),
+      type: detectedAsPacket ? "packet" : "document",
+      packetConfig,
     };
 
     if (existingIdx >= 0) {
@@ -1036,6 +1052,7 @@ app.post("/doc-templates/:id/parse", async (c) => {
       stylesExtracted: extractedStyles !== null,
       styles: extractedStyles,
       generatedDescription: analysis.description,
+      detectedType: entry.type,
     });
   } catch (error) {
     console.error("Parse template error:", error);
@@ -1119,6 +1136,17 @@ async function processTemplatesWithLimit(
         const templateName = formatTemplateName(template.id);
         const analysis = await analyzeTemplateWithAI(extractedText, templateName);
 
+        // Auto-detect if this is an evidence packet front matter template
+        const detectedAsPacket = isPacketTemplate(extractedText);
+        let packetConfig: PacketTemplate | undefined;
+        if (detectedAsPacket) {
+          try {
+            packetConfig = await analyzePacketTemplateWithAI(extractedText, templateName);
+          } catch (err) {
+            console.warn(`[Batch Parse] Packet analysis failed for ${template.id} (non-fatal):`, err instanceof Error ? err.message : err);
+          }
+        }
+
         // Save parsed file
         const parsedFilename = `${template.id}.md`;
         const parsedFilePath = join(parsedDir, parsedFilename);
@@ -1161,6 +1189,8 @@ async function processTemplatesWithLimit(
           descriptionSource: isUserDescription ? "user" : "ai",
           parsedAt: new Date().toISOString(),
           sourceModified: sourceStat.mtime.toISOString(),
+          type: detectedAsPacket ? "packet" : "document",
+          packetConfig,
         };
 
         if (existingIdx >= 0) {
@@ -1621,6 +1651,268 @@ Format everything as clean markdown. The goal is to help an AI agent understand 
   return { markdown, description };
 }
 
+// Heuristic: detect if extracted text is an evidence packet front matter template.
+// These templates have highly distinctive markers. If 3+ are present, classify as packet.
+const PACKET_MARKERS = [
+  /\bDOCUMENT\s+INDEX\b/i,
+  /\bCOMES\s+NOW\b/i,
+  /\bCERTIFICATE\s+OF\s+SERVICE\b/i,
+  /\bAFFIRMATION\b/i,
+  /\bClaim\s+No\b/i,
+  /\bAppeal\s+No\b/i,
+  /\bHearing\s+No\b/i,
+  /\bBEFORE\s+THE\s+(HEARING|APPEALS)\s+OFFICER\b/i,
+  /\bIndustrial\s+Insurance\s+Claim\b/i,
+  /\bClaimant\b/i,
+];
+
+function isPacketTemplate(extractedText: string): boolean {
+  let matchCount = 0;
+  for (const marker of PACKET_MARKERS) {
+    if (marker.test(extractedText)) {
+      matchCount++;
+      if (matchCount >= 3) return true;
+    }
+  }
+  return false;
+}
+
+// Analyze extracted text to produce structured PacketTemplate metadata
+async function analyzePacketTemplateWithAI(
+  rawText: string,
+  templateName: string
+): Promise<PacketTemplate> {
+  // Provide the built-in AO template as a reference example so the AI
+  // understands the expected output format — especially genericized text.
+  const referenceExample = JSON.stringify({
+    heading: "BEFORE THE APPEALS OFFICER",
+    captionPreambleLines: ["In the Matter of the Contested", "Industrial Insurance Claim of"],
+    captionFields: [
+      { label: "Claim No.:", key: "claimNumber" },
+      { label: "Appeal No.:", key: "hearingNumber" },
+      { label: "Date/Time:", key: "hearingDateTime" },
+      { label: "Appearance:", key: "appearance" },
+    ],
+    extraSections: [{ title: "ISSUE ON APPEAL", key: "issueOnAppeal" }],
+    indexTitle: "DOCUMENT INDEX",
+    counselPreamble: "COMES NOW, {{claimantName}}, by and through counsel, and submits the attached documentation for consideration in the above-cited matter.",
+    affirmationTitle: "AFFIRMATION",
+    affirmationText: "Pursuant to NRS 239B, the undersigned affirms the attached documents do not expose the personal information of any person.",
+    certTitle: "CERTIFICATE OF SERVICE",
+    certIntro: "I certify that a true and correct copy of the foregoing Claimant Document Index was served on the following:",
+    firmBlockPosition: "header",
+    signerBlockAlign: "right",
+  }, null, 2);
+
+  const prompt = `You are analyzing a legal evidence packet front matter template to extract its REUSABLE STRUCTURE. The goal is to create a template that works for ANY case — all case-specific names, numbers, addresses, and dates must be removed.
+
+TEMPLATE NAME: ${templateName}
+
+RAW EXTRACTED TEXT:
+${rawText}
+
+---
+
+REFERENCE EXAMPLE (shows the expected format for an Appeals Officer template):
+${referenceExample}
+
+---
+
+Extract the template structure into JSON. CRITICAL RULES:
+
+**GENERICIZATION — the most important rule:**
+- counselPreamble: Use {{claimantName}} for the claimant. Replace ALL attorney names, firm names, and specific references with generic language. Example: "by and through her attorneys, JASON WEINSTOCK, ESQ., of LAW OFFICE..." becomes "by and through counsel"
+- affirmationText: Keep it generic. Do NOT reference specific case numbers or field values. Just describe the legal affirmation. Example: "filed in Appeal No.: 12345" becomes just the affirmation statement without the case number.
+- certIntro: Replace ALL firm names, attorney names, and specific addresses (except court/agency addresses which are standard). Example: "an employee of the Law Office of Jason Weinstock" becomes "an employee of counsel"
+- NEVER include hardcoded attorney names, firm names, bar numbers, or case-specific numbers in any text field
+
+**FIELDS:**
+- "heading": Main heading (e.g. "BEFORE THE HEARING OFFICER" or "BEFORE THE APPEALS OFFICER")
+- "captionPreambleLines": Lines above the claimant name on the left side of the caption
+- "captionFields": Array of {label, key} for the right-side fields. Use standard camelCase keys: claimNumber, hearingNumber, hearingDateTime, appearance. If the template uses "Appeal No." instead of "Hearing No.", still use key "hearingNumber". Only include fields with a label and value area — do NOT include "Employer:" unless it appears as a right-side field with an input area.
+- "extraSections": ONLY sections where the USER FILLS IN VARIABLE TEXT per case (e.g. "ISSUE ON APPEAL" where the specific issue changes). Do NOT include fixed boilerplate sections like WITNESSES, DURATION, or any section with standard text that doesn't change per case. Empty array if none.
+- "indexTitle": The heading for the document index section. This should be something like "DOCUMENT INDEX" — NOT column headers like "DATE / DOCUMENTS / PAGE NO(S)".
+- "counselPreamble": The opening paragraph (genericized as described above)
+- "affirmationTitle": Title of the affirmation/certification section
+- "affirmationText": The affirmation paragraph (genericized, no case numbers)
+- "certTitle": Title of certificate of service/mailing section
+- "certIntro": The certificate intro paragraph (genericized as described above)
+- "firmBlockPosition": "header" if attorney info appears at page top, "signature" if only in signature block
+- "signerBlockAlign": "left" or "right" for the signature block position
+
+**SAMPLE VALUES (for post-processing cleanup):**
+- "sampleClaimantName": The actual claimant name in the document
+- "sampleAttorneyNames": Array of attorney names found
+- "sampleFirmName": The law firm name found
+- "sampleCaptionValues": Object mapping caption field keys to actual values shown
+
+Respond with ONLY valid JSON, no markdown fences.`;
+
+  const response = await getClient().messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 3000,
+    messages: [{ role: "user", content: prompt }],
+  });
+
+  const textBlock = response.content.find((block) => block.type === "text");
+  if (!textBlock || textBlock.type !== "text") {
+    throw new Error("Packet template analysis returned no text content");
+  }
+
+  const jsonText = textBlock.text
+    .replace(/^```(?:json)?\s*/m, "")
+    .replace(/\s*```$/m, "")
+    .trim();
+
+  let extracted: Record<string, unknown>;
+  try {
+    extracted = JSON.parse(jsonText);
+  } catch {
+    throw new Error("Failed to parse packet template analysis as JSON");
+  }
+
+  const id = `custom-${Date.now()}`;
+  const captionFields = Array.isArray(extracted.captionFields)
+    ? extracted.captionFields.map((f: any) => ({ label: String(f?.label || ""), key: String(f?.key || "") }))
+    : [];
+
+  // Filter extraSections: exclude well-known boilerplate sections
+  const BOILERPLATE_SECTIONS = new Set(["witnesses", "duration", "exhibits", "summary"]);
+  const rawExtraSections = Array.isArray(extracted.extraSections)
+    ? extracted.extraSections
+        .map((s: any) => ({ title: String(s?.title || ""), key: String(s?.key || "") }))
+        .filter((s) => s.title && s.key && !BOILERPLATE_SECTIONS.has(s.key.toLowerCase()))
+    : [];
+
+  // Validate indexTitle — if it looks like column headers, fall back to "DOCUMENT INDEX"
+  let indexTitle = String(extracted.indexTitle || "DOCUMENT INDEX");
+  if (!/index/i.test(indexTitle) || /\bDATE\b/i.test(indexTitle)) {
+    indexTitle = "DOCUMENT INDEX";
+  }
+
+  const template: PacketTemplate = {
+    id,
+    name: templateName,
+    heading: String(extracted.heading || "BEFORE THE HEARING OFFICER"),
+    captionPreambleLines: Array.isArray(extracted.captionPreambleLines)
+      ? extracted.captionPreambleLines.map(String)
+      : ["In the Matter of the Contested", "Industrial Insurance Claim of"],
+    captionFields,
+    extraSections: rawExtraSections,
+    indexTitle,
+    counselPreamble: String(extracted.counselPreamble || ""),
+    affirmationTitle: String(extracted.affirmationTitle || "AFFIRMATION"),
+    affirmationText: String(extracted.affirmationText || ""),
+    certTitle: String(extracted.certTitle || "CERTIFICATE OF SERVICE"),
+    certIntro: String(extracted.certIntro || ""),
+    sourceFile: templateName,
+    firmBlockPosition: String(extracted.firmBlockPosition || "").trim().toLowerCase() === "signature"
+      ? "signature"
+      : "header",
+    signerBlockAlign: String(extracted.signerBlockAlign || "").trim().toLowerCase() === "left"
+      ? "left"
+      : "right",
+  };
+
+  // --- Post-processing: scrub any remaining case-specific values ---
+  const sampleName = typeof extracted.sampleClaimantName === "string"
+    ? extracted.sampleClaimantName.trim()
+    : "";
+  const sampleFirmName = typeof extracted.sampleFirmName === "string"
+    ? extracted.sampleFirmName.trim()
+    : "";
+
+  // Heuristic: verify firmBlockPosition by checking the raw text.
+  // If the firm/attorney name appears BEFORE the main heading ("BEFORE THE"),
+  // it's genuinely in a header position. Otherwise, override to "signature".
+  if (template.firmBlockPosition === "header" && sampleFirmName) {
+    const headingIdx = rawText.search(/BEFORE\s+THE\s+(HEARING|APPEALS)\s+OFFICER/i);
+    const firmIdx = rawText.indexOf(sampleFirmName);
+    // Firm name must appear before the heading to be a true header position
+    if (headingIdx >= 0 && (firmIdx < 0 || firmIdx > headingIdx)) {
+      template.firmBlockPosition = "signature";
+    }
+  }
+  const sampleAttorneyNames: string[] = Array.isArray(extracted.sampleAttorneyNames)
+    ? extracted.sampleAttorneyNames.filter((n: unknown) => typeof n === "string" && (n as string).trim()).map((n: unknown) => String(n).trim())
+    : [];
+  const sampleCaptionValues: Record<string, string> =
+    extracted.sampleCaptionValues && typeof extracted.sampleCaptionValues === "object"
+      ? Object.fromEntries(
+          Object.entries(extracted.sampleCaptionValues as Record<string, unknown>)
+            .filter(([, v]) => typeof v === "string" && (v as string).trim())
+            .map(([k, v]) => [k, String(v).trim()])
+        )
+      : {};
+
+  const textFields: Array<"counselPreamble" | "affirmationText" | "certIntro"> = [
+    "counselPreamble", "affirmationText", "certIntro",
+  ];
+
+  // Replace hardcoded claimant name with {{claimantName}}
+  if (sampleName) {
+    const namePattern = new RegExp(sampleName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    for (const field of textFields) {
+      template[field] = (template[field] ?? "").replace(namePattern, "{{claimantName}}");
+    }
+  }
+
+  // Replace hardcoded firm name with "counsel" / generic reference
+  if (sampleFirmName) {
+    const firmPattern = new RegExp(sampleFirmName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    for (const field of textFields) {
+      template[field] = (template[field] ?? "").replace(firmPattern, "counsel");
+    }
+  }
+
+  // Replace hardcoded attorney names
+  for (const attorneyName of sampleAttorneyNames) {
+    if (!attorneyName || attorneyName.length < 3) continue;
+    const attyPattern = new RegExp(attorneyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    for (const field of textFields) {
+      template[field] = (template[field] ?? "").replace(attyPattern, "counsel");
+    }
+  }
+
+  // Replace hardcoded caption values (case numbers, etc.)
+  for (const [key, value] of Object.entries(sampleCaptionValues)) {
+    if (!value) continue;
+    const valuePattern = new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    template.affirmationText = (template.affirmationText ?? "").replace(valuePattern, `{{${key}}}`);
+    template.certIntro = (template.certIntro ?? "").replace(valuePattern, `{{${key}}}`);
+  }
+
+  // Replace hardcoded dates in certIntro
+  if (template.certIntro) {
+    template.certIntro = template.certIntro
+      .replace(
+        /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s*,?\s*\d{4}\b/gi,
+        "___"
+      )
+      .replace(
+        /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}\s*,?\s*\d{4}\b/gi,
+        "___"
+      );
+  }
+
+  // Clean up any double-genericized artifacts (e.g. "counsel, ESQ., and counsel, ESQ., of counsel")
+  for (const field of textFields) {
+    let text = template[field] ?? "";
+    // Collapse patterns like "counsel, ESQ.," or "counsel, Esq." to just "counsel"
+    text = text.replace(/counsel,?\s*ESQ\.?,?/gi, "counsel");
+    // Collapse "by and through her/his attorneys, counsel and counsel, of counsel" patterns
+    text = text.replace(/(?:her|his|their)\s+attorneys?,\s*counsel\s+and\s+counsel,\s*of\s+counsel/gi, "counsel");
+    // Simpler: "counsel and counsel" -> "counsel"
+    text = text.replace(/counsel\s+and\s+counsel/gi, "counsel");
+    // "of counsel," -> "of counsel"
+    text = text.replace(/,\s*of\s+counsel/gi, "");
+    // "an employee of counsel" is correct — keep it
+    template[field] = text;
+  }
+
+  return template;
+}
+
 // Reindex meta with semantic tags
 app.post("/reindex-meta", async (c) => {
   const { root } = await c.req.json();
@@ -1707,6 +1999,37 @@ app.post("/reindex-meta", async (c) => {
     return c.json({
       error: error instanceof Error ? error.message : String(error),
     }, 500);
+  }
+});
+
+// ============================================================================
+// PACKET TEMPLATE LISTING (unified with doc-templates)
+// ============================================================================
+
+// List packet templates: built-in + auto-detected from doc-templates index
+app.get("/packet-templates", async (c) => {
+  const root = c.req.query("root");
+  if (!root) return c.json({ error: "root query param required" }, 400);
+
+  try {
+    const indexPath = join(root, ".ai_tool", "templates", "templates.json");
+    let customPackets: PacketTemplate[] = [];
+
+    try {
+      const indexContent = await readFile(indexPath, "utf-8");
+      const index: TemplatesIndex = JSON.parse(indexContent);
+      customPackets = index.templates
+        .filter((t) => t.type === "packet" && t.packetConfig)
+        .map((t) => t.packetConfig!);
+    } catch {
+      // No index yet
+    }
+
+    const all = [...BUILT_IN_TEMPLATES, ...customPackets];
+    return c.json({ templates: all });
+  } catch (error) {
+    console.error("List packet templates error:", error);
+    return c.json({ error: "Failed to list packet templates" }, 500);
   }
 });
 
