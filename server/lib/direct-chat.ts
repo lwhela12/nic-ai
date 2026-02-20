@@ -30,7 +30,7 @@ import { extractTextFromDocx } from "./extract";
 import { generateMetaIndex, splitIndexToFolders, buildMetaIndexPromptView, writeIndexDerivedFiles } from "./meta-index";
 import { generateHypergraph } from "../routes/firm";
 import { buildDocumentId, buildDocumentIdFromPath } from "./document-id";
-import { generateTagsForAllSections, type SectionSemanticTags } from "./knowledge-tagger";
+import { generateTagsForAllSections, generateKnowledgeSummary, type SectionSemanticTags } from "./knowledge-tagger";
 
 // Client creation - recreated when API key changes
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -82,7 +82,7 @@ const INDEX_SLICE_MAX_CHARS = 12000;
 const CONFLICT_BATCH_DEFAULT = 25;
 const CONFLICT_BATCH_MAX = 80;
 const KNOWLEDGE_PREVIEW_CHARS = 420;
-const KNOWLEDGE_META_INDEX_MAX_CHARS = 16000;
+const KNOWLEDGE_META_INDEX_MAX_CHARS = 24000;
 const KNOWLEDGE_META_INDEX_PATH = ".ai_tool/knowledge/meta_index.json";
 
 interface MetaKnowledgeSection {
@@ -107,6 +107,7 @@ interface MetaKnowledgeIndex {
   source_mtime?: number;
   section_mtimes?: Record<string, number>;
   has_semantic_tags?: boolean;
+  knowledge_summary?: string;
 }
 
 // Tool definitions
@@ -837,7 +838,8 @@ async function buildMetaKnowledgeIndex(
   firmRoot: string,
   manifest?: Record<string, any>,
   manifestMtimeMs?: number,
-  precomputedTags?: Map<string, SectionSemanticTags>
+  precomputedTags?: Map<string, SectionSemanticTags>,
+  knowledgeSummary?: string
 ): Promise<MetaKnowledgeIndex | null> {
   const knowledgeDir = join(firmRoot, ".ai_tool", "knowledge");
   const manifestPath = join(knowledgeDir, "manifest.json");
@@ -924,6 +926,7 @@ async function buildMetaKnowledgeIndex(
       sections,
       section_mtimes: sectionMtimes,
       has_semantic_tags: hasSemanticTags || undefined,
+      knowledge_summary: knowledgeSummary || undefined,
     };
   } catch {
     return null;
@@ -987,38 +990,47 @@ async function getOrBuildMetaKnowledgeIndex(firmRoot: string): Promise<MetaKnowl
     if (matches) {
       const cachedFiles = Object.keys(cached.section_mtimes || {});
       if (seen.size === cachedFiles.length && cachedFiles.every((file) => seen.has(file))) {
-        // If cached index has semantic tags, it's fully valid
-        if (cached.has_semantic_tags) {
+        // Cached index is fully valid if it has both semantic tags and knowledge summary
+        if (cached.has_semantic_tags && cached.knowledge_summary) {
           return cached;
         }
-        // Otherwise fall through to rebuild with tags
+        // Otherwise fall through to rebuild with tags + summary
       }
     }
   }
 
-  // Read all section contents for Haiku tagging
+  // Read all section contents for tagging and summary
   let precomputedTags: Map<string, SectionSemanticTags> | undefined;
-  try {
-    const tagInputs: Array<{ filename: string; title: string; content: string }> = [];
-    for (const section of sectionsData) {
-      const filename = normalizeSectionFilename(section) || "";
-      if (!filename) continue;
-      try {
-        const content = await readFile(join(knowledgeDir, filename), "utf-8");
-        const title = typeof section.title === "string" ? section.title : filename;
-        tagInputs.push({ filename, title, content });
-      } catch {
-        // Skip unreadable sections
-      }
+  let knowledgeSummary: string | undefined;
+  const tagInputs: Array<{ filename: string; title: string; content: string }> = [];
+
+  for (const section of sectionsData) {
+    const filename = normalizeSectionFilename(section) || "";
+    if (!filename) continue;
+    try {
+      const content = await readFile(join(knowledgeDir, filename), "utf-8");
+      const title = typeof section.title === "string" ? section.title : filename;
+      tagInputs.push({ filename, title, content });
+    } catch {
+      // Skip unreadable sections
     }
-    if (tagInputs.length > 0) {
-      precomputedTags = await generateTagsForAllSections(tagInputs);
-    }
-  } catch (err) {
-    console.warn("[meta-index] Semantic tagging failed, building without tags:", err instanceof Error ? err.message : err);
   }
 
-  const rebuilt = await buildMetaKnowledgeIndex(firmRoot, manifest, sourceMtime, precomputedTags);
+  // Generate per-section tags and holistic summary in parallel
+  if (tagInputs.length > 0) {
+    try {
+      const [tags, summary] = await Promise.all([
+        generateTagsForAllSections(tagInputs),
+        generateKnowledgeSummary(tagInputs),
+      ]);
+      precomputedTags = tags;
+      knowledgeSummary = summary || undefined;
+    } catch (err) {
+      console.warn("[meta-index] Semantic tagging/summary failed, building without:", err instanceof Error ? err.message : err);
+    }
+  }
+
+  const rebuilt = await buildMetaKnowledgeIndex(firmRoot, manifest, sourceMtime, precomputedTags, knowledgeSummary);
   if (!rebuilt) return null;
 
   await writeFile(cachePath, JSON.stringify(rebuilt, null, 2)).catch(() => {});
@@ -1048,6 +1060,8 @@ export async function updateMetaIndexSectionTags(
       index.has_semantic_tags = index.sections.some(
         (s) => s.topics || s.applies_to || s.summary
       );
+      // Clear holistic summary so it gets rebuilt on next chat access
+      delete index.knowledge_summary;
       await writeFile(cachePath, JSON.stringify(index, null, 2));
     }
   } catch {
@@ -1080,8 +1094,16 @@ function buildMetaKnowledgeIndexText(index: MetaKnowledgeIndex | null): string {
     `Sections: ${index.section_count}`,
   ];
 
+  // Insert holistic knowledge summary if available
+  if (index.knowledge_summary) {
+    lines.push("");
+    lines.push("### Knowledge Summary");
+    lines.push(index.knowledge_summary);
+  }
+
   if (index.sections.length > 0) {
     lines.push("");
+    lines.push("### Section Map");
     for (const section of index.sections) {
       const header = section.id ? `${section.title} (${section.id})` : section.title;
       lines.push(`- ${header}: ${section.path} (${section.char_count} chars)`);
@@ -1093,9 +1115,6 @@ function buildMetaKnowledgeIndexText(index: MetaKnowledgeIndex | null): string {
       if (section.applies_to && section.applies_to.length > 0) {
         lines.push(`  Applies to: ${section.applies_to.join(", ")}`);
       }
-      if (section.topics && section.topics.length > 0) {
-        lines.push(`  Topics: ${section.topics.join(", ")}`);
-      }
     }
     lines.push(
       "Use read_file(\".ai_tool/knowledge/<filename>\") to load any section you need for full context."
@@ -1106,6 +1125,22 @@ function buildMetaKnowledgeIndexText(index: MetaKnowledgeIndex | null): string {
   if (rendered.length <= KNOWLEDGE_META_INDEX_MAX_CHARS) {
     return rendered;
   }
+
+  // Progressive truncation: try trimming knowledge summary first
+  if (index.knowledge_summary) {
+    const summaryStart = rendered.indexOf("### Knowledge Summary\n");
+    const sectionMapStart = rendered.indexOf("\n### Section Map");
+    if (summaryStart !== -1 && sectionMapStart !== -1) {
+      const headerPart = rendered.slice(0, summaryStart);
+      const summaryContent = index.knowledge_summary;
+      const mapPart = rendered.slice(sectionMapStart);
+      const availableForSummary = KNOWLEDGE_META_INDEX_MAX_CHARS - headerPart.length - "### Knowledge Summary\n".length - "\n[...summary truncated]\n".length - mapPart.length;
+      if (availableForSummary > 500) {
+        return `${headerPart}### Knowledge Summary\n${summaryContent.slice(0, availableForSummary)}\n[...summary truncated]${mapPart}`;
+      }
+    }
+  }
+
   return `${rendered.slice(0, KNOWLEDGE_META_INDEX_MAX_CHARS)}...`;
 }
 

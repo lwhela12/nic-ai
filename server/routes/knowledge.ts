@@ -9,7 +9,7 @@ import { readdir, readFile, writeFile, mkdir, copyFile, unlink, stat } from "fs/
 import { join, dirname, basename, extname } from "path";
 import { extractTextFromPdf, extractTextFromDocx, extractStylesFromDocx, DocxStyles } from "../lib/extract";
 import { requireFirmAccess } from "../lib/team-access";
-import { generateSectionTags, generateTagsForAllSections } from "../lib/knowledge-tagger";
+import { generateSectionTags, generateTagsForAllSections, generateKnowledgeSummary } from "../lib/knowledge-tagger";
 import { updateMetaIndexSectionTags } from "../lib/direct-chat";
 
 // Lazy client creation - API key is set by auth middleware before requests
@@ -146,7 +146,7 @@ app.post("/init", async (c) => {
       await writeFile(firmConfigPath, JSON.stringify(defaultConfig, null, 2));
     }
 
-    // Generate semantic tags for all sections (non-blocking)
+    // Generate semantic tags and holistic summary for all sections (non-blocking)
     (async () => {
       try {
         const tagInputs: Array<{ filename: string; title: string; content: string }> = [];
@@ -157,9 +157,13 @@ app.post("/init", async (c) => {
           } catch { /* skip */ }
         }
         if (tagInputs.length > 0) {
-          const tagsMap = await generateTagsForAllSections(tagInputs);
+          // Generate per-section tags and holistic summary in parallel
+          const [tagsMap, knowledgeSummary] = await Promise.all([
+            generateTagsForAllSections(tagInputs),
+            generateKnowledgeSummary(tagInputs),
+          ]);
 
-          // Build and save meta-index with tags
+          // Build and save meta-index with tags + summary
           const metaIndexPath = join(root, ".ai_tool", "knowledge", "meta_index.json");
           const manifestMtime = (await stat(join(knowledgeDir, "manifest.json"))).mtimeMs;
           const sectionMtimes: Record<string, number> = {};
@@ -181,7 +185,7 @@ app.post("/init", async (c) => {
               ...(tags ? { topics: tags.topics, applies_to: tags.applies_to, summary: tags.summary } : {}),
             });
           }
-          const metaIndex = {
+          const metaIndex: Record<string, any> = {
             indexed_at: new Date().toISOString(),
             source: ".ai_tool/knowledge/manifest.json",
             source_mtime: manifestMtime,
@@ -192,6 +196,9 @@ app.post("/init", async (c) => {
             section_mtimes: sectionMtimes,
             has_semantic_tags: tagsMap.size > 0,
           };
+          if (knowledgeSummary) {
+            metaIndex.knowledge_summary = knowledgeSummary;
+          }
           await writeFile(metaIndexPath, JSON.stringify(metaIndex, null, 2));
         }
       } catch (err) {
@@ -1636,7 +1643,13 @@ app.post("/reindex-meta", async (c) => {
       } catch { /* skip */ }
     }
 
-    const tagsMap = tagInputs.length > 0 ? await generateTagsForAllSections(tagInputs) : new Map();
+    // Generate per-section tags and holistic summary in parallel
+    const [tagsMap, knowledgeSummary] = tagInputs.length > 0
+      ? await Promise.all([
+          generateTagsForAllSections(tagInputs),
+          generateKnowledgeSummary(tagInputs),
+        ])
+      : [new Map(), ""];
 
     // Build section entries
     const manifestMtime = (await stat(manifestPath)).mtimeMs;
@@ -1663,7 +1676,7 @@ app.post("/reindex-meta", async (c) => {
       });
     }
 
-    const metaIndex = {
+    const metaIndex: Record<string, any> = {
       indexed_at: new Date().toISOString(),
       source: ".ai_tool/knowledge/manifest.json",
       source_mtime: manifestMtime,
@@ -1674,6 +1687,9 @@ app.post("/reindex-meta", async (c) => {
       section_mtimes: sectionMtimes,
       has_semantic_tags: tagsMap.size > 0,
     };
+    if (knowledgeSummary) {
+      metaIndex.knowledge_summary = knowledgeSummary;
+    }
 
     const metaIndexPath = join(knowledgeDir, "meta_index.json");
     await writeFile(metaIndexPath, JSON.stringify(metaIndex, null, 2));
@@ -1684,6 +1700,7 @@ app.post("/reindex-meta", async (c) => {
       success: true,
       section_count: sections.length,
       tagged_count: tagsMap.size,
+      has_summary: !!knowledgeSummary,
     });
   } catch (error) {
     console.error("Reindex meta error:", error);

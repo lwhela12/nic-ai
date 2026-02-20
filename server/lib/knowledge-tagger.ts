@@ -107,6 +107,63 @@ export async function generateSectionTags(
   }
 }
 
+const SUMMARY_SYSTEM_PROMPT = `You are a legal practice knowledge summarizer. Given the full text of all knowledge sections for a law firm, produce a concise, unified reference summary in markdown.
+
+Requirements:
+- Summarize the most important rules, thresholds, deadlines, statutory references, and formulas across ALL sections
+- Use markdown bullet points, organize by topic
+- No redundancy — state each fact exactly once
+- Include specific numbers, percentages, time limits, and statute citations
+- After the summary, add a "### Definitive Sources" section mapping key topics to their source filenames so the agent knows where to read_file for full detail
+- Target approximately 600-700 words (~3000-4000 characters)
+- Output ready-to-render markdown — no JSON wrapping, no code fences, no explanation prefix`;
+
+/**
+ * Generate a holistic knowledge summary across ALL sections.
+ * One Groq call reads all sections and produces a unified markdown summary.
+ * Returns raw markdown string (empty string on error).
+ */
+export async function generateKnowledgeSummary(
+  sections: Array<{ filename: string; title: string; content: string }>
+): Promise<string> {
+  if (sections.length === 0) return "";
+
+  const concatenated = sections
+    .map((s) => `=== Section: ${s.title} (${s.filename}) ===\n${s.content}`)
+    .join("\n\n---\n\n");
+
+  const groq = getGroqClient();
+
+  async function callSummary(model: string): Promise<string> {
+    const response = await groq.chat.completions.create({
+      model,
+      temperature: 0,
+      max_tokens: 2000,
+      messages: [
+        { role: "system", content: SUMMARY_SYSTEM_PROMPT },
+        { role: "user", content: concatenated },
+      ],
+    });
+    return response.choices?.[0]?.message?.content || "";
+  }
+
+  try {
+    let result: string;
+    try {
+      result = await callSummary(MODEL_PRIMARY);
+    } catch {
+      result = await callSummary(MODEL_FALLBACK);
+    }
+    return result.trim();
+  } catch (err) {
+    console.warn(
+      "[knowledge-tagger] Failed to generate knowledge summary:",
+      err instanceof Error ? err.message : err
+    );
+    return "";
+  }
+}
+
 export async function generateTagsForAllSections(
   sections: Array<{ filename: string; title: string; content: string }>
 ): Promise<Map<string, SectionSemanticTags>> {
