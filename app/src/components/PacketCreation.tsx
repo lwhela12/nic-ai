@@ -625,12 +625,95 @@ interface TemplateOption {
   name: string
   heading: string
   builtIn?: boolean
+  captionFields?: Array<{ label: string; key: string }>
   extraSections?: Array<{ title: string; key: string }>
 }
 
 interface AttorneyOption {
   name: string
   barNo: string
+}
+
+// Well-known caption field keys that map directly to PacketFrontMatter properties
+const WELL_KNOWN_KEYS: Record<string, keyof PacketFrontMatter> = {
+  claimNumber: 'claimNumber',
+  hearingNumber: 'hearingNumber',
+  hearingDateTime: 'hearingDateTime',
+  appearance: 'appearance',
+}
+
+const DEFAULT_CAPTION_FIELDS: Array<{ label: string; key: string }> = [
+  { label: 'Claim No.:', key: 'claimNumber' },
+  { label: 'Hearing / Appeal No.:', key: 'hearingNumber' },
+  { label: 'Date/Time:', key: 'hearingDateTime' },
+  { label: 'Appearance:', key: 'appearance' },
+]
+
+function CaptionFieldsGrid({
+  frontMatter,
+  onUpdate,
+  captionFields,
+  inputClass,
+  labelClass,
+}: {
+  frontMatter: PacketFrontMatter
+  onUpdate: (field: keyof PacketFrontMatter, value: unknown) => void
+  captionFields?: Array<{ label: string; key: string }>
+  inputClass: string
+  labelClass: string
+}) {
+  const fields = captionFields && captionFields.length > 0 ? captionFields : DEFAULT_CAPTION_FIELDS
+
+  const getValue = (key: string): string => {
+    if (key in WELL_KNOWN_KEYS) {
+      return String((frontMatter as Record<string, unknown>)[key] || '')
+    }
+    return frontMatter.captionValues?.[key] || ''
+  }
+
+  const handleChange = (key: string, value: string) => {
+    if (key in WELL_KNOWN_KEYS) {
+      onUpdate(WELL_KNOWN_KEYS[key], value)
+    } else {
+      const updated = { ...(frontMatter.captionValues || {}), [key]: value }
+      onUpdate('captionValues', updated)
+    }
+  }
+
+  // Strip trailing colon from label for display
+  const displayLabel = (label: string) => label.replace(/:$/, '').trim()
+
+  return (
+    <div className="grid grid-cols-2 gap-4">
+      <div>
+        <label className={labelClass}>Claimant Name *</label>
+        <input
+          className={inputClass}
+          value={frontMatter.claimantName}
+          onChange={e => onUpdate('claimantName', e.target.value)}
+        />
+      </div>
+      {fields.map(field => (
+        <div key={field.key}>
+          <label className={labelClass}>{displayLabel(field.label)}</label>
+          <input
+            className={inputClass}
+            value={getValue(field.key)}
+            onChange={e => handleChange(field.key, e.target.value)}
+            placeholder={field.key === 'appearance' ? 'Telephonic' : ''}
+          />
+        </div>
+      ))}
+      <div>
+        <label className={labelClass}>Service Date</label>
+        <input
+          className={inputClass}
+          value={frontMatter.serviceDate}
+          onChange={e => onUpdate('serviceDate', e.target.value)}
+        />
+      </div>
+    </div>
+  )
 }
 
 // --- Front Matter Tab ---
@@ -691,8 +774,9 @@ function FrontMatterTab({
 
   const handleTemplateChange = (templateId: string) => {
     onUpdate('templateId', templateId)
-    // Clear extra section values when switching templates
+    // Clear extra section values and custom caption values when switching templates
     onUpdate('extraSectionValues', {})
+    onUpdate('captionValues', {})
     onUpdate('issueOnAppeal', '')
   }
 
@@ -765,57 +849,13 @@ function FrontMatterTab({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className={labelClass}>Claimant Name *</label>
-          <input
-            className={inputClass}
-            value={frontMatter.claimantName}
-            onChange={e => onUpdate('claimantName', e.target.value)}
-          />
-        </div>
-        <div>
-          <label className={labelClass}>Claim Number</label>
-          <input
-            className={inputClass}
-            value={frontMatter.claimNumber}
-            onChange={e => onUpdate('claimNumber', e.target.value)}
-          />
-        </div>
-        <div>
-          <label className={labelClass}>Hearing / Appeal Number</label>
-          <input
-            className={inputClass}
-            value={frontMatter.hearingNumber}
-            onChange={e => onUpdate('hearingNumber', e.target.value)}
-          />
-        </div>
-        <div>
-          <label className={labelClass}>Hearing Date/Time</label>
-          <input
-            className={inputClass}
-            value={frontMatter.hearingDateTime}
-            onChange={e => onUpdate('hearingDateTime', e.target.value)}
-          />
-        </div>
-        <div>
-          <label className={labelClass}>Appearance</label>
-          <input
-            className={inputClass}
-            value={frontMatter.appearance}
-            onChange={e => onUpdate('appearance', e.target.value)}
-            placeholder="Telephonic"
-          />
-        </div>
-        <div>
-          <label className={labelClass}>Service Date</label>
-          <input
-            className={inputClass}
-            value={frontMatter.serviceDate}
-            onChange={e => onUpdate('serviceDate', e.target.value)}
-          />
-        </div>
-      </div>
+      <CaptionFieldsGrid
+        frontMatter={frontMatter}
+        onUpdate={onUpdate}
+        captionFields={selectedTemplate?.captionFields}
+        inputClass={inputClass}
+        labelClass={labelClass}
+      />
 
       {/* Dynamic extra sections from template (e.g. Issue on Appeal) */}
       {selectedTemplate?.extraSections && selectedTemplate.extraSections.length > 0 && (

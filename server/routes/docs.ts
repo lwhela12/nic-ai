@@ -1414,6 +1414,7 @@ app.post("/preview-front-matter", async (c) => {
       hearingDateTime: frontMatter.hearingDateTime,
       appearance: frontMatter.appearance,
       introductoryCounselLine: frontMatter.introductoryCounselLine,
+      captionValues: frontMatter.captionValues,
     };
 
     const service: EvidencePacketServiceInfo = {
@@ -1514,6 +1515,7 @@ app.post("/generate-packet", async (c) => {
       hearingDateTime: frontMatter.hearingDateTime,
       appearance: frontMatter.appearance,
       introductoryCounselLine: frontMatter.introductoryCounselLine,
+      captionValues: frontMatter.captionValues,
     };
 
     const service: EvidencePacketServiceInfo = {
@@ -1692,6 +1694,7 @@ app.post("/analyze-template", async (c) => {
 
     let pdfPath: string;
     let extraCleanup: string | null = null;
+    let mammothHtml: string | null = null;
 
     if (ext === ".docx") {
       // DOCX → HTML → PDF → images
@@ -1700,6 +1703,7 @@ app.post("/analyze-template", async (c) => {
       extraCleanup = docxPath;
 
       const { value: html } = await mammoth.convertToHtml({ path: docxPath });
+      mammothHtml = html;
       pdfPath = tmpBase + ".pdf";
       const pdfBuffer = await htmlToPdf(html, "template");
       await writeFile(pdfPath, pdfBuffer);
@@ -1774,6 +1778,10 @@ Respond with ONLY valid JSON, no markdown fences.`,
 
     // Build template
     const id = `custom-${Date.now()}`;
+    const captionFields = Array.isArray(extracted.captionFields)
+      ? extracted.captionFields.map((f: any) => ({ label: String(f?.label || ""), key: String(f?.key || "") }))
+      : [];
+
     const template: PacketTemplate = {
       id,
       name: file.name.replace(/\.(pdf|docx)$/i, ""),
@@ -1781,9 +1789,7 @@ Respond with ONLY valid JSON, no markdown fences.`,
       captionPreambleLines: Array.isArray(extracted.captionPreambleLines)
         ? extracted.captionPreambleLines.map(String)
         : ["In the Matter of the Contested", "Industrial Insurance Claim of"],
-      captionFields: Array.isArray(extracted.captionFields)
-        ? extracted.captionFields.map((f: any) => ({ label: String(f?.label || ""), key: String(f?.key || "") }))
-        : [],
+      captionFields,
       extraSections: Array.isArray(extracted.extraSections)
         ? extracted.extraSections.map((s: any) => ({ title: String(s?.title || ""), key: String(s?.key || "") }))
         : [],
@@ -1795,6 +1801,70 @@ Respond with ONLY valid JSON, no markdown fences.`,
       certIntro: String(extracted.certIntro || ""),
       sourceFile: file.name,
     };
+
+    // If we have mammoth HTML from a DOCX upload, convert it into an HTML
+    // template with {{placeholder}} tokens via a Groq text model call.
+    if (mammothHtml) {
+      try {
+        const fieldKeys = captionFields.map((f: { key: string }) => f.key);
+        const extraKeys = (template.extraSections || []).map((s: { key: string }) => s.key);
+        const allPlaceholders = [
+          "claimantName",
+          ...fieldKeys,
+          ...extraKeys,
+          "firmBlock",
+          "signerName",
+          "documentIndex",
+          "affirmationSection",
+        ];
+
+        const textResponse = await groq.chat.completions.create({
+          model: "openai/gpt-oss-120b",
+          messages: [
+            {
+              role: "system",
+              content: "You are an HTML template converter. You receive legal document HTML and metadata. Your job is to replace dynamic/case-specific text with {{placeholder}} tokens while keeping ALL formatting and layout HTML intact. Return ONLY the modified HTML, no explanation.",
+            },
+            {
+              role: "user",
+              content: `Convert this HTML into a template with placeholder tokens.
+
+Available placeholders: ${allPlaceholders.map(k => `{{${k}}}`).join(", ")}
+
+Rules:
+1. Replace any case-specific claimant name text with {{claimantName}}
+2. Replace values corresponding to these caption field keys with their placeholders: ${fieldKeys.map(k => `{{${k}}}`).join(", ")}
+3. Replace the document index/table of contents section with {{documentIndex}}
+4. Replace the affirmation and certificate of service sections with {{affirmationSection}}
+5. Replace the attorney/firm information block with {{firmBlock}}
+6. Replace the signer name with {{signerName}}
+${extraKeys.length > 0 ? `7. Replace extra section content for: ${extraKeys.map(k => `{{${k}}}`).join(", ")}` : ""}
+7. Keep ALL HTML tags, attributes, classes, and formatting EXACTLY as they are
+8. Only replace text content, never HTML structure
+
+Source HTML:
+${mammothHtml}`,
+            },
+          ],
+          temperature: 0.1,
+          max_tokens: 8000,
+        });
+
+        const htmlTemplateRaw = textResponse.choices?.[0]?.message?.content || "";
+        // Strip markdown fences if the model wrapped the output
+        const htmlTemplate = htmlTemplateRaw
+          .replace(/^```(?:html)?\s*/m, "")
+          .replace(/\s*```$/m, "")
+          .trim();
+
+        if (htmlTemplate.length > 50) {
+          template.htmlTemplate = htmlTemplate;
+        }
+      } catch (htmlErr) {
+        console.error("HTML template generation failed (non-fatal):", htmlErr);
+        // Non-fatal: template still works via pdf-lib path without htmlTemplate
+      }
+    }
 
     // Save to disk
     const templatesDir = join(firmRoot, ".ai_tool", TEMPLATES_DIR);

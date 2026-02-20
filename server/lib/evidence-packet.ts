@@ -2,6 +2,7 @@ import { readFile } from "fs/promises";
 import { resolve, sep } from "path";
 import { PDFDocument, PDFFont, PDFPage, StandardFonts, degrees, rgb } from "pdf-lib";
 import { runPdftotext } from "./pdftotext";
+import { renderHtmlFrontMatter } from "./evidence-packet-html";
 
 type SortBy = "none" | "date" | "title" | "path";
 type SortDirection = "asc" | "desc";
@@ -27,6 +28,8 @@ export interface PacketTemplate {
   certIntro: string;
   sourceFile?: string;
   builtIn?: boolean;
+  htmlTemplate?: string;
+  htmlTemplateCss?: string;
 }
 
 export const BUILT_IN_TEMPLATES: PacketTemplate[] = [
@@ -119,6 +122,7 @@ export interface EvidencePacketCaption {
   hearingDateTime?: string;
   appearance?: string;
   introductoryCounselLine?: string;
+  captionValues?: Record<string, string>;
 }
 
 export interface EvidencePacketServiceInfo {
@@ -314,9 +318,30 @@ export async function buildEvidencePacket(
   const regularFont = await pdf.embedFont(StandardFonts.TimesRoman);
   const boldFont = await pdf.embedFont(StandardFonts.TimesRomanBold);
 
-  let frontMatterPages = addIndexPages(pdf, regularFont, boldFont, options, tocEntries);
-  if (options.includeAffirmationPage !== false) {
-    frontMatterPages += addAffirmationPage(pdf, regularFont, boldFont, options, frontMatterPages + 1);
+  // Branch: HTML-template path vs pdf-lib path
+  if (options.template?.htmlTemplate) {
+    const htmlBuffer = await renderHtmlFrontMatter(
+      {
+        caption: options.caption,
+        template: options.template,
+        firmBlockLines: options.firmBlockLines,
+        service: options.service,
+        signerName: options.signerName,
+        extraSectionValues: options.extraSectionValues,
+        includeAffirmationPage: options.includeAffirmationPage,
+      },
+      tocEntries,
+    );
+    const frontMatterPdf = await PDFDocument.load(htmlBuffer);
+    const fmPages = await pdf.copyPages(frontMatterPdf, frontMatterPdf.getPageIndices());
+    for (const page of fmPages) {
+      pdf.addPage(page);
+    }
+  } else {
+    let frontMatterPages = addIndexPages(pdf, regularFont, boldFont, options, tocEntries);
+    if (options.includeAffirmationPage !== false) {
+      frontMatterPages += addAffirmationPage(pdf, regularFont, boldFont, options, frontMatterPages + 1);
+    }
   }
 
   let exhibitPageNumber = pageStampStart;
@@ -352,12 +377,29 @@ export async function buildFrontMatterPreview(options: {
   caption: EvidencePacketCaption;
   firmBlockLines?: string[];
   service?: EvidencePacketServiceInfo;
-  tocEntries: Array<{ title: string; startPage: number; endPage: number }>;
+  tocEntries: Array<{ title: string; startPage: number; endPage: number; date?: string }>;
   includeAffirmationPage?: boolean;
   template?: PacketTemplate;
   signerName?: string;
   extraSectionValues?: Record<string, string>;
 }): Promise<Uint8Array> {
+  // Branch: HTML-template path vs pdf-lib path
+  if (options.template?.htmlTemplate) {
+    const htmlBuffer = await renderHtmlFrontMatter(
+      {
+        caption: options.caption,
+        template: options.template,
+        firmBlockLines: options.firmBlockLines,
+        service: options.service,
+        signerName: options.signerName,
+        extraSectionValues: options.extraSectionValues,
+        includeAffirmationPage: options.includeAffirmationPage,
+      },
+      options.tocEntries,
+    );
+    return new Uint8Array(htmlBuffer);
+  }
+
   const pdf = await PDFDocument.create();
   const regularFont = await pdf.embedFont(StandardFonts.TimesRoman);
   const boldFont = await pdf.embedFont(StandardFonts.TimesRomanBold);

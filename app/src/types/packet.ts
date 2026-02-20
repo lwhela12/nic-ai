@@ -25,6 +25,7 @@ export interface PacketFrontMatter {
   signerName?: string
   issueOnAppeal?: string
   extraSectionValues?: Record<string, string>
+  captionValues?: Record<string, string>
 }
 
 export interface PacketPiiResult {
