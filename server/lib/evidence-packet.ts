@@ -36,6 +36,21 @@ export interface PacketTemplate {
   firmBlockPosition?: "header" | "signature";
   /** Alignment of the signer/attorney block on the affirmation page. */
   signerBlockAlign?: "left" | "right";
+  /** Rendering mode for HTML-based front matter flow. */
+  renderMode?: "template-native" | "pleading-legacy";
+  /** When true, suppress generated pleading gutter/line-number column for HTML templates. */
+  suppressPleadingLineNumbers?: boolean;
+  /** Backward-compatible IDs previously stored in packetConfig.id. */
+  legacyPacketIds?: string[];
+  /** Agency line drawn centered above the heading (e.g. "STATE OF NEVADA DEPARTMENT OF ADMINISTRATION"). */
+  agencyLine?: string;
+  /** Document title drawn centered below the caption (e.g. "CLAIMANT'S HEARING STATEMENT..."). */
+  documentTitle?: string;
+  /** Page ordering: "index-first" (default HO) puts doc index before affirmation;
+   *  "statement-first" (AO) puts hearing statement on page 1, doc index on page 2, cert on page 3. */
+  pageFlow?: "index-first" | "statement-first";
+  /** TOC format: "numbered" (default) for "1. Title ... Pg. X"; "date-doc-page" for 3-column DATE/DOCUMENTS/PAGE NO(S). */
+  tocFormat?: "numbered" | "date-doc-page";
 }
 
 export const BUILT_IN_TEMPLATES: PacketTemplate[] = [
@@ -67,29 +82,37 @@ export const BUILT_IN_TEMPLATES: PacketTemplate[] = [
   {
     id: "ao-standard",
     name: "AO - Appeals Officer",
+    agencyLine: "STATE OF NEVADA  DEPARTMENT OF ADMINISTRATION",
     heading: "BEFORE THE APPEALS OFFICER",
+    documentTitle: "CLAIMANT'S HEARING STATEMENT AND DOCUMENTARY EVIDENCE",
+    pageFlow: "statement-first",
+    tocFormat: "date-doc-page",
     captionPreambleLines: [
       "In the Matter of the Contested",
-      "Industrial Insurance Claim of",
+      "Industrial Insurance Claim of:",
     ],
     captionFields: [
-      { label: "Claim No.:", key: "claimNumber" },
       { label: "Appeal No.:", key: "hearingNumber" },
-      { label: "Date/Time:", key: "hearingDateTime" },
-      { label: "Appearance:", key: "appearance" },
+      { label: "Claim No.:", key: "claimNumber" },
+      { label: "Hearing No.:", key: "hearingNo" },
+      { label: "Employer:", key: "employer" },
     ],
     extraSections: [
-      { title: "ISSUE ON APPEAL", key: "issueOnAppeal" },
+      { title: "ISSUE", key: "issueOnAppeal" },
+      { title: "WITNESSES", key: "witnesses" },
+      { title: "DURATION", key: "duration" },
     ],
     indexTitle: "DOCUMENT INDEX",
     counselPreamble:
-      "COMES NOW, {{claimantName}}, by and through counsel, and submits the attached documentation for consideration in the above-cited matter.",
-    affirmationTitle: "AFFIRMATION",
+      'COMES NOW, Claimant, {{claimantName}}, (hereinafter referred to as "Claimant"), by and through his attorneys, and hereby submits this Hearing Statement and Documentary Evidence for the Appeals Officer\'s consideration.',
+    affirmationTitle: "AFFIRMATION PURSUANT TO NRS 239B.030",
     affirmationText:
-      "Pursuant to NRS 239B, the undersigned affirms the attached documents do not expose the personal information of any person.",
-    certTitle: "CERTIFICATE OF SERVICE",
+      "The undersigned does hereby affirm that the attached Claimant's Documentary Evidence filed in Appeal No.: {{hearingNumber}}",
+    certTitle: "CERTIFICATE OF MAILING",
     certIntro:
-      "I certify that a true and correct copy of the foregoing Claimant Document Index was served on the following:",
+      "On this ______ day of {{serviceMonth}}, {{serviceYear}}, the undersigned, an employee of the {{firmName}}, does hereby certify that a true and correct copy of the foregoing was served upon the following by the method indicated below:",
+    firmBlockPosition: "signature",
+    signerBlockAlign: "left",
     builtIn: true,
   },
 ];
@@ -157,6 +180,8 @@ export interface BuildEvidencePacketOptions {
   signerName?: string;
   /** Values for template extraSections, keyed by section key (e.g. "issueOnAppeal"). */
   extraSectionValues?: Record<string, string>;
+  /** Firm name for bold display in signature block (separate from firmBlockLines). */
+  firmName?: string;
 }
 
 export interface EvidencePacketTocEntry {
@@ -343,6 +368,8 @@ export async function buildEvidencePacket(
     for (const page of fmPages) {
       pdf.addPage(page);
     }
+  } else if (options.template?.pageFlow === "statement-first") {
+    await addStatementPages(pdf, regularFont, boldFont, options, tocEntries);
   } else {
     let frontMatterPages = addIndexPages(pdf, regularFont, boldFont, options, tocEntries);
     if (options.includeAffirmationPage !== false) {
@@ -388,6 +415,7 @@ export async function buildFrontMatterPreview(options: {
   template?: PacketTemplate;
   signerName?: string;
   extraSectionValues?: Record<string, string>;
+  firmName?: string;
 }): Promise<Uint8Array> {
   // Branch: HTML-template path vs pdf-lib path
   if (options.template?.htmlTemplate) {
@@ -419,18 +447,24 @@ export async function buildFrontMatterPreview(options: {
     template: options.template,
     signerName: options.signerName,
     extraSectionValues: options.extraSectionValues,
+    firmName: options.firmName,
   };
 
   const tocEntries: EvidencePacketTocEntry[] = options.tocEntries.map((e) => ({
     title: e.title,
     path: "",
+    date: e.date,
     startPage: e.startPage,
     endPage: e.endPage,
   }));
 
-  let frontMatterPages = addIndexPages(pdf, regularFont, boldFont, packetOptions, tocEntries);
-  if (options.includeAffirmationPage !== false) {
-    addAffirmationPage(pdf, regularFont, boldFont, packetOptions, frontMatterPages + 1);
+  if (options.template?.pageFlow === "statement-first") {
+    await addStatementPages(pdf, regularFont, boldFont, packetOptions, tocEntries);
+  } else {
+    let frontMatterPages = addIndexPages(pdf, regularFont, boldFont, packetOptions, tocEntries);
+    if (options.includeAffirmationPage !== false) {
+      addAffirmationPage(pdf, regularFont, boldFont, packetOptions, frontMatterPages + 1);
+    }
   }
 
   return pdf.save();
@@ -852,6 +886,380 @@ function interpolateTemplateText(
   });
 }
 
+function drawCenteredUnderline(
+  page: PDFPage,
+  font: PDFFont,
+  text: string,
+  size: number,
+  y: number,
+): void {
+  const pageWidth = page.getWidth();
+  const textWidth = font.widthOfTextAtSize(text, size);
+  const x = (pageWidth - textWidth) / 2;
+  page.drawText(text, { x, y, size, font, color: rgb(0, 0, 0) });
+  page.drawLine({
+    start: { x, y: y - 1.5 },
+    end: { x: x + textWidth, y: y - 1.5 },
+    thickness: 0.5,
+    color: rgb(0, 0, 0),
+  });
+}
+
+function drawTocRow3Col(
+  page: PDFPage,
+  font: PDFFont,
+  date: string,
+  docTitle: string,
+  pageRange: string,
+  y: number,
+): void {
+  const size = 12;
+  const dateX = 84;
+  const docX = 170;
+  const pageX = 530;
+  const maxDocWidth = pageX - docX - 20;
+  const safeTitle = truncateToWidth(docTitle, font, size, maxDocWidth);
+  page.drawText(date, { x: dateX, y, size, font });
+  page.drawText(safeTitle, { x: docX, y, size, font });
+  const rangeWidth = font.widthOfTextAtSize(pageRange, size);
+  page.drawText(pageRange, { x: pageX - rangeWidth, y, size, font });
+}
+
+async function addStatementPages(
+  pdf: PDFDocument,
+  regularFont: PDFFont,
+  boldFont: PDFFont,
+  options: BuildEvidencePacketOptions,
+  tocEntries: EvidencePacketTocEntry[],
+): Promise<number> {
+  const italicFont = await pdf.embedFont(StandardFonts.TimesRomanItalic);
+  const tpl = options.template!;
+  const isAO = tpl.pageFlow === "statement-first";
+  const dblLeft = isAO;
+  const rLine = isAO;
+
+  // ── Page 1: Statement ──────────────────────────────────────────────
+  const pages: PDFPage[] = [];
+  let page = pdf.addPage([612, 792]);
+  pages.push(page);
+  const showFirmAtTop = (tpl.firmBlockPosition ?? "header") === "header";
+  const firmBlockBottomY = drawPleadingPaper(page, regularFont, options.firmBlockLines, 1, showFirmAtTop, dblLeft, rLine);
+
+  const baseFirstCaptionLineY = 693;
+  const requiredCaptionGap = 16;
+  const preferredExtraDrop = 64;
+  const captionYOffset = typeof firmBlockBottomY === "number"
+    ? Math.max(preferredExtraDrop, (firmBlockBottomY + requiredCaptionGap) - baseFirstCaptionLineY)
+    : preferredExtraDrop;
+  const cy = (y: number) => y - captionYOffset;
+
+  // Agency line (centered, bold, underlined)
+  if (tpl.agencyLine) {
+    drawCenteredUnderline(page, boldFont, tpl.agencyLine, 12, cy(738));
+  }
+
+  // Officer line (centered, bold, underlined)
+  drawCenteredUnderline(page, boldFont, tpl.heading, 12, cy(724));
+
+  // Caption divider
+  drawCaptionDivider(page, regularFont, captionYOffset);
+
+  // Caption preamble (left side)
+  const preambleLines = tpl.captionPreambleLines;
+  const preambleStartY = cy(693);
+  for (let i = 0; i < preambleLines.length; i++) {
+    page.drawText(preambleLines[i], { x: 84, y: preambleStartY - i * 15, size: 12, font: regularFont });
+  }
+  const afterPreambleY = preambleStartY - preambleLines.length * 15 - 17;
+  page.drawText(`${options.caption.claimantName},`, { x: 84, y: afterPreambleY, size: 12, font: regularFont });
+  page.drawText("Claimant.", { x: 84, y: afterPreambleY - 15, size: 12, font: regularFont });
+
+  // Caption fields (right side)
+  const rightX = 362;
+  const captionFieldDefs = tpl.captionFields;
+  const captionFieldSpacing = 20;
+  for (let i = 0; i < captionFieldDefs.length; i++) {
+    const field = captionFieldDefs[i];
+    const value = (options.caption as Record<string, unknown>)[field.key]
+      ?? options.caption.captionValues?.[field.key];
+    drawRightField(page, boldFont, regularFont, rightX, cy(693) - i * captionFieldSpacing, field.label, String(value ?? ""), 12);
+  }
+
+  const captionBottomY = 618 - captionYOffset;
+  let currentY = captionBottomY;
+
+  // Document title (centered, bold + underline)
+  if (tpl.documentTitle) {
+    currentY -= 24;
+    drawCenteredUnderline(page, boldFont, tpl.documentTitle, 12, currentY);
+    currentY -= 24;
+  }
+
+  // COMES NOW paragraph (first-line indent ~25pt, double-spaced)
+  const counselPreambleRaw = tpl.counselPreamble;
+  const intro = interpolateTemplateText(counselPreambleRaw, options.caption);
+  currentY = drawWrappedTextIndented(page, intro, 84, currentY, 461, regularFont, 12, 24, 25);
+  currentY -= 12;
+
+  // Extra sections (ISSUE, WITNESSES, DURATION)
+  if (tpl.extraSections && tpl.extraSections.length > 0) {
+    for (const section of tpl.extraSections) {
+      drawCenteredUnderline(page, boldFont, section.title, 12, currentY);
+      currentY -= 24;
+      const sectionValue = options.extraSectionValues?.[section.key] || "";
+      if (sectionValue) {
+        currentY = drawWrappedTextIndented(page, sectionValue, 84, currentY, 461, regularFont, 12, 24, 25);
+        currentY -= 12;
+      }
+    }
+  }
+
+  // ── Compute signature block data before measuring height ──
+  const sigLineHeight = 14;
+  const displayFirmName = options.firmName || "";
+  const signerDisplayName = options.signerName || options.caption.introductoryCounselLine || "";
+  const cleanedFirmLines = (options.firmBlockLines || [])
+    .map((l) => l.trim().replace(/\[[^\]]+\]/g, "").trim())
+    .filter((l) => l && !/not configured/i.test(l));
+  const filteredFirmLines = cleanedFirmLines.filter((line) => {
+    if (displayFirmName && line.toLowerCase() === displayFirmName.toLowerCase()) return false;
+    if (signerDisplayName && line.toLowerCase() === signerDisplayName.toLowerCase()) return false;
+    return true;
+  });
+
+  // Count signature block lines
+  let sigBlockLineCount = 2; // "Respectfully submitted," + "By: ___"
+  if (displayFirmName) sigBlockLineCount += 1;
+  if (signerDisplayName) sigBlockLineCount += 1;
+  sigBlockLineCount += filteredFirmLines.length;
+  sigBlockLineCount += 1; // "Attorney for Claimant"
+
+  const affirmHeight =
+    24 +       // affirmation title
+    32 +       // affirmation text (~2 lines at 16pt)
+    6 +        // gap
+    20 +       // checkbox
+    24 +       // dated line
+    (sigBlockLineCount * sigLineHeight) +
+    6 +        // gap before "By:"
+    50;        // bottom margin safety
+
+  const pageBottom = 76;
+  const affirmStartY = pageBottom + affirmHeight;
+
+  // ── Smart page overflow ──
+  const minFillerSpace = 24;
+  if (currentY < affirmStartY + minFillerSpace) {
+    // Not enough room — fill this page with "///" then start a new page
+    while (currentY > pageBottom) {
+      drawCentered(page, regularFont, "///", 12, currentY);
+      currentY -= 24;
+    }
+    page = pdf.addPage([612, 792]);
+    pages.push(page);
+    drawPleadingPaper(page, regularFont, options.firmBlockLines, pages.length, false, dblLeft, rLine);
+    currentY = 724;
+  }
+
+  // Fill with "///" down to the affirmation start
+  while (currentY > affirmStartY + 24) {
+    drawCentered(page, regularFont, "///", 12, currentY);
+    currentY -= 24;
+  }
+
+  // ── AFFIRMATION heading ──
+  currentY = affirmStartY;
+  drawCenteredUnderline(page, boldFont, tpl.affirmationTitle, 12, currentY);
+  currentY -= 24;
+
+  // Affirmation text
+  const affirmationText = interpolateTemplateText(tpl.affirmationText, options.caption);
+  currentY = drawWrappedText(page, affirmationText, 84, currentY, 461, regularFont, 12, 16);
+  currentY -= 6;
+
+  // "× Does not contain..." checkbox line
+  page.drawText("\u00D7 Does not contain personal information as defined by NRS 603A.040", {
+    x: 84, y: currentY, size: 11, font: regularFont,
+  });
+  currentY -= 20;
+
+  // Dated line
+  const serviceDate = options.service?.serviceDate || new Date().toLocaleDateString("en-US");
+  page.drawText(`Dated: ${serviceDate}`, { x: 84, y: currentY, size: 12, font: regularFont });
+  currentY -= 24;
+
+  // ── Signature block ──
+  page.drawText("Respectfully submitted,", { x: 84, y: currentY, size: 12, font: regularFont });
+  currentY -= sigLineHeight;
+
+  // Bold firm name (from dedicated firmName, not firmBlockLines[0])
+  if (displayFirmName) {
+    page.drawText(displayFirmName, { x: 84, y: currentY, size: 12, font: boldFont });
+    currentY -= sigLineHeight;
+  }
+
+  currentY -= 6;
+  page.drawText("By: ________________", { x: 84, y: currentY, size: 12, font: regularFont });
+  currentY -= sigLineHeight;
+
+  // Signer name
+  if (signerDisplayName) {
+    page.drawText(signerDisplayName, { x: 84, y: currentY, size: 12, font: regularFont });
+    currentY -= sigLineHeight;
+  }
+
+  // Remaining firm lines (bar number, address, phone) — skip firm name & signer duplicates
+  for (const line of filteredFirmLines) {
+    page.drawText(line, { x: 84, y: currentY, size: 12, font: regularFont });
+    currentY -= sigLineHeight;
+  }
+
+  // "Attorney for Claimant" (italic)
+  page.drawText("Attorney for Claimant", { x: 84, y: currentY, size: 12, font: italicFont });
+
+  // ── Page 2: Document Index ─────────────────────────────────────────
+  page = pdf.addPage([612, 792]);
+  pages.push(page);
+  drawPleadingPaper(page, regularFont, options.firmBlockLines, pages.length, false, dblLeft, rLine);
+
+  let idxY = 724;
+  drawCenteredUnderline(page, boldFont, tpl.indexTitle ?? "DOCUMENT INDEX", 12, idxY);
+  idxY -= 30;
+
+  // Column headers (underlined)
+  const hdrSize = 12;
+  const dateHdrX = 84;
+  const docHdrX = 170;
+  const pageHdrX = 530;
+  const dateHdrText = "DATE";
+  const docHdrText = "DOCUMENTS";
+  const pageHdrText = "PAGE NO(S)";
+
+  page.drawText(dateHdrText, { x: dateHdrX, y: idxY, size: hdrSize, font: boldFont });
+  const dateHdrW = boldFont.widthOfTextAtSize(dateHdrText, hdrSize);
+  page.drawLine({ start: { x: dateHdrX, y: idxY - 1.5 }, end: { x: dateHdrX + dateHdrW, y: idxY - 1.5 }, thickness: 0.5, color: rgb(0, 0, 0) });
+
+  page.drawText(docHdrText, { x: docHdrX, y: idxY, size: hdrSize, font: boldFont });
+  const docHdrW = boldFont.widthOfTextAtSize(docHdrText, hdrSize);
+  page.drawLine({ start: { x: docHdrX, y: idxY - 1.5 }, end: { x: docHdrX + docHdrW, y: idxY - 1.5 }, thickness: 0.5, color: rgb(0, 0, 0) });
+
+  const pageHdrW = boldFont.widthOfTextAtSize(pageHdrText, hdrSize);
+  page.drawText(pageHdrText, { x: pageHdrX - pageHdrW, y: idxY, size: hdrSize, font: boldFont });
+  page.drawLine({ start: { x: pageHdrX - pageHdrW, y: idxY - 1.5 }, end: { x: pageHdrX, y: idxY - 1.5 }, thickness: 0.5, color: rgb(0, 0, 0) });
+
+  idxY -= 28;
+
+  const tableBottom = 90;
+  const rowHeight = 24;
+  for (let i = 0; i < tocEntries.length; i++) {
+    if (idxY < tableBottom) {
+      page = pdf.addPage([612, 792]);
+      pages.push(page);
+      drawPleadingPaper(page, regularFont, options.firmBlockLines, pages.length, false, dblLeft, rLine);
+      drawCenteredUnderline(page, boldFont, "DOCUMENT INDEX (CONT.)", 12, 724);
+      // Repeat column headers
+      idxY = 694;
+      page.drawText(dateHdrText, { x: dateHdrX, y: idxY, size: hdrSize, font: boldFont });
+      page.drawLine({ start: { x: dateHdrX, y: idxY - 1.5 }, end: { x: dateHdrX + dateHdrW, y: idxY - 1.5 }, thickness: 0.5, color: rgb(0, 0, 0) });
+      page.drawText(docHdrText, { x: docHdrX, y: idxY, size: hdrSize, font: boldFont });
+      page.drawLine({ start: { x: docHdrX, y: idxY - 1.5 }, end: { x: docHdrX + docHdrW, y: idxY - 1.5 }, thickness: 0.5, color: rgb(0, 0, 0) });
+      page.drawText(pageHdrText, { x: pageHdrX - pageHdrW, y: idxY, size: hdrSize, font: boldFont });
+      page.drawLine({ start: { x: pageHdrX - pageHdrW, y: idxY - 1.5 }, end: { x: pageHdrX, y: idxY - 1.5 }, thickness: 0.5, color: rgb(0, 0, 0) });
+      idxY -= 28;
+    }
+
+    const entry = tocEntries[i];
+    const dateStr = entry.date || "";
+    const pgRange = formatPageRange(entry.startPage, entry.endPage);
+    drawTocRow3Col(page, regularFont, dateStr, entry.title, pgRange, idxY);
+    idxY -= rowHeight;
+  }
+
+  // ── Page 3: Certificate of Mailing ─────────────────────────────────
+  page = pdf.addPage([612, 792]);
+  pages.push(page);
+  drawPleadingPaper(page, regularFont, options.firmBlockLines, pages.length, false, dblLeft, rLine);
+
+  let certY = 724;
+  drawCenteredUnderline(page, boldFont, tpl.certTitle ?? "CERTIFICATE OF MAILING", 12, certY);
+  certY -= 30;
+
+  // Cert intro paragraph
+  const certIntroRaw = tpl.certIntro;
+  const certIntro = interpolateTemplateText(certIntroRaw, options.caption);
+  certY = drawWrappedTextIndented(page, certIntro, 84, certY, 461, regularFont, 12, 24, 25);
+  certY -= 24;
+
+  // Recipients in single-spaced address blocks
+  const recipients = options.service?.recipients && options.service.recipients.length > 0
+    ? options.service.recipients
+    : ["Recipient details to be provided by counsel."];
+  for (const recipient of recipients) {
+    // Each recipient may have multi-line address separated by newlines
+    const lines = recipient.split(/\n/);
+    for (const line of lines) {
+      page.drawText(line.trim(), { x: 120, y: certY, size: 12, font: regularFont });
+      certY -= 14;
+    }
+    certY -= 10; // blank line between recipients
+  }
+
+  return pages.length;
+}
+
+/** Like drawWrappedText but with a first-line indent for each paragraph. */
+function drawWrappedTextIndented(
+  page: PDFPage,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  font: PDFFont,
+  size: number,
+  lineHeight: number,
+  firstLineIndent: number,
+): number {
+  const paragraphs = text.split(/\n+/);
+  let cursorY = y;
+  for (const paragraph of paragraphs) {
+    const words = paragraph.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) {
+      cursorY -= lineHeight;
+      continue;
+    }
+
+    let isFirstLine = true;
+    let line = "";
+    const indentedX = x + firstLineIndent;
+    const firstLineMaxWidth = maxWidth - firstLineIndent;
+
+    for (const word of words) {
+      const candidate = line ? `${line} ${word}` : word;
+      const currentMaxWidth = isFirstLine ? firstLineMaxWidth : maxWidth;
+      const width = font.widthOfTextAtSize(candidate, size);
+      if (width <= currentMaxWidth) {
+        line = candidate;
+      } else {
+        if (line) {
+          const drawX = isFirstLine ? indentedX : x;
+          page.drawText(line, { x: drawX, y: cursorY, size, font });
+          cursorY -= lineHeight;
+          isFirstLine = false;
+        }
+        line = word;
+      }
+    }
+
+    if (line) {
+      const drawX = isFirstLine ? indentedX : x;
+      page.drawText(line, { x: drawX, y: cursorY, size, font });
+      cursorY -= lineHeight;
+    }
+  }
+
+  return cursorY;
+}
+
 function addIndexPages(
   pdf: PDFDocument,
   regularFont: PDFFont,
@@ -1044,7 +1452,9 @@ function drawPleadingPaper(
   font: PDFFont,
   firmBlockLines: string[] | undefined,
   pageNumber: number,
-  showFirmBlock = true
+  showFirmBlock = true,
+  doubleLeftLine = false,
+  rightLine = false
 ): number | undefined {
   const top = 760;
   const bottom = 76;
@@ -1070,6 +1480,24 @@ function drawPleadingPaper(
     thickness: 0.5,
     color: rgb(0.7, 0.7, 0.7),
   });
+
+  if (doubleLeftLine) {
+    page.drawLine({
+      start: { x: 58, y: bottom - 10 },
+      end: { x: 58, y: top + 8 },
+      thickness: 0.5,
+      color: rgb(0.7, 0.7, 0.7),
+    });
+  }
+
+  if (rightLine) {
+    page.drawLine({
+      start: { x: 556, y: bottom - 10 },
+      end: { x: 556, y: top + 8 },
+      thickness: 0.5,
+      color: rgb(0.7, 0.7, 0.7),
+    });
+  }
 
   let firmBlockBottomY: number | undefined;
 

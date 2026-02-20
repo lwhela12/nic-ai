@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import Anthropic from "@anthropic-ai/sdk";
 import { readdir, readFile, writeFile, mkdir, stat, unlink } from "fs/promises";
 import { join, dirname, basename, resolve, sep, extname } from "path";
 import { resolveFirmRoot, getClientSlug, loadClientRegistry, scanAndBuildRegistry, resolveYearFilePath } from "../lib/year-mode";
@@ -28,6 +29,17 @@ import {
 } from "../lib/evidence-packet";
 
 const execAsync = promisify(exec);
+
+let _anthropic: Anthropic | null = null;
+function getClient(): Anthropic {
+  if (!_anthropic) {
+    _anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      fetch: globalThis.fetch.bind(globalThis),
+    });
+  }
+  return _anthropic;
+}
 
 function isCourtCriticalDocumentType(documentType?: ExportOptions["documentType"]): boolean {
   return documentType === "letter" || documentType === "hearing_decision";
@@ -1404,6 +1416,22 @@ app.post("/preview-front-matter", async (c) => {
       }
     }
 
+    // Extract firmName from config for interpolation and signature block
+    const configRoot = firmRoot || resolveFirmRoot(caseFolder);
+    let firmNameValue = "";
+    try {
+      const configPath = join(configRoot, ".ai_tool", "firm-config.json");
+      const configContent = await readFile(configPath, "utf-8");
+      const config = JSON.parse(configContent);
+      firmNameValue = config?.firmName || "";
+    } catch { /* no config */ }
+
+    // Compute service date tokens for template interpolation
+    const sDateRaw = frontMatter.serviceDate || new Date().toLocaleDateString("en-US");
+    const sDate = new Date(sDateRaw);
+    const serviceMonth = sDate.toLocaleString("en-US", { month: "long" });
+    const serviceYear = String(sDate.getFullYear());
+
     const caption: EvidencePacketCaption = {
       claimantName: frontMatter.claimantName || "",
       claimNumber: frontMatter.claimNumber,
@@ -1411,7 +1439,12 @@ app.post("/preview-front-matter", async (c) => {
       hearingDateTime: frontMatter.hearingDateTime,
       appearance: frontMatter.appearance,
       introductoryCounselLine: frontMatter.introductoryCounselLine,
-      captionValues: frontMatter.captionValues,
+      captionValues: {
+        ...frontMatter.captionValues,
+        serviceMonth,
+        serviceYear,
+        firmName: firmNameValue,
+      },
     };
 
     const service: EvidencePacketServiceInfo = {
@@ -1421,7 +1454,6 @@ app.post("/preview-front-matter", async (c) => {
     };
 
     // Load template if specified
-    const configRoot = firmRoot || resolveFirmRoot(caseFolder);
     let template: PacketTemplate | undefined;
     if (templateId) {
       template = (await findTemplateById(configRoot, templateId)) ?? undefined;
@@ -1436,6 +1468,7 @@ app.post("/preview-front-matter", async (c) => {
       template,
       signerName: frontMatter.signerName,
       extraSectionValues: frontMatter.extraSectionValues,
+      firmName: firmNameValue,
     });
 
     // Write to .ai_tool so the preview can be served via GET /api/files/view
@@ -1505,6 +1538,22 @@ app.post("/generate-packet", async (c) => {
       return c.json({ error: "None of the selected documents matched indexed files" }, 400);
     }
 
+    // Extract firmName from config for interpolation and signature block
+    const configRoot = firmRoot || resolveFirmRoot(caseFolder);
+    let firmNameValue = "";
+    try {
+      const configPath = join(configRoot, ".ai_tool", "firm-config.json");
+      const configContent = await readFile(configPath, "utf-8");
+      const config = JSON.parse(configContent);
+      firmNameValue = config?.firmName || "";
+    } catch { /* no config */ }
+
+    // Compute service date tokens for template interpolation
+    const sDateRaw = frontMatter.serviceDate || new Date().toLocaleDateString("en-US");
+    const sDate = new Date(sDateRaw);
+    const serviceMonth = sDate.toLocaleString("en-US", { month: "long" });
+    const serviceYear = String(sDate.getFullYear());
+
     const caption: EvidencePacketCaption = {
       claimantName: frontMatter.claimantName || "",
       claimNumber: frontMatter.claimNumber,
@@ -1512,7 +1561,12 @@ app.post("/generate-packet", async (c) => {
       hearingDateTime: frontMatter.hearingDateTime,
       appearance: frontMatter.appearance,
       introductoryCounselLine: frontMatter.introductoryCounselLine,
-      captionValues: frontMatter.captionValues,
+      captionValues: {
+        ...frontMatter.captionValues,
+        serviceMonth,
+        serviceYear,
+        firmName: firmNameValue,
+      },
     };
 
     const service: EvidencePacketServiceInfo = {
@@ -1524,7 +1578,6 @@ app.post("/generate-packet", async (c) => {
     const resolveDocPath = await buildDocPathResolver(caseFolder);
 
     // Load template if specified
-    const configRoot = firmRoot || resolveFirmRoot(caseFolder);
     let template: PacketTemplate | undefined;
     if (templateId || frontMatter.templateId) {
       template = (await findTemplateById(configRoot, templateId || frontMatter.templateId)) ?? undefined;
@@ -1544,6 +1597,7 @@ app.post("/generate-packet", async (c) => {
       template,
       signerName: frontMatter.signerName,
       extraSectionValues: frontMatter.extraSectionValues,
+      firmName: firmNameValue,
     });
 
     // Determine output path
@@ -1644,7 +1698,12 @@ async function findTemplateById(firmRoot: string, id: string): Promise<PacketTem
     const indexContent = await readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
     const entry = (index.templates || []).find(
-      (t: any) => t.type === "packet" && t.packetConfig && t.packetConfig.id === id
+      (t: any) => {
+        if (t.type !== "packet" || !t.packetConfig) return false;
+        if (t.id === id || t.packetConfig.id === id) return true;
+        return Array.isArray(t.packetConfig.legacyPacketIds)
+          && t.packetConfig.legacyPacketIds.includes(id);
+      }
     );
     if (entry?.packetConfig) return entry.packetConfig;
   } catch {
@@ -1653,5 +1712,77 @@ async function findTemplateById(firmRoot: string, id: string): Promise<PacketTem
 
   return null;
 }
+
+// Generate an "Issue on Appeal" statement from case data
+app.post("/generate-issue", async (c) => {
+  const { caseFolder, hearingNumber } = await c.req.json();
+
+  if (!caseFolder) {
+    return c.json({ error: "caseFolder required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  // Load document index for case context
+  let indexData: any;
+  try {
+    const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+    const indexContent = await readFile(indexPath, "utf-8");
+    indexData = JSON.parse(indexContent);
+  } catch {
+    return c.json({ error: "Case has not been indexed yet" }, 404);
+  }
+
+  const summary = indexData?.summary || {};
+  const contextParts: string[] = [];
+  if (summary.client) contextParts.push(`Claimant: ${summary.client}`);
+  if (summary.injury_date) contextParts.push(`Date of Injury: ${summary.injury_date}`);
+  if (summary.employer) contextParts.push(`Employer: ${summary.employer}`);
+  if (summary.body_parts) contextParts.push(`Body Parts: ${Array.isArray(summary.body_parts) ? summary.body_parts.join(", ") : summary.body_parts}`);
+  if (summary.case_phase) contextParts.push(`Case Phase: ${summary.case_phase}`);
+  if (hearingNumber) contextParts.push(`Hearing/Appeal Number: ${hearingNumber}`);
+  if (summary.reconciled) {
+    const rec = summary.reconciled;
+    if (rec.accepted_conditions) contextParts.push(`Accepted Conditions: ${Array.isArray(rec.accepted_conditions) ? rec.accepted_conditions.join(", ") : rec.accepted_conditions}`);
+    if (rec.denied_conditions) contextParts.push(`Denied Conditions: ${Array.isArray(rec.denied_conditions) ? rec.denied_conditions.join(", ") : rec.denied_conditions}`);
+    if (rec.disputed_issues) contextParts.push(`Disputed Issues: ${Array.isArray(rec.disputed_issues) ? rec.disputed_issues.join(", ") : rec.disputed_issues}`);
+  }
+
+  const caseContext = contextParts.join("\n");
+
+  const prompt = `You are a workers' compensation legal assistant. Based on the following case data, write a concise 1-2 sentence "Issue on Appeal" statement in the standard "Whether..." format used in Nevada workers' compensation hearings.
+
+CASE DATA:
+${caseContext}
+
+Return ONLY the issue statement, nothing else. Do not include quotes around it.`;
+
+  try {
+    const response = await getClient().messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 300,
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    const textBlock = response.content.find((b) => b.type === "text");
+    if (!textBlock || textBlock.type !== "text") {
+      return c.json({ error: "No response from model" }, 500);
+    }
+
+    // Strip surrounding quotes if present
+    let issue = textBlock.text.trim();
+    if ((issue.startsWith('"') && issue.endsWith('"')) || (issue.startsWith("'") && issue.endsWith("'"))) {
+      issue = issue.slice(1, -1).trim();
+    }
+
+    return c.json({ success: true, issue });
+  } catch (err) {
+    console.error("generate-issue error:", err);
+    return c.json({ error: `Generation failed: ${err}` }, 500);
+  }
+});
 
 export default app;
