@@ -21,6 +21,7 @@ import {
   applyManualRedactionBoxes,
   buildEvidencePacket,
   buildFrontMatterPreview,
+  renderDocxWithLibreOffice,
   BUILT_IN_TEMPLATES,
   type PacketTemplate,
   type EvidencePacketManualRedactionBox,
@@ -368,6 +369,7 @@ app.post("/save", async (c) => {
 
 // Export endpoint - converts markdown to DOCX/PDF and saves to case folder
 // Used by agent to generate proper binary files
+// Supports optional templateId for DOCX-template-aware export (pixel-perfect PDF)
 app.post("/export", async (c) => {
   const {
     caseFolder,
@@ -381,6 +383,7 @@ app.post("/export", async (c) => {
     showLetterhead,
     showPageNumbers,
     styleProfile,
+    templateId,
   } = await c.req.json();
 
   if (!caseFolder || !sourcePath || !format) {
@@ -440,19 +443,65 @@ app.post("/export", async (c) => {
     };
     console.log(`[Export] exportOptions: showLetterhead=${exportOptions.showLetterhead}, documentType=${inferredType}, hasFirmInfo=${!!exportOptions.firmInfo}`);
 
-    if (format === "docx") {
-      const html = markdownToHtml(content, exportOptions);
-      const docxBuffer = await htmlToDocx(html, nameWithoutExt, {
-        documentType: inferredType,
-        firmInfo: firmInfo || undefined,
-        showLetterhead: shouldShowLetterhead,
-      });
-      await writeFile(fullOutputPath, docxBuffer);
-    } else {
-      const pdfBuffer = inferredType === "hearing_decision"
-        ? await markdownToHearingDecisionPdf(content, nameWithoutExt, exportOptions)
-        : await htmlToPdf(markdownToHtml(content, exportOptions), nameWithoutExt, exportOptions);
-      await writeFile(fullOutputPath, pdfBuffer);
+    // Template-aware DOCX export path: if a templateId points to a DOCX template,
+    // inject the agent's content into the template variables and convert via LibreOffice
+    let usedDocxTemplate = false;
+    if (templateId && format === "pdf") {
+      try {
+        const templatesDir = join(firmInfoRoot, ".ai_tool", "templates");
+        const indexPath = join(templatesDir, "templates.json");
+        const indexContent = await readFile(indexPath, "utf-8");
+        const index = JSON.parse(indexContent);
+        const entry = (index.templates || []).find(
+          (t: any) => t.id === templateId && t.type === "document"
+        );
+        if (entry?.sourceFile && entry.sourceFile.toLowerCase().endsWith(".docx")) {
+          // Load the templatized DOCX (prefer templatized/ copy over source/)
+          const templatizedPath = join(templatesDir, "templatized", entry.sourceFile.replace(/^(source|templatized)\//, ""));
+          const sourceFallback = join(templatesDir, entry.sourceFile);
+          let docxBytes: Buffer;
+          try {
+            docxBytes = await readFile(templatizedPath);
+          } catch {
+            docxBytes = await readFile(sourceFallback);
+          }
+
+          // Inject the markdown content as {{documentBody}} into the DOCX
+          const PizZip = (await import("pizzip")).default;
+          const Docxtemplater = (await import("docxtemplater")).default;
+          const zip = new PizZip(docxBytes);
+          const doc = new Docxtemplater(zip, {
+            paragraphLoop: true,
+            linebreaks: true,
+            delimiters: { start: "{{", end: "}}" },
+          });
+          doc.render({ documentBody: content });
+          const filledBuffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+          const pdfBytes = await renderDocxWithLibreOffice(filledBuffer);
+          await writeFile(fullOutputPath, pdfBytes);
+          usedDocxTemplate = true;
+          console.log(`[Export] Used DOCX template "${templateId}" for pixel-perfect PDF export`);
+        }
+      } catch (tplErr) {
+        console.warn(`[Export] DOCX template export failed, falling back to standard export: ${tplErr instanceof Error ? tplErr.message : tplErr}`);
+      }
+    }
+
+    if (!usedDocxTemplate) {
+      if (format === "docx") {
+        const html = markdownToHtml(content, exportOptions);
+        const docxBuffer = await htmlToDocx(html, nameWithoutExt, {
+          documentType: inferredType,
+          firmInfo: firmInfo || undefined,
+          showLetterhead: shouldShowLetterhead,
+        });
+        await writeFile(fullOutputPath, docxBuffer);
+      } else {
+        const pdfBuffer = inferredType === "hearing_decision"
+          ? await markdownToHearingDecisionPdf(content, nameWithoutExt, exportOptions)
+          : await htmlToPdf(markdownToHtml(content, exportOptions), nameWithoutExt, exportOptions);
+        await writeFile(fullOutputPath, pdfBuffer);
+      }
     }
 
     // Auto-open in default application if requested
@@ -1469,6 +1518,7 @@ app.post("/preview-front-matter", async (c) => {
       signerName: frontMatter.signerName,
       extraSectionValues: frontMatter.extraSectionValues,
       firmName: firmNameValue,
+      caseFolder: configRoot,
     });
 
     // Write to .ai_tool so the preview can be served via GET /api/files/view

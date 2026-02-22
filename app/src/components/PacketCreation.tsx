@@ -262,7 +262,7 @@ export default function PacketCreation({
       })
       if (res.ok) {
         const { url } = await res.json()
-        onPreviewReady(`${apiUrl}${url}`)
+        onPreviewReady(`${apiUrl}${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}`)
       }
     } catch { /* ignore */ }
     setIsPreviewing(false)

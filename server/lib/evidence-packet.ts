@@ -364,13 +364,17 @@ export async function buildEvidencePacket(
   if (options.template?.sourceFile && options.template.sourceFile.toLowerCase().endsWith(".docx")) {
     let docxRendered = false;
     try {
+      console.log(`[EvidencePacket] Using DOCX template path: ${options.template.sourceFile}`);
       const docxPdfBytes = await buildDocxFrontMatter(
         options.template,
         options.caption,
         options.service,
         tocEntries,
         options.firmName,
-        options.resolveDocPath || ((p) => resolveCasePath(options.caseFolder, p))
+        options.resolveDocPath || ((p) => resolveCasePath(options.caseFolder, p)),
+        options.extraSectionValues,
+        options.firmBlockLines,
+        options.signerName,
       );
       const frontMatterPdf = await PDFDocument.load(docxPdfBytes);
       const fmPages = await pdf.copyPages(frontMatterPdf, frontMatterPdf.getPageIndices());
@@ -379,8 +383,9 @@ export async function buildEvidencePacket(
       }
       docxRendered = true;
     } catch (docxErr) {
+      console.error(`[EvidencePacket] DOCX rendering failed:`, docxErr);
+      console.error(`[EvidencePacket] FALLING BACK to pdf-lib layout`);
       const errMsg = docxErr instanceof Error ? docxErr.message : String(docxErr);
-      console.error(`[EvidencePacket] DOCX/LibreOffice rendering failed, falling back to pdf-lib layout: ${errMsg}`);
       warnings.push(`DOCX template rendering failed (${errMsg}). Used built-in layout as fallback.`);
     }
     if (!docxRendered) {
@@ -486,16 +491,21 @@ export async function buildFrontMatterPreview(options: {
   // DO NOT REVERT .docx FILES TO THE HTML PATH.
   if (options.template?.sourceFile && options.template.sourceFile.toLowerCase().endsWith(".docx")) {
     try {
+      console.log(`[FrontMatterPreview] Using DOCX template path: ${options.template.sourceFile}`);
       return await buildDocxFrontMatter(
         options.template,
         options.caption,
         options.service,
         options.tocEntries,
         options.firmName,
-        resolveDoc
+        resolveDoc,
+        options.extraSectionValues,
+        options.firmBlockLines,
+        options.signerName,
       );
     } catch (docxErr) {
-      console.error(`[FrontMatterPreview] DOCX rendering failed, falling back to pdf-lib: ${docxErr instanceof Error ? docxErr.message : docxErr}`);
+      console.error(`[FrontMatterPreview] DOCX rendering failed:`, docxErr);
+      console.error(`[FrontMatterPreview] FALLING BACK to pdf-lib layout`);
       // Fall through to pdf-lib fallback below
     }
   } else if (options.template?.sourceFile && options.template.sourceFile.toLowerCase().endsWith(".pdf")) {
@@ -1810,6 +1820,15 @@ function formatError(error: unknown): string {
 }
 
 /**
+ * Flatten inline SDTs (structured document tags / content controls) in DOCX XML.
+ * Docxtemplater cannot parse inline SDTs and throws "Malformed xml".
+ * Replace each <w:sdt>...</w:sdt> with the runs inside <w:sdtContent>.
+ */
+function flattenInlineSDTs(xml: string): string {
+  return xml.replace(/<w:sdt>[\s\S]*?<w:sdtContent>([\s\S]*?)<\/w:sdtContent>[\s\S]*?<\/w:sdt>/g, "$1");
+}
+
+/**
  * Merge split template tags in DOCX XML.
  */
 function mergeDocxTemplateRuns(zip: PizZip): void {
@@ -1818,6 +1837,11 @@ function mergeDocxTemplateRuns(zip: PizZip): void {
     const file = zip.file(xmlPath);
     if (!file) continue;
     let xml = file.asText();
+    // Repair common XML corruption from injectVariablesIntoDocx:
+    // Missing space between tag name and attribute, e.g. <w:txml:space="preserve">
+    xml = xml.replace(/<w:txml:space=/g, '<w:t xml:space=');
+    // Flatten inline SDTs before merging runs (docxtemplater can't handle them)
+    xml = flattenInlineSDTs(xml);
     xml = xml.replace(/<w:p[\s>][\s\S]*?<\/w:p>/g, (paragraph) => {
       // Skip paragraphs containing text boxes — nested <w:p> elements
       // would cause the regex to slice incorrectly, corrupting the XML
@@ -1830,7 +1854,7 @@ function mergeDocxTemplateRuns(zip: PizZip): void {
       }
       if (runs.length < 2) return paragraph;
       const getRunText = (run: string): string => {
-        const tMatch = run.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/);
+        const tMatch = run.match(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/);
         return tMatch ? tMatch[1] : "";
       };
       const allText = runs.map((r) => getRunText(r.match)).join("");
@@ -1858,8 +1882,8 @@ function mergeDocxTemplateRuns(zip: PizZip): void {
             const firstRun = runs[i].match;
             const escapedCombined = combined.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
             let mergedRun: string;
-            if (/<w:t[^>]*>/.test(firstRun)) {
-              mergedRun = firstRun.replace(/<w:t[^>]*>[\s\S]*?<\/w:t>/, `<w:t xml:space="preserve">${escapedCombined}</w:t>`);
+            if (/<w:t(?:\s[^>]*)?>/.test(firstRun)) {
+              mergedRun = firstRun.replace(/<w:t(?:\s[^>]*)?>[\s\S]*?<\/w:t>/, `<w:t xml:space="preserve">${escapedCombined}</w:t>`);
             } else {
               mergedRun = firstRun.replace(/<\/w:r>/, `<w:t xml:space="preserve">${escapedCombined}</w:t></w:r>`);
             }
@@ -1924,7 +1948,10 @@ async function buildDocxFrontMatter(
   service: EvidencePacketServiceInfo | undefined,
   tocEntries: EvidencePacketTocEntry[],
   firmName: string | undefined,
-  resolveDocPath: (relativePath: string) => string
+  resolveDocPath: (relativePath: string) => string,
+  extraSectionValues?: Record<string, string>,
+  firmBlockLines?: string[],
+  signerName?: string,
 ): Promise<Uint8Array> {
   if (!template.sourceFile) throw new Error("Template missing sourceFile property");
   // sourceFile can be "templatized/filename.docx" or "source/filename.docx"
@@ -1971,12 +1998,17 @@ async function buildDocxFrontMatter(
   const documentIndexText = documentIndexLines.join("\n");
 
   const docxData: Record<string, string | object[]> = {
+    // Standard fields
     claimantName: caption.claimantName || "",
     claimNumber: caption.claimNumber || "",
     hearingNumber: caption.hearingNumber || "",
     hearingDateTime: caption.hearingDateTime || "",
     firmName: firmName || "Our Firm",
     appearance: caption.appearance || "",
+    // Common aliases — DOCX injector may use different variable names than the UI keys
+    appealNumber: caption.hearingNumber || caption.captionValues?.["hearingNumber"] || "",
+    employer: caption.captionValues?.["employer"] || "",
+    hearingNo: caption.captionValues?.["hearingNo"] || "",
     currentDate: new Date().toLocaleDateString(),
     serviceMonth: sDate.toLocaleString('default', { month: 'long' }),
     serviceYear: sDate.getFullYear().toString(),
@@ -1992,17 +2024,81 @@ async function buildDocxFrontMatter(
         ? String(entry.startPage)
         : `${entry.startPage}-${entry.endPage}`,
     })),
+    // Template text fields the AI may have injected
+    counselPreamble: interpolateTemplateText(template.counselPreamble || "", caption),
+    affirmationTitle: template.affirmationTitle || "",
+    affirmationText: interpolateTemplateText(template.affirmationText || "", caption),
+    certTitle: template.certTitle || "",
+    certIntro: interpolateTemplateText(template.certIntro || "", caption),
+    indexTitle: template.indexTitle || "",
+    heading: template.heading || "",
+    agencyLine: template.agencyLine || "",
+    documentTitle: template.documentTitle || "",
+    // Firm/signer data
+    signerName: signerName || "",
+    firmBlockText: (firmBlockLines || []).join("\n"),
+    attorneyNames: (firmBlockLines || []).join("\n"),
+    // Extra section values (issueOnAppeal, etc.)
+    ...(extraSectionValues || {}),
+    // Caption values LAST (user input overrides defaults)
     ...caption.captionValues,
   };
   const zip = new PizZip(masterBytes);
   mergeDocxTemplateRuns(zip);
+
+  // --- DIAGNOSTIC: scan template for variables ---
+  const allXmlParts = ["word/document.xml", "word/header1.xml", "word/header2.xml",
+    "word/header3.xml", "word/footer1.xml", "word/footer2.xml", "word/footer3.xml"];
+  const templateVars = new Set<string>();
+  for (const part of allXmlParts) {
+    const f = zip.file(part);
+    if (!f) continue;
+    const xml = f.asText();
+    for (const m of xml.matchAll(/\{\{(\w+)\}\}/g)) {
+      templateVars.add(m[1]);
+    }
+  }
+  const dataKeys = new Set(Object.keys(docxData));
+  const unresolved = [...templateVars].filter(v => !dataKeys.has(v));
+  const unused = [...dataKeys].filter(k => !templateVars.has(k));
+  console.log(`[DOCX] Template variables found: ${[...templateVars].join(", ") || "(none)"}`);
+  console.log(`[DOCX] Data keys provided: ${[...dataKeys].join(", ")}`);
+  if (unresolved.length) console.warn(`[DOCX] UNRESOLVED (in template but not in data): ${unresolved.join(", ")}`);
+  if (unused.length) console.log(`[DOCX] Unused data keys (not in template): ${unused.join(", ")}`);
+
   const doc = new Docxtemplater(zip, {
     paragraphLoop: true,
     linebreaks: true,
     delimiters: { start: "{{", end: "}}" },
+    nullGetter: () => "",
   });
   doc.render(docxData);
+
+  // --- DIAGNOSTIC: check for unresolved variables in rendered output ---
+  const renderedZip = doc.getZip();
+  const remainingVars: string[] = [];
+  for (const part of allXmlParts) {
+    const f = renderedZip.file(part);
+    if (!f) continue;
+    for (const m of f.asText().matchAll(/\{\{(\w+)\}\}/g)) {
+      remainingVars.push(m[1]);
+    }
+  }
+  if (remainingVars.length) {
+    console.error(`[DOCX] REMAINING UNRESOLVED after render: ${remainingVars.join(", ")}`);
+  } else {
+    console.log(`[DOCX] All template variables resolved successfully`);
+  }
+
   const fulfilledBuffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+
+  // --- Save debug DOCX for inspection ---
+  try {
+    const debugDir = resolveDocPath(join(".ai_tool", "templates"));
+    await writeFile(join(debugDir, "debug-pre-libreoffice.docx"), fulfilledBuffer);
+    console.log(`[DOCX] Pre-LibreOffice DOCX saved for inspection`);
+  } catch { /* non-fatal */ }
+
   return renderDocxWithLibreOffice(fulfilledBuffer);
 }
 

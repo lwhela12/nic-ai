@@ -156,6 +156,36 @@ export async function extractTextFromDocx(filePath: string): Promise<string> {
 }
 
 /**
+ * Extract text from a DOCX file including header/footer content.
+ * Mammoth only extracts body text; this also parses header/footer XML parts
+ * so that firm info in footers is visible for templatization.
+ */
+export async function extractFullTextFromDocx(filePath: string): Promise<string> {
+  const bodyText = await extractTextFromDocx(filePath);
+  const zip = await JSZip.loadAsync(await readFile(filePath));
+  const extraParts = [
+    "word/header1.xml", "word/header2.xml", "word/header3.xml",
+    "word/footer1.xml", "word/footer2.xml", "word/footer3.xml",
+  ];
+  const sections: string[] = [];
+  for (const part of extraParts) {
+    const file = zip.file(part);
+    if (!file) continue;
+    const xml = await file.async("text");
+    const texts: string[] = [];
+    for (const m of xml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)) {
+      const decoded = decodeDocxXmlEntities(m[1]);
+      if (decoded.trim()) texts.push(decoded);
+    }
+    if (texts.length) {
+      const label = part.includes("header") ? "HEADER" : "FOOTER";
+      sections.push(`\n[${label}]\n${texts.join("\n")}`);
+    }
+  }
+  return bodyText + sections.join("\n");
+}
+
+/**
  * Extract rendered HTML and embedded CSS from a DOCX file.
  */
 export async function extractHtmlFromDocx(filePath: string): Promise<DocxHtmlExtract> {
@@ -504,12 +534,39 @@ ${referenceExample}
 
 ---
 
+## GOAL
+
+You are creating a **reusable legal template**. The output document should preserve all structural language but allow a different client's case-specific details to be swapped in. Think of it like a mail-merge: the legal prose, labels, headings, and boilerplate stay fixed — only the facts that change from case to case become variables.
+
+## WHAT TO VARIABLIZE
+
+Identify every piece of **case-specific information** — anything that would be different if this same document type were filed for a different client:
+- **Party names** (claimant, employer, attorneys)
+- **Case identifiers** (claim numbers, appeal/hearing numbers, docket numbers)
+- **Dates and times** (hearing dates, filing dates)
+- **Firm information** (firm name, address blocks — including in headers/footers)
+- **Case-specific narrative** (e.g. the specific legal issue on appeal)
+- **Procedural details** (appearance type, venue)
+
+Each of these values in the raw text should appear as a key in \`replacementMap\`, mapped to a \`{{variableName}}\`.
+
+## WHAT TO PRESERVE
+
+Everything else is structural and must remain untouched:
+- **Labels and field descriptors** ("Appeal No.:", "Claim No.:", "Employer:", "Claimant.") — these are the document's skeleton. Only replace the value next to a label, never the label itself.
+- **Legal boilerplate** (affirmation language, certification language, standard witness/duration sections)
+- **Headings and section titles**
+- **Procedural preamble** ("In the Matter of the Contested...")
+
 ## CONSTRAINTS
 
-- Variable names in \`replacementMap\` values must match the corresponding \`captionFields[].key\` or \`extraSections[].key\`. For example, if you define a captionField with key \`employer\`, the replacement value must be \`{{employer}}\`.
-- \`claimantName\` must always be identified — it is required by the rendering pipeline. Find the primary litigant's name in the raw text and map it to \`{{claimantName}}\`.
+- Variable names in \`replacementMap\` values must match the corresponding \`captionFields[].key\` or \`extraSections[].key\`.
+- \`claimantName\` must always be identified — it is required by the rendering pipeline.
 - If a "DOCUMENT INDEX" section exists, map its content area to \`{{documentIndexText}}\`.
-- Text in \`counselPreamble\`, \`affirmationText\`, and \`certIntro\` should be the reusable version with \`{{variable}}\` placeholders where case-specific values appeared. These fields must work for ANY case, so replace all attorney names, firm names, and specific addresses with generic language like "counsel" or "by and through counsel".`;
+- Text in \`counselPreamble\`, \`affirmationText\`, and \`certIntro\` should be the reusable version with \`{{variable}}\` placeholders where case-specific values appeared.
+- \`extraSections\` is only for sections where the user writes **unique narrative text per case** (e.g. "ISSUE ON APPEAL"). Standard sections with fixed boilerplate text (witnesses, duration, exhibits) are not extraSections.
+- \`claimantName\` is always a dedicated top-level UI field — do not duplicate it in \`captionFields\`.
+- Use standard key names from the available render-time variables listed above (e.g. \`hearingNumber\` not \`appealNumber\`, \`claimNumber\` not \`caseNumber\`).`;
 
   const response = await getClient().messages.create({
     model: "claude-haiku-4-5-20251001",
@@ -550,7 +607,137 @@ ${referenceExample}
     }
   }
 
+  // --- Deterministic post-processing of AI output ---
+
+  // a) Remove claimantName from captionFields (it's always a dedicated top-level field)
+  if (payload.packetConfig?.captionFields) {
+    const before = payload.packetConfig.captionFields.length;
+    payload.packetConfig.captionFields = payload.packetConfig.captionFields
+      .filter((f: any) => f.key !== "claimantName");
+    if (payload.packetConfig.captionFields.length < before) {
+      console.log(`[Template] Removed claimantName from captionFields (duplicate of dedicated field)`);
+    }
+  }
+
+  // b) Normalize appealNumber → hearingNumber everywhere
+  if (payload.packetConfig?.captionFields) {
+    for (const f of payload.packetConfig.captionFields) {
+      if (f.key === "appealNumber") {
+        f.key = "hearingNumber";
+        console.log(`[Template] Normalized captionField key: appealNumber → hearingNumber`);
+      }
+    }
+  }
+  if (payload.replacementMap) {
+    for (const [k, v] of Object.entries(payload.replacementMap)) {
+      if (v === "{{appealNumber}}") {
+        payload.replacementMap[k] = "{{hearingNumber}}";
+        console.log(`[Template] Normalized replacementMap value: {{appealNumber}} → {{hearingNumber}}`);
+      }
+    }
+  }
+
+  // c) Filter out boilerplate sections that shouldn't be user-editable
+  const BOILERPLATE_KEYS = new Set(["witnesses", "duration", "exhibits", "summary"]);
+  if (payload.packetConfig?.extraSections) {
+    const before = payload.packetConfig.extraSections.length;
+    payload.packetConfig.extraSections = payload.packetConfig.extraSections
+      .filter((s: any) => !BOILERPLATE_KEYS.has(s.key?.toLowerCase()));
+    const removed = before - payload.packetConfig.extraSections.length;
+    if (removed > 0) {
+      console.log(`[Template] Removed ${removed} boilerplate extraSection(s) (witnesses/duration/exhibits/summary)`);
+    }
+  }
+
   return payload;
+}
+
+/**
+ * Build a replacementMap deterministically from the markdown variable table
+ * produced by analyzeTemplateWithAI (section 3: PLACEHOLDERS & VARIABLES).
+ * For each variable, performs case-insensitive search of rawText to find ALL
+ * occurrences (e.g. "VALerie owens", "VALERIE OWENS", "Valerie Owens").
+ */
+export function buildReplacementMapFromMarkdown(
+  markdown: string,
+  rawText: string
+): Record<string, string> {
+  const replacementMap: Record<string, string> = {};
+
+  // Parse the variable table: | `{{NAME}}` | description | example_value |
+  const tableRows = markdown.matchAll(
+    /\|\s*`\{\{(\w+)\}\}`\s*\|[^|]*\|\s*(.+?)\s*\|/g
+  );
+
+  // Map SCREAMING_SNAKE to camelCase with domain overrides
+  const KEY_MAP: Record<string, string> = {
+    CLAIMANT_NAME: "claimantName",
+    APPEAL_NUMBER: "hearingNumber",
+    CLAIM_NUMBER: "claimNumber",
+    HEARING_NUMBER: "priorHearingNumber",
+    EMPLOYER_NAME: "employer",
+    EMPLOYER: "employer",
+    ATTORNEY_1_NAME: "attorney1Name",
+    ATTORNEY_2_NAME: "attorney2Name",
+    ATTORNEY_1_BAR_NUMBER: "attorney1BarNumber",
+    ATTORNEY_2_BAR_NUMBER: "attorney2BarNumber",
+    LAW_FIRM_NAME: "firmName",
+    FIRM_NAME: "firmName",
+    LAW_FIRM_ADDRESS: "firmAddress",
+    FIRM_ADDRESS: "firmAddress",
+    ISSUE_STATEMENT: "issueOnAppeal",
+    ISSUE_ON_APPEAL: "issueOnAppeal",
+    HEARING_DATE_TIME: "hearingDateTime",
+    HEARING_DATE: "hearingDateTime",
+    APPEARANCE: "appearance",
+    APPEARANCE_TYPE: "appearance",
+    CURRENT_DATE: "currentDate",
+    DATE: "currentDate",
+    DOCUMENT_INDEX: "documentIndexText",
+    DOCUMENT_INDEX_TEXT: "documentIndexText",
+    SERVICE_MONTH: "serviceMonth",
+    SERVICE_YEAR: "serviceYear",
+    SERVICE_DAY: "serviceDay",
+    ATTORNEY_NAME: "attorney1Name",
+    BAR_NUMBER: "attorney1BarNumber",
+    PRIOR_HEARING_NUMBER: "priorHearingNumber",
+  };
+  const toKey = (name: string) =>
+    KEY_MAP[name] ||
+    name.toLowerCase().replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+
+  // Normalize curly/smart quotes to straight for matching
+  // DOCX often has \u2018/\u2019 (curly single) and \u201C/\u201D (curly double)
+  // while the AI markdown uses straight quotes
+  const normalizeQuotes = (s: string) =>
+    s.replace(/[\u2018\u2019\u2032]/g, "'").replace(/[\u201C\u201D\u2033]/g, '"');
+
+  const normalizedRaw = normalizeQuotes(rawText);
+
+  for (const match of tableRows) {
+    const [, varName, exampleValue] = match;
+    const camelKey = toKey(varName);
+    const trimmed = exampleValue.trim();
+    if (!trimmed || trimmed === "—" || trimmed === "-" || trimmed === "N/A") continue;
+
+    const normalizedExample = normalizeQuotes(trimmed);
+
+    // Case-insensitive search: find ALL occurrences in raw text
+    const lowerRaw = normalizedRaw.toLowerCase();
+    const lowerExample = normalizedExample.toLowerCase();
+    let searchFrom = 0;
+    while (searchFrom <= lowerRaw.length - lowerExample.length) {
+      const idx = lowerRaw.indexOf(lowerExample, searchFrom);
+      if (idx < 0) break;
+      // Use the ORIGINAL rawText chars (preserving curly quotes) so the
+      // replacement map keys match what injectVariablesIntoDocx will see in the XML
+      const exactText = rawText.substring(idx, idx + trimmed.length);
+      replacementMap[exactText] = `{{${camelKey}}}`;
+      searchFrom = idx + 1;
+    }
+  }
+
+  return replacementMap;
 }
 
 /**
@@ -607,11 +794,16 @@ function extractRunsFromParagraph(paragraphXml: string): DocxRunInfo[] {
     const xmlEnd = xmlStart + fullXml.length;
 
     // Extract <w:t> content
-    const wtMatch = fullXml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/);
+    const wtMatch = fullXml.match(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/);
     if (wtMatch) {
       const rawContent = wtMatch[1];
       const wtTagStart = fullXml.indexOf(wtMatch[0]);
-      const contentOffset = wtMatch[0].indexOf(rawContent);
+      // Calculate content offset from the closing tag, not indexOf which can
+      // match characters inside the <w:t> tag itself (e.g. a space in
+      // '<w:t xml:space="preserve"> </w:t>' would match at position 4 instead of 30)
+      const closingTagStr = "</w:t>";
+      const closingTagPos = wtMatch[0].indexOf(closingTagStr);
+      const contentOffset = closingTagPos - rawContent.length;
       runs.push({
         fullXml,
         xmlStart,
@@ -803,8 +995,103 @@ function processDocxXmlForInjection(
 ): string {
   // Process each <w:p> paragraph
   return xmlText.replace(/<w:p[\s>][\s\S]*?<\/w:p>/g, (paragraph) => {
+    // Skip paragraphs containing text boxes — nested <w:p> elements
+    // would cause the regex to slice incorrectly, corrupting the XML
+    if (paragraph.includes("<w:txbxContent>")) return paragraph;
     return replaceTextInParagraph(paragraph, sortedReplacements);
   });
+}
+
+/**
+ * Replace the document index block (column headers + entry rows) with a single
+ * paragraph containing {{documentIndexText}}.  Operates on the raw XML string
+ * after per-paragraph variable injection so any partially-templatized entries
+ * are also swept up.
+ *
+ * Detection heuristic:
+ *   - Start: a <w:p> whose concatenated <w:t> text matches the column-header
+ *     pattern (DATE … DOCUMENTS … PAGE).
+ *   - End:   the next <w:p> whose text starts with "CERTIFICATE OF" (or end
+ *     of document body).
+ *   - Everything between (inclusive of start, exclusive of end) that contains
+ *     visible text is removed.  Empty spacer paragraphs are kept.
+ *
+ * A single replacement paragraph is inserted where the header row was, using
+ * the same paragraph/run properties as the first entry row so formatting is
+ * preserved.
+ */
+function replaceDocumentIndexBlock(xml: string): string {
+  const paraRegex = /<w:p[\s>][\s\S]*?<\/w:p>/g;
+  const paragraphs: { match: string; start: number; end: number; text: string }[] = [];
+
+  let m: RegExpExecArray | null;
+  while ((m = paraRegex.exec(xml)) !== null) {
+    const texts = [...m[0].matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]);
+    paragraphs.push({
+      match: m[0],
+      start: m.index,
+      end: m.index + m[0].length,
+      text: texts.join("").trim(),
+    });
+  }
+
+  // Find the column-header paragraph: contains DATE, DOCUMENTS, and PAGE
+  const headerIdx = paragraphs.findIndex(p => {
+    const upper = p.text.toUpperCase();
+    return upper.includes("DATE") && upper.includes("DOCUMENT") && upper.includes("PAGE");
+  });
+  if (headerIdx < 0) return xml; // no document index section found
+
+  // Find the end boundary: first paragraph after header whose text starts with CERTIFICATE OF
+  let endIdx = paragraphs.length;
+  for (let i = headerIdx + 1; i < paragraphs.length; i++) {
+    if (/^CERTIFICATE\s+OF/i.test(paragraphs[i].text)) {
+      endIdx = i;
+      break;
+    }
+  }
+
+  // Collect indices of paragraphs with visible text between header and end (these are entries to remove)
+  const removeIndices: number[] = [];
+  for (let i = headerIdx; i < endIdx; i++) {
+    if (paragraphs[i].text.length > 0) {
+      removeIndices.push(i);
+    }
+  }
+
+  if (removeIndices.length === 0) return xml;
+
+  // Build the replacement paragraph using formatting from the first entry row
+  // (or the header row if no entries). Extract <w:pPr> and <w:rPr> from it.
+  const entryPara = removeIndices.length > 1 ? paragraphs[removeIndices[1]] : paragraphs[removeIndices[0]];
+  const pPrMatch = entryPara.match.match(/<w:pPr>[\s\S]*?<\/w:pPr>/);
+  const rPrMatch = entryPara.match.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+
+  const pPr = pPrMatch ? pPrMatch[0] : "";
+  const rPr = rPrMatch ? rPrMatch[0] : "";
+
+  const replacementPara =
+    `<w:p><w:pPr>${pPr ? pPr.replace(/<\/?w:pPr>/g, "") : ""}</w:pPr>` +
+    `<w:r>${rPr}` +
+    `<w:t xml:space="preserve">{{documentIndexText}}</w:t>` +
+    `</w:r></w:p>`;
+
+  // Build the new XML by replacing removed paragraphs
+  // Work backwards so indices stay valid
+  let result = xml;
+  for (let i = removeIndices.length - 1; i >= 0; i--) {
+    const pi = removeIndices[i];
+    const p = paragraphs[pi];
+    if (i === 0) {
+      // First removed paragraph: replace with the template placeholder
+      result = result.slice(0, p.start) + replacementPara + result.slice(p.end);
+    } else {
+      // Subsequent entry paragraphs: just remove them
+      result = result.slice(0, p.start) + result.slice(p.end);
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -844,10 +1131,17 @@ export async function injectVariablesIntoDocx(
     const xmlNode = zip.file(xmlPath);
     if (!xmlNode) continue;
 
-    const xmlText = xmlNode.asText();
-    const processed = processDocxXmlForInjection(xmlText, sortedReplacements);
-    if (processed !== xmlText) {
-      zip.file(xmlPath, processed);
+    let xmlText = xmlNode.asText();
+    xmlText = processDocxXmlForInjection(xmlText, sortedReplacements);
+
+    // Replace the document index block with {{documentIndexText}} placeholder
+    if (xmlPath === "word/document.xml") {
+      xmlText = replaceDocumentIndexBlock(xmlText);
+    }
+
+    const original = xmlNode.asText();
+    if (xmlText !== original) {
+      zip.file(xmlPath, xmlText);
     }
   }
 

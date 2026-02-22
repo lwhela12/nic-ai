@@ -119,6 +119,29 @@ const pdftoppmCmd = resolvePoppler("pdftoppm");
 console.log(`[poppler] pdftotext: ${pdftotextCmd}`);
 console.log(`[poppler] pdftoppm: ${pdftoppmCmd}`);
 
+// Check LibreOffice availability at startup
+import { execFileSync } from "child_process";
+import * as os from "os";
+(() => {
+  const macOsPath = "/Applications/LibreOffice.app/Contents/MacOS/soffice";
+  const isMac = os.platform() === "darwin";
+  const candidates = isMac ? [macOsPath, "libreoffice", "soffice"] : ["libreoffice", "soffice"];
+  let found = false;
+  for (const cmd of candidates) {
+    try {
+      execFileSync(cmd, ["--version"], { stdio: "pipe", timeout: 5000 });
+      console.log(`[libreoffice] Available: ${cmd}`);
+      found = true;
+      break;
+    } catch {
+      // Try next candidate
+    }
+  }
+  if (!found) {
+    console.warn("[libreoffice] NOT FOUND - DOCX template rendering will fail. Install LibreOffice for pixel-perfect PDF generation.");
+  }
+})();
+
 export default {
   port,
   fetch: app.fetch,
