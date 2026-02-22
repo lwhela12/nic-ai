@@ -1,8 +1,13 @@
 import { readFile } from "fs/promises";
-import { resolve, sep } from "path";
+import { resolve, sep, join } from "path";
 import { PDFDocument, PDFFont, PDFPage, StandardFonts, degrees, rgb } from "pdf-lib";
 import { runPdftotext } from "./pdftotext";
 import { renderHtmlFrontMatter } from "./evidence-packet-html";
+import Docxtemplater from "docxtemplater";
+import PizZip from "pizzip";
+import { execFileSync } from "child_process";
+import { writeFile, mkdtemp, rm } from "fs/promises";
+import * as os from "os";
 
 type SortBy = "none" | "date" | "title" | "path";
 type SortDirection = "asc" | "desc";
@@ -77,6 +82,8 @@ export const BUILT_IN_TEMPLATES: PacketTemplate[] = [
     certTitle: "CERTIFICATE OF SERVICE",
     certIntro:
       "I certify that a true and correct copy of the foregoing Claimant Document Index was served on the following:",
+    firmBlockPosition: "signature",
+    signerBlockAlign: "left",
     builtIn: true,
   },
   {
@@ -152,6 +159,7 @@ export interface EvidencePacketCaption {
   appearance?: string;
   introductoryCounselLine?: string;
   captionValues?: Record<string, string>;
+  [key: string]: unknown;
 }
 
 export interface EvidencePacketServiceInfo {
@@ -186,7 +194,7 @@ export interface BuildEvidencePacketOptions {
 
 export interface EvidencePacketTocEntry {
   title: string;
-  path: string;
+  path?: string;
   date?: string;
   startPage: number;
   endPage: number;
@@ -350,7 +358,57 @@ export async function buildEvidencePacket(
   const boldFont = await pdf.embedFont(StandardFonts.TimesRomanBold);
 
   // Branch: HTML-template path vs pdf-lib path
-  if (options.template?.htmlTemplate) {
+  // CRITICAL: .docx files MUST use the native docxtemplater + LibreOffice path
+  // to preserve pleading paper fidelity and absolute formatting.
+  // DO NOT REVERT .docx FILES TO THE HTML PATH.
+  if (options.template?.sourceFile && options.template.sourceFile.toLowerCase().endsWith(".docx")) {
+    let docxRendered = false;
+    try {
+      const docxPdfBytes = await buildDocxFrontMatter(
+        options.template,
+        options.caption,
+        options.service,
+        tocEntries,
+        options.firmName,
+        options.resolveDocPath || ((p) => resolveCasePath(options.caseFolder, p))
+      );
+      const frontMatterPdf = await PDFDocument.load(docxPdfBytes);
+      const fmPages = await pdf.copyPages(frontMatterPdf, frontMatterPdf.getPageIndices());
+      for (const page of fmPages) {
+        pdf.addPage(page);
+      }
+      docxRendered = true;
+    } catch (docxErr) {
+      const errMsg = docxErr instanceof Error ? docxErr.message : String(docxErr);
+      console.error(`[EvidencePacket] DOCX/LibreOffice rendering failed, falling back to pdf-lib layout: ${errMsg}`);
+      warnings.push(`DOCX template rendering failed (${errMsg}). Used built-in layout as fallback.`);
+    }
+    if (!docxRendered) {
+      // Fallback to pdf-lib built-in layout
+      if (options.template?.pageFlow === "statement-first") {
+        await addStatementPages(pdf, regularFont, boldFont, options, tocEntries);
+      } else {
+        let frontMatterPages = addIndexPages(pdf, regularFont, boldFont, options, tocEntries);
+        if (options.includeAffirmationPage !== false) {
+          frontMatterPages += addAffirmationPage(pdf, regularFont, boldFont, options, frontMatterPages + 1);
+        }
+      }
+    }
+  } else if (options.template?.sourceFile && options.template.sourceFile.toLowerCase().endsWith(".pdf")) {
+    const pdfBytes = await buildPdfFrontMatter(
+      options.template,
+      options.caption,
+      options.service,
+      tocEntries,
+      options.firmName,
+      options.resolveDocPath || ((p) => resolveCasePath(options.caseFolder, p))
+    );
+    const frontMatterPdf = await PDFDocument.load(pdfBytes);
+    const fmPages = await pdf.copyPages(frontMatterPdf, frontMatterPdf.getPageIndices());
+    for (const page of fmPages) {
+      pdf.addPage(page);
+    }
+  } else if (options.template?.htmlTemplate) {
     const htmlBuffer = await renderHtmlFrontMatter(
       {
         caption: options.caption,
@@ -416,9 +474,40 @@ export async function buildFrontMatterPreview(options: {
   signerName?: string;
   extraSectionValues?: Record<string, string>;
   firmName?: string;
+  caseFolder?: string;
 }): Promise<Uint8Array> {
+  const resolveDoc = options.caseFolder
+    ? (p: string) => resolveCasePath(options.caseFolder!, p)
+    : (p: string) => join(process.cwd(), p);
+
   // Branch: HTML-template path vs pdf-lib path
-  if (options.template?.htmlTemplate) {
+  // CRITICAL: .docx files MUST use the native docxtemplater + LibreOffice path
+  // to preserve pleading paper fidelity and absolute formatting.
+  // DO NOT REVERT .docx FILES TO THE HTML PATH.
+  if (options.template?.sourceFile && options.template.sourceFile.toLowerCase().endsWith(".docx")) {
+    try {
+      return await buildDocxFrontMatter(
+        options.template,
+        options.caption,
+        options.service,
+        options.tocEntries,
+        options.firmName,
+        resolveDoc
+      );
+    } catch (docxErr) {
+      console.error(`[FrontMatterPreview] DOCX rendering failed, falling back to pdf-lib: ${docxErr instanceof Error ? docxErr.message : docxErr}`);
+      // Fall through to pdf-lib fallback below
+    }
+  } else if (options.template?.sourceFile && options.template.sourceFile.toLowerCase().endsWith(".pdf")) {
+    return buildPdfFrontMatter(
+      options.template,
+      options.caption,
+      options.service,
+      options.tocEntries as EvidencePacketTocEntry[],
+      options.firmName,
+      resolveDoc
+    );
+  } else if (options.template?.htmlTemplate) {
     const htmlBuffer = await renderHtmlFrontMatter(
       {
         caption: options.caption,
@@ -1048,23 +1137,12 @@ async function addStatementPages(
   const affirmStartY = pageBottom + affirmHeight;
 
   // ── Smart page overflow ──
-  const minFillerSpace = 24;
-  if (currentY < affirmStartY + minFillerSpace) {
-    // Not enough room — fill this page with "///" then start a new page
-    while (currentY > pageBottom) {
-      drawCentered(page, regularFont, "///", 12, currentY);
-      currentY -= 24;
-    }
+  if (currentY < affirmStartY) {
+    // Not enough room — start a new page
     page = pdf.addPage([612, 792]);
     pages.push(page);
     drawPleadingPaper(page, regularFont, options.firmBlockLines, pages.length, false, dblLeft, rLine);
     currentY = 724;
-  }
-
-  // Fill with "///" down to the affirmation start
-  while (currentY > affirmStartY + 24) {
-    drawCentered(page, regularFont, "///", 12, currentY);
-    currentY -= 24;
   }
 
   // ── AFFIRMATION heading ──
@@ -1729,4 +1807,257 @@ function stampExhibitPageNumber(page: PDFPage, font: PDFFont, label: string, pag
 function formatError(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/**
+ * Merge split template tags in DOCX XML.
+ */
+function mergeDocxTemplateRuns(zip: PizZip): void {
+  const xmlFiles = ["word/document.xml", "word/header1.xml", "word/header2.xml", "word/header3.xml", "word/footer1.xml", "word/footer2.xml", "word/footer3.xml"];
+  for (const xmlPath of xmlFiles) {
+    const file = zip.file(xmlPath);
+    if (!file) continue;
+    let xml = file.asText();
+    xml = xml.replace(/<w:p[\s>][\s\S]*?<\/w:p>/g, (paragraph) => {
+      // Skip paragraphs containing text boxes — nested <w:p> elements
+      // would cause the regex to slice incorrectly, corrupting the XML
+      if (paragraph.includes("<w:txbxContent>")) return paragraph;
+      const runRegex = /<w:r[\s>][\s\S]*?<\/w:r>/g;
+      const runs: { match: string; index: number }[] = [];
+      let m: RegExpExecArray | null;
+      while ((m = runRegex.exec(paragraph)) !== null) {
+        runs.push({ match: m[0], index: m.index });
+      }
+      if (runs.length < 2) return paragraph;
+      const getRunText = (run: string): string => {
+        const tMatch = run.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/);
+        return tMatch ? tMatch[1] : "";
+      };
+      const allText = runs.map((r) => getRunText(r.match)).join("");
+      if (!allText.includes("{{") && !allText.includes("}}")) return paragraph;
+      const mergedRuns: { match: string; index: number }[] = [];
+      let i = 0;
+      while (i < runs.length) {
+        const startText = getRunText(runs[i].match);
+        let combined = startText;
+        let groupEnd = i;
+        const needsMerge = (text: string): boolean => {
+          let depth = 0;
+          for (let ci = 0; ci < text.length - 1; ci++) {
+            if (text[ci] === "{" && text[ci + 1] === "{") { depth++; ci++; }
+            else if (text[ci] === "}" && text[ci + 1] === "}") { depth--; ci++; }
+          }
+          return depth !== 0;
+        };
+        if (needsMerge(combined)) {
+          while (groupEnd + 1 < runs.length && needsMerge(combined)) {
+            groupEnd++;
+            combined += getRunText(runs[groupEnd].match);
+          }
+          if (groupEnd > i) {
+            const firstRun = runs[i].match;
+            const escapedCombined = combined.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            let mergedRun: string;
+            if (/<w:t[^>]*>/.test(firstRun)) {
+              mergedRun = firstRun.replace(/<w:t[^>]*>[\s\S]*?<\/w:t>/, `<w:t xml:space="preserve">${escapedCombined}</w:t>`);
+            } else {
+              mergedRun = firstRun.replace(/<\/w:r>/, `<w:t xml:space="preserve">${escapedCombined}</w:t></w:r>`);
+            }
+            mergedRuns.push({ match: mergedRun, index: runs[i].index });
+            for (let j = i + 1; j <= groupEnd; j++) {
+              mergedRuns.push({ match: "", index: runs[j].index });
+            }
+            i = groupEnd + 1;
+            continue;
+          }
+        }
+        mergedRuns.push(runs[i]);
+        i++;
+      }
+      let result = paragraph;
+      for (let ri = mergedRuns.length - 1; ri >= 0; ri--) {
+        const original = runs[ri];
+        const merged = mergedRuns[ri];
+        if (merged.match === "" && original.match !== "") {
+          result = result.slice(0, original.index) + result.slice(original.index + original.match.length);
+        } else if (merged.match !== original.match) {
+          result = result.slice(0, original.index) + merged.match + result.slice(original.index + original.match.length);
+        }
+      }
+      return result;
+    });
+    zip.file(xmlPath, xml);
+  }
+}
+
+/**
+ * Convert a DOCX buffer to PDF using LibreOffice.
+ * Reusable helper for any DOCX-to-PDF conversion.
+ */
+export async function renderDocxWithLibreOffice(docxBuffer: Buffer): Promise<Uint8Array> {
+  const tmpDir = await mkdtemp(join(os.tmpdir(), "docx-render-"));
+  const inputPath = join(tmpDir, "input.docx");
+  const outputPath = join(tmpDir, "input.pdf");
+  try {
+    await writeFile(inputPath, docxBuffer);
+    const macOsPath = "/Applications/LibreOffice.app/Contents/MacOS/soffice";
+    const isMac = os.platform() === "darwin";
+    const cmd = isMac ? macOsPath : "libreoffice";
+    try {
+      execFileSync(cmd, ["--headless", "--invisible", "--nologo", "--nodefault", "--convert-to", "pdf", "input.docx"], { cwd: tmpDir, stdio: "ignore" });
+    } catch {
+      execFileSync(isMac ? "libreoffice" : "soffice", ["--headless", "--invisible", "--nologo", "--nodefault", "--convert-to", "pdf", "input.docx"], { cwd: tmpDir, stdio: "ignore" });
+    }
+    const pdfBuffer = await readFile(outputPath);
+    return new Uint8Array(pdfBuffer);
+  } finally {
+    try { await rm(tmpDir, { recursive: true, force: true }); } catch { }
+  }
+}
+
+/**
+ * Native DOCX Front Matter Generation
+ */
+async function buildDocxFrontMatter(
+  template: PacketTemplate,
+  caption: EvidencePacketCaption,
+  service: EvidencePacketServiceInfo | undefined,
+  tocEntries: EvidencePacketTocEntry[],
+  firmName: string | undefined,
+  resolveDocPath: (relativePath: string) => string
+): Promise<Uint8Array> {
+  if (!template.sourceFile) throw new Error("Template missing sourceFile property");
+  // sourceFile can be "templatized/filename.docx" or "source/filename.docx"
+  // Resolve the path accordingly
+  const templatizedMatch = template.sourceFile.match(/^templatized\/(.+)$/);
+  const sourceMatch = template.sourceFile.match(/^source\/(.+)$/);
+  let masterPath: string;
+  if (templatizedMatch) {
+    masterPath = resolveDocPath(join(".ai_tool", "templates", "templatized", templatizedMatch[1]));
+  } else if (sourceMatch) {
+    masterPath = resolveDocPath(join(".ai_tool", "templates", "source", sourceMatch[1]));
+  } else {
+    // Fallback: try templatized first, then source
+    const filename = template.sourceFile.replace(/^.*\//, "");
+    const templatizedPath = resolveDocPath(join(".ai_tool", "templates", "templatized", filename));
+    try {
+      await readFile(templatizedPath);
+      masterPath = templatizedPath;
+    } catch {
+      masterPath = resolveDocPath(join(".ai_tool", "templates", "source", filename));
+    }
+  }
+  let masterBytes: Buffer;
+  try { masterBytes = await readFile(masterPath); } catch (err) {
+    throw new Error(`Failed to load master DOCX template at ${masterPath}: ${formatError(err)}`);
+  }
+  const sDate = service?.serviceDate ? new Date(service.serviceDate) : new Date();
+
+  // Build document index text for {{documentIndexText}} placeholder
+  const documentIndexLines: string[] = [];
+  for (let i = 0; i < tocEntries.length; i++) {
+    const entry = tocEntries[i];
+    const pageRange = entry.startPage === entry.endPage
+      ? `${entry.startPage}`
+      : `${entry.startPage}-${entry.endPage}`;
+    const dateStr = entry.date || "";
+    if (template.tocFormat === "date-doc-page") {
+      documentIndexLines.push(`${dateStr}\t${entry.title}\t${pageRange}`);
+    } else {
+      const label = `${i + 1}. ${entry.title}${dateStr ? ` - ${dateStr}` : ""}`;
+      documentIndexLines.push(`${label} ... Pg. ${pageRange}`);
+    }
+  }
+  const documentIndexText = documentIndexLines.join("\n");
+
+  const docxData: Record<string, string | object[]> = {
+    claimantName: caption.claimantName || "",
+    claimNumber: caption.claimNumber || "",
+    hearingNumber: caption.hearingNumber || "",
+    hearingDateTime: caption.hearingDateTime || "",
+    firmName: firmName || "Our Firm",
+    appearance: caption.appearance || "",
+    currentDate: new Date().toLocaleDateString(),
+    serviceMonth: sDate.toLocaleString('default', { month: 'long' }),
+    serviceYear: sDate.getFullYear().toString(),
+    serviceDay: sDate.getDate().toString(),
+    documentIndexText,
+    tocEntries: tocEntries.map((entry, i) => ({
+      number: String(i + 1),
+      title: entry.title,
+      date: entry.date || "",
+      startPage: String(entry.startPage),
+      endPage: String(entry.endPage),
+      pageRange: entry.startPage === entry.endPage
+        ? String(entry.startPage)
+        : `${entry.startPage}-${entry.endPage}`,
+    })),
+    ...caption.captionValues,
+  };
+  const zip = new PizZip(masterBytes);
+  mergeDocxTemplateRuns(zip);
+  const doc = new Docxtemplater(zip, {
+    paragraphLoop: true,
+    linebreaks: true,
+    delimiters: { start: "{{", end: "}}" },
+  });
+  doc.render(docxData);
+  const fulfilledBuffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+  return renderDocxWithLibreOffice(fulfilledBuffer);
+}
+
+/**
+ * Native PDF Front Matter Generation
+ */
+async function buildPdfFrontMatter(
+  template: PacketTemplate,
+  caption: EvidencePacketCaption,
+  service: EvidencePacketServiceInfo | undefined,
+  tocEntries: EvidencePacketTocEntry[],
+  firmName: string | undefined,
+  resolveDocPath: (relativePath: string) => string
+): Promise<Uint8Array> {
+  if (!template.sourceFile) throw new Error("Template missing sourceFile property");
+  const match = template.sourceFile.match(/source\/(.+)$/);
+  const sourceRelative = match ? match[1] : template.sourceFile;
+  const basenameStr = sourceRelative.replace(/\.[^/.]+$/, "");
+  const coordsPath = resolveDocPath(join(".ai_tool", "templates", "parsed", `${basenameStr}-coords.json`));
+  const masterPath = resolveDocPath(join(".ai_tool", "templates", "source", sourceRelative));
+  let coordsMap: Record<string, { page: number; x: number; y: number; width: number; height: number; }> = {};
+  try {
+    const coordsStr = await readFile(coordsPath, "utf-8");
+    coordsMap = JSON.parse(coordsStr);
+  } catch (e) { console.warn(`Missing coordinate map for PDF template: ${coordsPath}`); }
+  const masterBytes = await readFile(masterPath);
+  const pdf = await PDFDocument.load(masterBytes);
+  const font = await pdf.embedFont(StandardFonts.TimesRoman);
+  const sDate = service?.serviceDate ? new Date(service.serviceDate) : new Date();
+  const renderData: Record<string, string> = {
+    claimantName: caption.claimantName || "",
+    claimNumber: caption.claimNumber || "",
+    hearingNumber: caption.hearingNumber || "",
+    hearingDateTime: caption.hearingDateTime || "",
+    firmName: firmName || "Our Firm",
+    appearance: caption.appearance || "",
+    currentDate: new Date().toLocaleDateString(),
+    serviceMonth: sDate.toLocaleString('default', { month: 'long' }),
+    serviceYear: sDate.getFullYear().toString(),
+    serviceDay: sDate.getDate().toString(),
+    ...caption.captionValues,
+  };
+  const pages = pdf.getPages();
+  const fontSize = 12;
+  for (const [varName, varValue] of Object.entries(renderData)) {
+    const coord = coordsMap[varName];
+    if (coord && typeof varValue === "string" && varValue) {
+      const pageIndex = coord.page - 1;
+      if (pageIndex >= 0 && pageIndex < pages.length) {
+        const page = pages[pageIndex];
+        const pageHeight = page.getHeight();
+        const pdfLibY = pageHeight - coord.y - coord.height;
+        page.drawText(varValue, { x: coord.x, y: pdfLibY + 2, size: fontSize, font, color: rgb(0, 0, 0) });
+      }
+    }
+  }
+  return pdf.save();
 }
