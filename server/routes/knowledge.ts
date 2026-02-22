@@ -1049,6 +1049,19 @@ app.post("/doc-templates/:id/parse", async (c) => {
 
     if (ext === ".pdf") {
       extractedText = await extractTextFromPdf(sourceFilePath);
+      // Attempt to map PDF bounding boxes using AI
+      try {
+        const { templatePdfWithAI } = await import("../lib/extract");
+        const templateName = formatTemplateName(templateId);
+        const bboxMap = await templatePdfWithAI(sourceFilePath, templateName);
+
+        // Save the coordinates map
+        const coordsPath = join(parsedDir, `${templateId}-coords.json`);
+        await writeFile(coordsPath, JSON.stringify(bboxMap, null, 2));
+        console.log(`[Parse] Successfully parsed PDF BBoxes for: ${sourceFile}`);
+      } catch (templErr) {
+        console.warn(`[Parse] PDF BBox artificial mapping failed (non-fatal):`, templErr instanceof Error ? templErr.message : templErr);
+      }
     } else if (ext === ".docx") {
       extractedText = await extractTextFromDocx(sourceFilePath);
       // Also extract styles from DOCX (non-fatal if this fails)
@@ -1062,6 +1075,7 @@ app.post("/doc-templates/:id/parse", async (c) => {
       } catch (htmlErr) {
         console.error("DOCX HTML extraction failed (non-fatal):", htmlErr);
       }
+
     } else {
       return c.json({ error: "Unsupported file format" }, 400);
     }
@@ -1074,17 +1088,60 @@ app.post("/doc-templates/:id/parse", async (c) => {
     const detectedAsPacket = isPacketTemplate(extractedText);
     let packetConfig: PacketTemplate | undefined;
     let packetAnalysis: PacketTemplateAnalysisResult | undefined;
+
     if (detectedAsPacket) {
       try {
-        packetAnalysis = await analyzePacketTemplateWithAI(extractedText, templateName);
-        packetConfig = packetAnalysis.template;
-        if (extractedHtml) {
-          packetConfig = applyPacketHtmlTemplate(packetConfig, extractedHtml, packetAnalysis);
+        const { extractTemplateSchemaAndInjectionMap, injectVariablesIntoDocx } = await import("../lib/extract");
+        const templateName = formatTemplateName(templateId);
+
+        // Use unified pipeline to get both UI schema and exact injection mapping
+        const unifiedAnalysis = await extractTemplateSchemaAndInjectionMap(templateName, extractedText);
+        packetConfig = unifiedAnalysis.packetConfig;
+
+        // Only run secondary analysis for non-DOCX sources (HTML template path).
+        // For DOCX, applyPacketHtmlTemplate is skipped so this call would be wasted.
+        if (ext !== ".docx") {
+          try {
+            packetAnalysis = await analyzePacketTemplateWithAI(extractedText, templateName);
+          } catch (analErr) {
+            console.warn("[Parse] Secondary packet analysis failed (non-fatal):", analErr instanceof Error ? analErr.message : analErr);
+          }
+        }
+
+        // For DOCX sources, skip HTML template (preserves native DOCX formatting via LibreOffice)
+        if (ext !== ".docx" && extractedHtml) {
+          packetConfig = applyPacketHtmlTemplate(packetConfig!, extractedHtml, packetAnalysis!);
           packetConfig.renderMode = "template-native";
           packetConfig.suppressPleadingLineNumbers = !detectPleadingLineNumbers(extractedText, extractedHtml.html);
         }
+        if (ext === ".docx") {
+          // Remove any HTML template properties that would cause ambiguity
+          delete packetConfig!.htmlTemplate;
+          delete packetConfig!.htmlTemplateCss;
+          packetConfig!.renderMode = "template-native";
+          packetConfig!.suppressPleadingLineNumbers = !detectPleadingLineNumbers(extractedText, extractedHtml?.html);
+        }
+
+        // Complete the Native DOCX Injection using the strictly coupled replacementMap
+        // Save to templatized/ directory to preserve the original source file
+        if (ext === ".docx") {
+          try {
+            const templatizedDir = join(templatesDir, "templatized");
+            await mkdir(templatizedDir, { recursive: true });
+            const templatedDocxBytes = await injectVariablesIntoDocx(sourceFilePath, unifiedAnalysis.replacementMap);
+            await writeFile(join(templatizedDir, sourceFile), Buffer.from(templatedDocxBytes));
+            console.log(`[Parse] Successfully templatized DOCX (preserved original): ${sourceFile}`);
+          } catch (templErr) {
+            console.warn(`[Parse] DOCX unified templating failed (non-fatal):`, templErr instanceof Error ? templErr.message : templErr);
+          }
+        }
+
+        // Point sourceFile to templatized copy if it exists, otherwise source
+        packetConfig!.sourceFile = ext === ".docx"
+          ? `templatized/${sourceFile}`
+          : `source/${sourceFile}`;
       } catch (err) {
-        console.warn("[Parse] Packet template analysis failed (non-fatal):", err instanceof Error ? err.message : err);
+        console.warn("[Parse] Packet template unified analysis failed (non-fatal):", err instanceof Error ? err.message : err);
       }
     }
 
@@ -1176,7 +1233,7 @@ async function processTemplatesWithLimit(
   templates: Array<{ id: string; sourceFile: string }>,
   root: string,
   limit: number,
-  onProgress: (event: { type: string; [key: string]: any }) => Promise<void>
+  onProgress: (event: { type: string;[key: string]: any }) => Promise<void>
 ): Promise<ParseResult[]> {
   const results: ParseResult[] = new Array(templates.length);
   let currentIndex = 0;
@@ -1968,8 +2025,8 @@ Respond with ONLY valid JSON, no markdown fences.`;
   const BOILERPLATE_SECTIONS = new Set(["witnesses", "duration", "exhibits", "summary"]);
   const rawExtraSections = Array.isArray(extracted.extraSections)
     ? extracted.extraSections
-        .map((s: any) => ({ title: String(s?.title || ""), key: String(s?.key || "") }))
-        .filter((s) => s.title && s.key && !BOILERPLATE_SECTIONS.has(s.key.toLowerCase()))
+      .map((s: any) => ({ title: String(s?.title || ""), key: String(s?.key || "") }))
+      .filter((s) => s.title && s.key && !BOILERPLATE_SECTIONS.has(s.key.toLowerCase()))
     : [];
 
   // Validate indexTitle — if it looks like column headers, fall back to "DOCUMENT INDEX"
@@ -2027,10 +2084,10 @@ Respond with ONLY valid JSON, no markdown fences.`;
   const sampleCaptionValues: Record<string, string> =
     extracted.sampleCaptionValues && typeof extracted.sampleCaptionValues === "object"
       ? Object.fromEntries(
-          Object.entries(extracted.sampleCaptionValues as Record<string, unknown>)
-            .filter(([, v]) => typeof v === "string" && (v as string).trim())
-            .map(([k, v]) => [k, String(v).trim()])
-        )
+        Object.entries(extracted.sampleCaptionValues as Record<string, unknown>)
+          .filter(([, v]) => typeof v === "string" && (v as string).trim())
+          .map(([k, v]) => [k, String(v).trim()])
+      )
       : {};
 
   const textFields: Array<"counselPreamble" | "affirmationText" | "certIntro"> = [
@@ -2133,9 +2190,9 @@ app.post("/reindex-meta", async (c) => {
     // Generate per-section tags and holistic summary in parallel
     const [tagsMap, knowledgeSummary] = tagInputs.length > 0
       ? await Promise.all([
-          generateTagsForAllSections(tagInputs),
-          generateKnowledgeSummary(tagInputs),
-        ])
+        generateTagsForAllSections(tagInputs),
+        generateKnowledgeSummary(tagInputs),
+      ])
       : [new Map(), ""];
 
     // Build section entries
