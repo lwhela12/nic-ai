@@ -7,7 +7,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getSDKCliOptions } from "../lib/sdk-cli-options";
 import { readdir, readFile, writeFile, mkdir, copyFile, unlink, stat } from "fs/promises";
 import { join, dirname, basename, extname } from "path";
-import { extractTextFromPdf, extractTextFromDocx, extractStylesFromDocx, extractHtmlFromDocx, DocxStyles, DocxHtmlExtract } from "../lib/extract";
+import { extractTextFromPdf, extractTextFromDocx, extractFullTextFromDocx, extractStylesFromDocx, extractHtmlFromDocx, DocxStyles, DocxHtmlExtract } from "../lib/extract";
 import { requireFirmAccess } from "../lib/team-access";
 import { BUILT_IN_TEMPLATES, type PacketTemplate } from "../lib/evidence-packet";
 import { generateSectionTags, generateTagsForAllSections, generateKnowledgeSummary } from "../lib/knowledge-tagger";
@@ -1063,7 +1063,7 @@ app.post("/doc-templates/:id/parse", async (c) => {
         console.warn(`[Parse] PDF BBox artificial mapping failed (non-fatal):`, templErr instanceof Error ? templErr.message : templErr);
       }
     } else if (ext === ".docx") {
-      extractedText = await extractTextFromDocx(sourceFilePath);
+      extractedText = await extractFullTextFromDocx(sourceFilePath);
       // Also extract styles from DOCX (non-fatal if this fails)
       try {
         extractedStyles = await extractStylesFromDocx(sourceFilePath);
@@ -1083,67 +1083,6 @@ app.post("/doc-templates/:id/parse", async (c) => {
     // Use Claude to intelligently analyze and structure the template
     const templateName = formatTemplateName(templateId);
     const analysis = await analyzeTemplateWithAI(extractedText, templateName);
-
-    // Auto-detect if this is an evidence packet front matter template
-    const detectedAsPacket = isPacketTemplate(extractedText);
-    let packetConfig: PacketTemplate | undefined;
-    let packetAnalysis: PacketTemplateAnalysisResult | undefined;
-
-    if (detectedAsPacket) {
-      try {
-        const { extractTemplateSchemaAndInjectionMap, injectVariablesIntoDocx } = await import("../lib/extract");
-        const templateName = formatTemplateName(templateId);
-
-        // Use unified pipeline to get both UI schema and exact injection mapping
-        const unifiedAnalysis = await extractTemplateSchemaAndInjectionMap(templateName, extractedText);
-        packetConfig = unifiedAnalysis.packetConfig;
-
-        // Only run secondary analysis for non-DOCX sources (HTML template path).
-        // For DOCX, applyPacketHtmlTemplate is skipped so this call would be wasted.
-        if (ext !== ".docx") {
-          try {
-            packetAnalysis = await analyzePacketTemplateWithAI(extractedText, templateName);
-          } catch (analErr) {
-            console.warn("[Parse] Secondary packet analysis failed (non-fatal):", analErr instanceof Error ? analErr.message : analErr);
-          }
-        }
-
-        // For DOCX sources, skip HTML template (preserves native DOCX formatting via LibreOffice)
-        if (ext !== ".docx" && extractedHtml) {
-          packetConfig = applyPacketHtmlTemplate(packetConfig!, extractedHtml, packetAnalysis!);
-          packetConfig.renderMode = "template-native";
-          packetConfig.suppressPleadingLineNumbers = !detectPleadingLineNumbers(extractedText, extractedHtml.html);
-        }
-        if (ext === ".docx") {
-          // Remove any HTML template properties that would cause ambiguity
-          delete packetConfig!.htmlTemplate;
-          delete packetConfig!.htmlTemplateCss;
-          packetConfig!.renderMode = "template-native";
-          packetConfig!.suppressPleadingLineNumbers = !detectPleadingLineNumbers(extractedText, extractedHtml?.html);
-        }
-
-        // Complete the Native DOCX Injection using the strictly coupled replacementMap
-        // Save to templatized/ directory to preserve the original source file
-        if (ext === ".docx") {
-          try {
-            const templatizedDir = join(templatesDir, "templatized");
-            await mkdir(templatizedDir, { recursive: true });
-            const templatedDocxBytes = await injectVariablesIntoDocx(sourceFilePath, unifiedAnalysis.replacementMap);
-            await writeFile(join(templatizedDir, sourceFile), Buffer.from(templatedDocxBytes));
-            console.log(`[Parse] Successfully templatized DOCX (preserved original): ${sourceFile}`);
-          } catch (templErr) {
-            console.warn(`[Parse] DOCX unified templating failed (non-fatal):`, templErr instanceof Error ? templErr.message : templErr);
-          }
-        }
-
-        // Point sourceFile to templatized copy if it exists, otherwise source
-        packetConfig!.sourceFile = ext === ".docx"
-          ? `templatized/${sourceFile}`
-          : `source/${sourceFile}`;
-      } catch (err) {
-        console.warn("[Parse] Packet template unified analysis failed (non-fatal):", err instanceof Error ? err.message : err);
-      }
-    }
 
     // Save parsed file
     const parsedFilename = `${templateId}.md`;
@@ -1173,9 +1112,6 @@ app.post("/doc-templates/:id/parse", async (c) => {
 
     const existingIdx = index.templates.findIndex((t) => t.id === templateId);
     const existing = existingIdx >= 0 ? index.templates[existingIdx] : null;
-    if (packetConfig) {
-      packetConfig = normalizeParsedPacketTemplateIds(packetConfig, templateId, existing?.packetConfig);
-    }
 
     // Only preserve description if user manually set it; regenerate AI descriptions
     const isUserDescription = existing?.descriptionSource === "user";
@@ -1190,8 +1126,7 @@ app.post("/doc-templates/:id/parse", async (c) => {
       descriptionSource: isUserDescription ? "user" : "ai",
       parsedAt: new Date().toISOString(),
       sourceModified: sourceStat.mtime.toISOString(),
-      type: detectedAsPacket ? "packet" : "document",
-      packetConfig,
+      type: "document",
     };
 
     if (existingIdx >= 0) {
@@ -1280,7 +1215,7 @@ async function processTemplatesWithLimit(
         if (ext === ".pdf") {
           extractedText = await extractTextFromPdf(sourceFilePath);
         } else if (ext === ".docx") {
-          extractedText = await extractTextFromDocx(sourceFilePath);
+          extractedText = await extractFullTextFromDocx(sourceFilePath);
           try {
             extractedStyles = await extractStylesFromDocx(sourceFilePath);
           } catch {
@@ -1299,27 +1234,6 @@ async function processTemplatesWithLimit(
         // Analyze with AI (Haiku)
         const templateName = formatTemplateName(template.id);
         const analysis = await analyzeTemplateWithAI(extractedText, templateName);
-
-        // Auto-detect if this is an evidence packet front matter template
-        const detectedAsPacket = isPacketTemplate(extractedText);
-        let packetConfig: PacketTemplate | undefined;
-        let packetAnalysis: PacketTemplateAnalysisResult | undefined;
-        if (detectedAsPacket) {
-          try {
-            packetAnalysis = await analyzePacketTemplateWithAI(extractedText, templateName);
-            packetConfig = packetAnalysis.template;
-            if (extractedHtml) {
-              packetConfig = applyPacketHtmlTemplate(packetConfig, extractedHtml, packetAnalysis);
-              packetConfig.renderMode = "template-native";
-              packetConfig.suppressPleadingLineNumbers = !detectPleadingLineNumbers(extractedText, extractedHtml.html);
-            } else if (isDocxSource) {
-              packetConfig.renderMode = "template-native";
-              packetConfig.suppressPleadingLineNumbers = true;
-            }
-          } catch (err) {
-            console.warn(`[Batch Parse] Packet analysis failed for ${template.id} (non-fatal):`, err instanceof Error ? err.message : err);
-          }
-        }
 
         // Save parsed file
         const parsedFilename = `${template.id}.md`;
@@ -1349,9 +1263,6 @@ async function processTemplatesWithLimit(
 
         const existingIdx = indexData.templates.findIndex((t) => t.id === template.id);
         const existing = existingIdx >= 0 ? indexData.templates[existingIdx] : null;
-        if (packetConfig) {
-          packetConfig = normalizeParsedPacketTemplateIds(packetConfig, template.id, existing?.packetConfig);
-        }
 
         // Only preserve description if user manually set it; regenerate AI descriptions
         const isUserDescription = existing?.descriptionSource === "user";
@@ -1366,8 +1277,7 @@ async function processTemplatesWithLimit(
           descriptionSource: isUserDescription ? "user" : "ai",
           parsedAt: new Date().toISOString(),
           sourceModified: sourceStat.mtime.toISOString(),
-          type: detectedAsPacket ? "packet" : "document",
-          packetConfig,
+          type: "document",
         };
 
         if (existingIdx >= 0) {

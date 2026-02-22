@@ -535,6 +535,41 @@ function App() {
     } catch { /* ignore */ }
   }, [packetState])
 
+  // Sync packet document metadata (date, title, type) when the document index updates
+  useEffect(() => {
+    if (!packetState || !documentIndex?.folders) return
+    const lookup = new Map<string, DocumentFile>()
+    for (const [folder, data] of Object.entries(documentIndex.folders)) {
+      for (const file of getFolderFiles(data)) {
+        if (typeof file === 'string') continue
+        const name = getDocumentFileName(file)
+        if (!name) continue
+        const fullPath = normalizeDocumentLookupPath(
+          folder === '.' || folder === '' ? name : `${folder}/${name}`
+        )
+        lookup.set(fullPath, file)
+      }
+    }
+    let changed = false
+    const updated = packetState.documents.map(doc => {
+      const match = lookup.get(normalizeDocumentLookupPath(doc.path))
+      if (!match || typeof match === 'string') return doc
+      const newDate = typeof match.date === 'string' ? match.date : null
+      const newTitle = typeof match.title === 'string' ? match.title : doc.title
+      const newType = typeof match.type === 'string' ? match.type : doc.type
+      if (newDate !== doc.date || newTitle !== doc.title || newType !== doc.type) {
+        changed = true
+        const hasWarning = !newDate || (doc.hasWarning && doc.warningReason !== 'No date')
+        const warningReason = !newDate ? 'No date' : (doc.warningReason !== 'No date' ? doc.warningReason : undefined)
+        return { ...doc, date: newDate, title: newTitle, type: newType, hasWarning, warningReason }
+      }
+      return doc
+    })
+    if (changed) {
+      setPacketState(prev => prev ? { ...prev, documents: updated } : prev)
+    }
+  }, [documentIndex])
+
   // Ref to track current caseFolder for async completions
   const caseFolderRef = useRef(caseFolder)
   caseFolderRef.current = caseFolder
