@@ -70,3 +70,9 @@ tools/pdftotext/*.exe
 
 # User config directory (local machine)
 ~/.claude-pi/
+
+_extraction_summary.json
+_extraction.json
+_density_bundle.json
+_density_package.json
+_density_package.md

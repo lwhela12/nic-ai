@@ -164,7 +164,7 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "write_file",
-    description: "Write content to a file in the case folder. Use for creating documents, memos, or updating files.",
+    description: "Write plain text to a file in the case folder. Use for notes, JSON edits, or lightweight text files. Do NOT use for formal document drafting (use generate_document) and do NOT use for DOCX/PDF output.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -1654,6 +1654,12 @@ async function executeTool(
       }
 
       case "write_file": {
+        const relativePath = String(toolInput.path ?? "");
+        const normalizedPath = relativePath.toLowerCase();
+        if (normalizedPath.endsWith(".docx") || normalizedPath.endsWith(".pdf")) {
+          return "Error: write_file cannot create valid DOCX/PDF binaries. Use generate_document for formal docs so drafts/artifacts are created correctly.";
+        }
+
         const filePath = join(caseFolder, toolInput.path);
         if (!filePath.startsWith(caseFolder)) {
           return "Error: Cannot write files outside the case folder";
@@ -2488,6 +2494,11 @@ Do NOT use it for:
 - Reviewing existing documents
 - Simple notes or quick responses
 
+Critical safety rules for formal documents:
+- Never use write_file to create demand letters, case memos, settlement docs, letters, or Decision & Orders.
+- Never claim a document was saved unless generate_document returned a saved path.
+- If generate_document fails or reports no saved file, report that failure explicitly instead of writing a manual fallback file.
+
 5. **Read Documents with Vision**: Use read_document for PDFs in detail, especially scanned or layout-heavy PDFs. This spawns a vision-capable reader that sees rendered pages — form layouts, tables, handwriting, checkboxes, images — not just extracted text. Much better than read_file for PDFs with complex formatting.
 
 ## WHEN TO USE read_document
@@ -2800,6 +2811,7 @@ export async function* directChat(
         let filePath: string | undefined;
         let previewPath: string | undefined;
         let docxPath: string | undefined;
+        let generationError: string | undefined;
         for await (const event of generateDocument(caseFolder, docType, instructions)) {
           if (event.type === "status") {
             yield { type: "status", content: event.content };
@@ -2807,10 +2819,16 @@ export async function* directChat(
             yield { type: "tool", content: event.content };
           } else if (event.type === "text") {
             yield { type: "text", content: event.content };
+          } else if (event.type === "error") {
+            generationError = event.content;
+            yield { type: "status", content: event.content };
           } else if (event.type === "done") {
             filePath = event.filePath;
             previewPath = event.previewPath;
             docxPath = event.docxPath;
+            if (!filePath && event.content) {
+              generationError = event.content;
+            }
           }
         }
 
@@ -2824,7 +2842,9 @@ export async function* directChat(
             ? `Document successfully generated and saved to ${filePath}${
                 previewPath ? ` (preview: ${previewPath})` : ""
               }`
-            : "Document generation completed but no file was saved"
+            : `Document generation failed: ${
+                generationError || "No draft was saved by the document agent."
+              }`
         });
       } else if (toolUse.name === "read_document") {
         // Handle read_document - spawns Agent SDK agent with Read tool for vision

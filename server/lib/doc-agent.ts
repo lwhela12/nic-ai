@@ -7,9 +7,15 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import { readFile, writeFile, mkdir, readdir, stat } from "fs/promises";
-import { join, relative as pathRelative, extname } from "path";
-import { resolveFirmRoot } from "./year-mode";
+import { readFile, writeFile, mkdir, readdir, stat, appendFile } from "fs/promises";
+import { join, relative as pathRelative, extname, resolve as pathResolve, sep } from "path";
+import {
+  resolveFirmRoot,
+  getClientSlug,
+  loadClientRegistry,
+  resolveYearFilePath,
+  type ClientRegistry,
+} from "./year-mode";
 import { execSync } from "child_process";
 import { loadSectionsByIds } from "../routes/knowledge";
 import { extractPdfText } from "./pdftotext";
@@ -54,6 +60,7 @@ export interface DocGenResult {
 
 const INDEX_SLICE_MAX_CHARS = 12000;
 const WORKING_DOCS_REL_DIR = ".ai_tool/working-docs";
+const DOC_GEN_TRACE_MAX_TEXT = 1600;
 
 const DEFAULT_DRAFT_FILENAME: Record<DocumentType, string> = {
   demand_letter: "demand_letter.md",
@@ -128,6 +135,307 @@ function sanitizeDraftFilename(rawFilename: unknown, docType: DocumentType): str
   }
 
   return filename;
+}
+
+function cleanInlineMarkdownForMatch(value: string): string {
+  return value
+    .replace(/^\s{0,3}#{1,6}\s+/, "")
+    .replace(/[*_`~]+/g, "")
+    .trim();
+}
+
+function stripOuterMarkdownFence(content: string): { content: string; changed: boolean } {
+  const trimmed = content.trim();
+  const fenced = trimmed.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```$/i);
+  if (!fenced) return { content, changed: false };
+  return { content: fenced[1], changed: true };
+}
+
+function normalizeDecisionOrderMarkdown(content: string): { content: string; notes: string[] } {
+  const notes: string[] = [];
+  const normalizedLineEndings = content.replace(/\r/g, "");
+  const lines = normalizedLineEndings.split("\n");
+
+  const sectionRules: Array<{ label: string; numeral: string }> = [
+    { label: "PROCEDURAL HISTORY", numeral: "I" },
+    { label: "ISSUE PRESENTED", numeral: "II" },
+    { label: "EXHIBITS ADMITTED", numeral: "III" },
+    { label: "FINDINGS OF FACT", numeral: "IV" },
+    { label: "CONCLUSIONS OF LAW", numeral: "V" },
+    { label: "ORDER", numeral: "VI" },
+    { label: "NOTICE OF APPEAL RIGHTS", numeral: "VII" },
+    { label: "CERTIFICATE OF SERVICE", numeral: "VIII" },
+  ];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const headingMatch = line.match(/^(\s{0,3}#{1,6}\s+)?(.*)$/);
+    if (!headingMatch) continue;
+    const prefix = headingMatch[1] || "";
+    const body = headingMatch[2] || "";
+    const cleanBody = cleanInlineMarkdownForMatch(body);
+    const withoutNumeral = cleanBody.replace(/^[IVXLCDM]+\.\s*/i, "").trim().toUpperCase();
+    const hasNumeral = /^[IVXLCDM]+\.\s+/i.test(cleanBody);
+    const rule = sectionRules.find((entry) => entry.label === withoutNumeral);
+    if (!rule || hasNumeral) continue;
+
+    lines[i] = `${prefix || "### "}${rule.numeral}. ${rule.label}`;
+    notes.push(`Added missing section numeral for "${rule.label}".`);
+  }
+
+  const hasProceduralHeading = lines.some((line) => {
+    const clean = cleanInlineMarkdownForMatch(line).toUpperCase();
+    return /^I\.\s*PROCEDURAL HISTORY\b/.test(clean);
+  });
+
+  if (!hasProceduralHeading) {
+    const firstLaterSectionIdx = lines.findIndex((line) => {
+      const clean = cleanInlineMarkdownForMatch(line).toUpperCase();
+      return /^(II|III|IV|V|VI|VII|VIII)\.\s+(ISSUE PRESENTED|EXHIBITS ADMITTED|FINDINGS OF FACT|CONCLUSIONS OF LAW|ORDER|NOTICE OF APPEAL RIGHTS|CERTIFICATE OF SERVICE)\b/.test(clean);
+    });
+
+    const insertionIdx = firstLaterSectionIdx >= 0 ? firstLaterSectionIdx : lines.length;
+    const insertionBlock = [
+      "### I. PROCEDURAL HISTORY",
+      "",
+      "[VERIFY: Add procedural history section details.]",
+      "",
+    ];
+    lines.splice(insertionIdx, 0, ...insertionBlock);
+    notes.push("Inserted missing I. PROCEDURAL HISTORY placeholder block.");
+  }
+
+  const metadataRules: Array<{ label: string; regex: RegExp; placeholder: string }> = [
+    { label: "Claim No.", regex: /^claim\s*no\.?\s*:/i, placeholder: "Claim No.: [VERIFY]" },
+    { label: "Hearing No.", regex: /^hearing\s*no\.?\s*:/i, placeholder: "Hearing No.: [VERIFY]" },
+    { label: "Date of Injury", regex: /^date\s*of\s*injury\s*:/i, placeholder: "Date of Injury: [VERIFY]" },
+  ];
+
+  const missingMetadata = metadataRules.filter((rule) =>
+    !lines.some((line) => rule.regex.test(cleanInlineMarkdownForMatch(line)))
+  );
+
+  if (missingMetadata.length > 0) {
+    const decisionHeadingIdx = lines.findIndex((line) => {
+      const clean = cleanInlineMarkdownForMatch(line).toUpperCase();
+      return /(?:HEARING|APPEALS)\s+OFFICER\s+DECISION\s*(?:&|AND)\s*ORDER/.test(clean)
+        || /^DECISION\s*(?:&|AND)\s*ORDER/.test(clean);
+    });
+
+    const insertionIdx = decisionHeadingIdx >= 0 ? decisionHeadingIdx : 0;
+    const metadataLines = missingMetadata.map((entry) => entry.placeholder);
+    lines.splice(insertionIdx, 0, ...metadataLines, "");
+    notes.push(`Inserted missing metadata placeholders: ${missingMetadata.map((entry) => entry.label).join(", ")}.`);
+  }
+
+  return {
+    content: lines.join("\n"),
+    notes,
+  };
+}
+
+function applyDraftSafetyChecks(content: string, docType: DocumentType): { content: string; notes: string[] } {
+  const notes: string[] = [];
+  let working = content;
+
+  const unfenced = stripOuterMarkdownFence(working);
+  if (unfenced.changed) {
+    working = unfenced.content;
+    notes.push("Removed outer markdown code fence.");
+  }
+
+  if (docType === "decision_order") {
+    const normalized = normalizeDecisionOrderMarkdown(working);
+    working = normalized.content;
+    notes.push(...normalized.notes);
+  }
+
+  return { content: working, notes };
+}
+
+function truncateForTrace(value: string, max = DOC_GEN_TRACE_MAX_TEXT): string {
+  if (!value) return "";
+  if (value.length <= max) return value;
+  return `${value.slice(0, max)}...[truncated ${value.length - max} chars]`;
+}
+
+function safeTraceInput(input: Record<string, any>): Record<string, any> {
+  const json = JSON.stringify(input ?? {});
+  if (json.length <= DOC_GEN_TRACE_MAX_TEXT) return input ?? {};
+  return {
+    _truncated: true,
+    preview: truncateForTrace(json),
+  };
+}
+
+function toolUseSummary(toolUses: Array<{ id: string; name: string; input: Record<string, any> }>): Array<Record<string, any>> {
+  return toolUses.map((tool) => ({
+    id: tool.id,
+    name: tool.name,
+    input: safeTraceInput(tool.input),
+  }));
+}
+
+async function appendDocGenTrace(tracePath: string, event: Record<string, any>): Promise<void> {
+  const entry = JSON.stringify({
+    ts: new Date().toISOString(),
+    ...event,
+  });
+  await appendFile(tracePath, `${entry}\n`, "utf-8");
+}
+
+interface YearSourceRoot {
+  prefix: string;
+  year: string;
+  root: string;
+}
+
+interface DocAgentPathContext {
+  clientSlug: string | null;
+  registry: ClientRegistry | null;
+  yearSources: YearSourceRoot[];
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isWithinPath(targetPath: string, basePath: string): boolean {
+  const target = pathResolve(targetPath);
+  const base = pathResolve(basePath);
+  return target === base || target.startsWith(base + sep);
+}
+
+function normalizeToolPath(rawPath: unknown): string {
+  return normalizeRelativePath(String(rawPath ?? ""))
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "")
+    .replace(/\/+/g, "/")
+    .trim();
+}
+
+function mapClientFilesAliasToYearPath(inputPath: string): string {
+  const match = inputPath.match(/^(\d{4})\s+client\s+files(?:\/(.*))?$/i);
+  if (!match) return inputPath;
+  const year = match[1];
+  const rest = match[2] ? `/${match[2]}` : "";
+  return `${year}${rest}`;
+}
+
+function buildRequestedPathCandidates(requestedPath: string): string[] {
+  const normalized = normalizeToolPath(requestedPath);
+  const mapped = mapClientFilesAliasToYearPath(normalized);
+  const candidates = [normalized, mapped].filter(Boolean);
+  return Array.from(new Set(candidates));
+}
+
+async function buildDocAgentPathContext(
+  caseFolder: string,
+  firmRoot: string
+): Promise<DocAgentPathContext> {
+  const clientSlug = getClientSlug(caseFolder);
+  if (!clientSlug) {
+    return { clientSlug: null, registry: null, yearSources: [] };
+  }
+
+  const registry = await loadClientRegistry(firmRoot);
+  const entry = registry?.clients?.[clientSlug];
+  if (!registry || !entry) {
+    return { clientSlug, registry: registry ?? null, yearSources: [] };
+  }
+
+  const yearSources: YearSourceRoot[] = [];
+  for (const relFolder of entry.sourceFolders || []) {
+    const prefix = String(relFolder).split("/")[0] || "";
+    if (!prefix) continue;
+    const yearMatch = prefix.match(/^(19|20)\d{2}/);
+    const year = yearMatch ? yearMatch[0] : prefix;
+    yearSources.push({
+      prefix,
+      year,
+      root: pathResolve(firmRoot, relFolder),
+    });
+  }
+
+  return { clientSlug, registry, yearSources };
+}
+
+function resolveYearPathFromContext(
+  firmRoot: string,
+  pathContext: DocAgentPathContext,
+  candidatePath: string
+): string | null {
+  if (!pathContext.clientSlug || !pathContext.registry) return null;
+  const normalizedCandidate = normalizeToolPath(candidatePath);
+  const candidateLower = normalizedCandidate.toLowerCase();
+
+  for (const source of pathContext.yearSources) {
+    const prefixLower = source.prefix.toLowerCase();
+    const yearLower = source.year.toLowerCase();
+    let sourceRelativePath: string | null = null;
+
+    if (candidateLower === prefixLower || candidateLower.startsWith(`${prefixLower}/`)) {
+      sourceRelativePath = `${source.prefix}${normalizedCandidate.slice(source.prefix.length)}`;
+    } else if (candidateLower === yearLower || candidateLower.startsWith(`${yearLower}/`)) {
+      sourceRelativePath = `${source.prefix}${normalizedCandidate.slice(source.year.length)}`;
+    }
+
+    if (!sourceRelativePath) continue;
+
+    const resolved = pathResolve(
+      resolveYearFilePath(firmRoot, pathContext.registry, pathContext.clientSlug, sourceRelativePath)
+    );
+    if (isWithinPath(resolved, source.root)) {
+      return resolved;
+    }
+  }
+
+  return null;
+}
+
+async function resolveReadableCasePath(
+  caseFolder: string,
+  firmRoot: string,
+  requestedPath: string,
+  pathContext: DocAgentPathContext
+): Promise<string | null> {
+  const candidates = buildRequestedPathCandidates(requestedPath);
+
+  for (const candidate of candidates) {
+    const caseResolved = pathResolve(caseFolder, candidate);
+    if (isWithinPath(caseResolved, caseFolder) && await fileExists(caseResolved)) {
+      return caseResolved;
+    }
+
+    const yearResolved = resolveYearPathFromContext(firmRoot, pathContext, candidate);
+    if (yearResolved && await fileExists(yearResolved)) {
+      return yearResolved;
+    }
+  }
+
+  return null;
+}
+
+function toDocAgentDisplayPath(
+  absolutePath: string,
+  caseFolder: string,
+  pathContext: DocAgentPathContext
+): string {
+  for (const source of pathContext.yearSources) {
+    if (isWithinPath(absolutePath, source.root)) {
+      const relWithinSource = normalizeRelativePath(pathRelative(source.root, absolutePath));
+      return relWithinSource && relWithinSource !== "."
+        ? `${source.prefix}/${relWithinSource}`
+        : source.prefix;
+    }
+  }
+
+  return normalizeRelativePath(pathRelative(caseFolder, absolutePath));
 }
 
 interface DraftArtifacts {
@@ -512,17 +820,19 @@ async function executeTool(
   toolInput: Record<string, any>,
   caseFolder: string,
   firmRoot: string,
-  docType: DocumentType
+  docType: DocumentType,
+  pathContext: DocAgentPathContext
 ): Promise<{ result: string; filePath?: string; previewPath?: string; docxPath?: string }> {
   try {
     switch (toolName) {
       case "read_file": {
-        // Allow reading from case folder or firm root (for templates)
-        let filePath = join(caseFolder, toolInput.path);
+        const requestedPath = String(toolInput.path ?? "");
+        const normalizedRequestedPath = normalizeToolPath(requestedPath);
+        let filePath: string | null = null;
 
         // If path starts with .ai_tool/templates, try firm root first
-        if (toolInput.path.startsWith(".ai_tool/templates")) {
-          const firmPath = join(firmRoot, toolInput.path);
+        if (requestedPath.startsWith(".ai_tool/templates")) {
+          const firmPath = pathResolve(firmRoot, requestedPath);
           try {
             const content = await readFile(firmPath, "utf-8");
             return { result: content.slice(0, 20000) };
@@ -531,12 +841,26 @@ async function executeTool(
           }
         }
 
-        // Security check
-        if (!filePath.startsWith(caseFolder) && !filePath.startsWith(firmRoot)) {
-          return { result: "Error: Cannot read files outside the case/firm folder" };
+        filePath = await resolveReadableCasePath(
+          caseFolder,
+          firmRoot,
+          requestedPath,
+          pathContext
+        );
+        if (!filePath) {
+          const availableAliases = pathContext.yearSources
+            .map((source) => source.prefix)
+            .filter((value, index, list) => list.indexOf(value) === index)
+            .join(", ");
+          const aliasHint = availableAliases
+            ? ` Available virtual folders: ${availableAliases}.`
+            : "";
+          return {
+            result: `Error: File not found: ${requestedPath}.${aliasHint} Try read_file(\".ai_tool/indexes/{FolderName}.json\") to locate the exact filename.`,
+          };
         }
 
-        const normalizedPath = toolInput.path.toLowerCase();
+        const normalizedPath = normalizedRequestedPath.toLowerCase();
 
         // Handle PDFs and DOCX as binary documents
         if (normalizedPath.endsWith('.pdf')) {
@@ -547,16 +871,16 @@ async function executeTool(
               timeout: 30000,
             });
             return { result: text.slice(0, 20000) };
-          } catch {
-            return { result: "Error: Could not extract text from PDF" };
+          } catch (error) {
+            return { result: `Error: Could not extract text from PDF: ${error instanceof Error ? error.message : String(error)}` };
           }
         }
         if (normalizedPath.endsWith('.docx')) {
           try {
             const text = await extractTextFromDocx(filePath);
             return { result: text.slice(0, 20000) };
-          } catch {
-            return { result: "Error: Could not extract text from DOCX" };
+          } catch (error) {
+            return { result: `Error: Could not extract text from DOCX: ${error instanceof Error ? error.message : String(error)}` };
           }
         }
 
@@ -590,13 +914,35 @@ async function executeTool(
       }
 
       case "glob": {
-        // Use Bun.Glob to find files matching the pattern
-        const glob = new Bun.Glob(toolInput.pattern);
-        const matches: string[] = [];
-        for await (const file of glob.scan({ cwd: caseFolder, onlyFiles: true })) {
-          matches.push(file);
-          if (matches.length >= 100) break; // Limit results
+        const pattern = String(toolInput.pattern ?? "").trim();
+        if (!pattern) {
+          return { result: "Error: pattern is required" };
         }
+        const glob = new Bun.Glob(pattern);
+        const matches: string[] = [];
+        const seen = new Set<string>();
+
+        for await (const file of glob.scan({ cwd: caseFolder, onlyFiles: true })) {
+          const normalized = normalizeRelativePath(file);
+          if (seen.has(normalized)) continue;
+          seen.add(normalized);
+          matches.push(normalized);
+          if (matches.length >= 100) break;
+        }
+
+        if (matches.length < 100) {
+          for (const source of pathContext.yearSources) {
+            for await (const file of glob.scan({ cwd: source.root, onlyFiles: true })) {
+              const prefixed = normalizeRelativePath(`${source.prefix}/${file}`);
+              if (seen.has(prefixed)) continue;
+              seen.add(prefixed);
+              matches.push(prefixed);
+              if (matches.length >= 100) break;
+            }
+            if (matches.length >= 100) break;
+          }
+        }
+
         if (matches.length === 0) {
           return { result: "No files found matching pattern" };
         }
@@ -604,15 +950,25 @@ async function executeTool(
       }
 
       case "grep": {
-        const searchPath = toolInput.path ? join(caseFolder, toolInput.path) : caseFolder;
+        const requestedSearchPath = typeof toolInput.path === "string" ? toolInput.path : "";
+        const searchPath = requestedSearchPath
+          ? await resolveReadableCasePath(caseFolder, firmRoot, requestedSearchPath, pathContext)
+          : caseFolder;
         const rawPattern = String(toolInput.pattern ?? "").trim();
 
         if (!rawPattern) {
           return { result: "Error: pattern is required" };
         }
 
+        if (!searchPath) {
+          return { result: `Error: Search path not found: ${requestedSearchPath}` };
+        }
+
         // Security check
-        if (!searchPath.startsWith(caseFolder)) {
+        if (
+          !isWithinPath(searchPath, caseFolder) &&
+          !pathContext.yearSources.some((source) => isWithinPath(searchPath, source.root))
+        ) {
           return { result: "Error: Cannot search outside the case folder" };
         }
 
@@ -633,7 +989,7 @@ async function executeTool(
             try {
               const content = await readFile(candidate, "utf-8");
               if (matchesSearchPattern(content, rawPattern, regex)) {
-                const relPath = normalizeRelativePath(pathRelative(caseFolder, candidate));
+                const relPath = toDocAgentDisplayPath(candidate, caseFolder, pathContext);
                 matchedFiles.push(relPath);
               }
             } catch {
@@ -652,11 +1008,22 @@ async function executeTool(
       }
 
       case "list_folder": {
-        const folderPath = toolInput.path ? join(caseFolder, toolInput.path) : caseFolder;
+        const requestedPath = typeof toolInput.path === "string" && toolInput.path.trim()
+          ? toolInput.path.trim()
+          : ".";
+        const folderPath = requestedPath === "."
+          ? caseFolder
+          : await resolveReadableCasePath(caseFolder, firmRoot, requestedPath, pathContext);
 
-        // Security check
-        if (!folderPath.startsWith(caseFolder)) {
-          return { result: "Error: Cannot list folders outside the case folder" };
+        if (!folderPath) {
+          const availableAliases = pathContext.yearSources
+            .map((source) => source.prefix)
+            .filter((value, index, list) => list.indexOf(value) === index)
+            .join(", ");
+          const aliasHint = availableAliases
+            ? ` Available virtual folders: ${availableAliases}.`
+            : "";
+          return { result: `Error: Folder not found: ${requestedPath}.${aliasHint}` };
         }
 
         try {
@@ -705,7 +1072,11 @@ async function executeTool(
           return { result: "Error: Cannot write files outside the case folder" };
         }
 
-        const markdownContent = String(toolInput.content ?? "");
+        const rawContent = String(toolInput.content ?? "");
+        const {
+          content: markdownContent,
+          notes: safetyNotes,
+        } = applyDraftSafetyChecks(rawContent, docType);
         await writeFile(filePath, markdownContent, "utf-8");
         const relativePath = `.ai_tool/drafts/${safeFilename}`;
         const draftId = safeFilename.replace(/\.md$/i, "");
@@ -725,8 +1096,8 @@ async function executeTool(
 
         return {
           result: artifacts.previewPath
-            ? `Draft saved to ${relativePath} with DOCX and PDF preview artifacts`
-            : `Draft saved to ${relativePath}`,
+            ? `Draft saved to ${relativePath} with DOCX and PDF preview artifacts${safetyNotes.length ? " (layout safety checks applied)" : ""}`
+            : `Draft saved to ${relativePath}${safetyNotes.length ? " (layout safety checks applied)" : ""}`,
           filePath: relativePath,
           previewPath: artifacts.previewPath,
           docxPath: artifacts.docxPath,
@@ -746,7 +1117,11 @@ async function executeTool(
           return { result: "Error: Cannot write files outside the case folder" };
         }
 
-        const markdownContent = String(toolInput.content ?? "");
+        const rawContent = String(toolInput.content ?? "");
+        const {
+          content: markdownContent,
+          notes: safetyNotes,
+        } = applyDraftSafetyChecks(rawContent, docType);
         await writeFile(filePath, markdownContent, "utf-8");
         const relativePath = `.ai_tool/drafts/${safeFilename}`;
         const draftId = safeFilename.replace(/\.md$/i, "");
@@ -766,8 +1141,8 @@ async function executeTool(
 
         return {
           result: artifacts.previewPath
-            ? `Draft saved to ${relativePath} with DOCX and PDF preview artifacts`
-            : `Draft saved to ${relativePath}`,
+            ? `Draft saved to ${relativePath} with DOCX and PDF preview artifacts${safetyNotes.length ? " (layout safety checks applied)" : ""}`
+            : `Draft saved to ${relativePath}${safetyNotes.length ? " (layout safety checks applied)" : ""}`,
           filePath: relativePath,
           previewPath: artifacts.previewPath,
           docxPath: artifacts.docxPath,
@@ -832,6 +1207,7 @@ Decision & Order specific requirements:
   7) Signature / submission block (if requested)
 - Ground every finding and legal conclusion in case documents/index data; do not invent facts, holdings, dates, or citations.
 - If critical filing detail is missing (appeal no., claim no., hearing date, AO name), insert a clear [VERIFY: ...] placeholder rather than guessing.
+- A post-save layout safety pass will normalize missing section numbering and add Claim/Hearing/DOI placeholders if omitted, but still draft these explicitly when known.
 - Default draft filename for this type: decision_and_order.md`,
   };
 
@@ -897,6 +1273,42 @@ export async function* generateDocument(
   userPrompt: string
 ): AsyncGenerator<{ type: string; content?: string; filePath?: string; previewPath?: string; docxPath?: string; done?: boolean }> {
   const firmRoot = resolveFirmRoot(caseFolder);
+  const pathContext = await buildDocAgentPathContext(caseFolder, firmRoot);
+  const maxIterations = 10;
+  const traceRunId = `docgen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const traceDir = join(caseFolder, ".ai_tool", "logs");
+  const tracePath = join(traceDir, `${traceRunId}.jsonl`);
+  const tracePathRel = `.ai_tool/logs/${traceRunId}.jsonl`;
+
+  await mkdir(traceDir, { recursive: true });
+  const trace = async (event: Record<string, any>) => {
+    try {
+      await appendDocGenTrace(tracePath, event);
+    } catch (err) {
+      console.warn(
+        `[DocAgent] Failed to append trace at ${tracePathRel}: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  };
+
+  await trace({
+    event: "start",
+    docType,
+    caseFolder,
+    userPromptPreview: truncateForTrace(userPrompt),
+  });
+  await trace({
+    event: "path_context",
+    clientSlug: pathContext.clientSlug,
+    hasRegistry: Boolean(pathContext.registry),
+    yearSources: pathContext.yearSources.map((source) => ({
+      prefix: source.prefix,
+      year: source.year,
+      root: source.root,
+    })),
+  });
 
   yield { type: "status", content: "Loading case data and templates..." };
 
@@ -909,7 +1321,22 @@ export async function* generateDocument(
   ]);
   const caseContext = await buildCasePromptContext(caseFolder, caseIndex);
 
-  const systemPrompt = buildSystemPrompt(docType, knowledge, templates, firmConfig);
+  const yearAliases = pathContext.yearSources
+    .map((source) => source.prefix)
+    .filter((alias, index, list) => list.indexOf(alias) === index);
+  const runtimeGuidance = [
+    "## RUNTIME CONSTRAINTS",
+    `- You have a hard budget of ${maxIterations} model iterations for this run.`,
+    "- Plan your calls: locate the needed files quickly, draft, then call write_draft before the budget is exhausted.",
+    "- Avoid exploratory bash loops; prefer read_file, read_index_slice, and .ai_tool/indexes/* JSON.",
+    "",
+    "## PATH RESOLUTION NOTES",
+    yearAliases.length > 0
+      ? `- Indexed folder labels like ${yearAliases.join(", ")} are supported by read_file/list_folder. You may use those aliases directly.`
+      : "- Use paths relative to the case folder.",
+    "- If exact source docs are hard to locate, read .ai_tool/indexes/{FolderName}.json for canonical filenames.",
+  ].join("\n");
+  const systemPrompt = `${buildSystemPrompt(docType, knowledge, templates, firmConfig)}\n\n${runtimeGuidance}`;
 
   // Build initial user message with case context
   const userMessage = `CASE CONTEXT:
@@ -920,6 +1347,14 @@ ${userPrompt}
 
 Please generate the requested document. Start by reviewing the case context above, then select and read the appropriate template, and finally draft and save the document.`;
 
+  await trace({
+    event: "prompt_built",
+    systemPromptLength: systemPrompt.length,
+    userMessageLength: userMessage.length,
+    systemPromptPreview: truncateForTrace(systemPrompt, 4000),
+    userMessagePreview: truncateForTrace(userMessage, 4000),
+  });
+
   const messages: Anthropic.MessageParam[] = [
     { role: "user", content: userMessage }
   ];
@@ -927,10 +1362,10 @@ Please generate the requested document. Start by reviewing the case context abov
   yield { type: "status", content: "Starting document generation..." };
 
   let iterations = 0;
-  const maxIterations = 10;
   let finalFilePath: string | undefined;
   let finalPreviewPath: string | undefined;
   let finalDocxPath: string | undefined;
+  let finalFailureReason: string | undefined;
 
   while (iterations < maxIterations) {
     iterations++;
@@ -959,13 +1394,36 @@ Please generate the requested document. Start by reviewing the case context abov
       }
     }
 
+    await trace({
+      event: "model_response",
+      iteration: iterations,
+      stopReason: response.stop_reason,
+      textLength: textContent.length,
+      textPreview: textContent ? truncateForTrace(textContent) : undefined,
+      toolUses: toolUseSummary(toolUses),
+    });
+
     // Stream any text output
     if (textContent) {
       yield { type: "text", content: textContent };
     }
 
-    // If no tool use, we're done
+    // If no tool use, stop this run.
     if (response.stop_reason === "end_turn" || toolUses.length === 0) {
+      if (!finalFilePath) {
+        const trimmedText = textContent.trim();
+        if (trimmedText.length === 0) {
+          finalFailureReason = "Document generation ended before producing draft content or saving a file.";
+        } else {
+          finalFailureReason = "Document generation produced text but never called write_draft to save it.";
+        }
+      }
+      await trace({
+        event: "stop_no_tools",
+        iteration: iterations,
+        hasSavedFile: Boolean(finalFilePath),
+        failureReason: finalFailureReason,
+      });
       break;
     }
 
@@ -974,14 +1432,33 @@ Please generate the requested document. Start by reviewing the case context abov
 
     for (const toolUse of toolUses) {
       yield { type: "tool", content: `Using ${toolUse.name}...` };
+      await trace({
+        event: "tool_call",
+        iteration: iterations,
+        toolUseId: toolUse.id,
+        toolName: toolUse.name,
+        input: safeTraceInput(toolUse.input),
+      });
 
       const { result, filePath, previewPath, docxPath } = await executeTool(
         toolUse.name,
         toolUse.input,
         caseFolder,
         firmRoot,
-        docType
+        docType,
+        pathContext
       );
+
+      await trace({
+        event: "tool_result",
+        iteration: iterations,
+        toolUseId: toolUse.id,
+        toolName: toolUse.name,
+        resultPreview: truncateForTrace(result),
+        filePath,
+        previewPath,
+        docxPath,
+      });
 
       if (filePath) {
         finalFilePath = filePath;
@@ -1021,9 +1498,33 @@ Please generate the requested document. Start by reviewing the case context abov
     });
   }
 
+  if (!finalFilePath && !finalFailureReason && iterations >= maxIterations) {
+    finalFailureReason = `Document generation reached max iterations (${maxIterations}) before saving a draft.`;
+  }
+
+  if (!finalFilePath && finalFailureReason) {
+    finalFailureReason = `${finalFailureReason} (trace: ${tracePathRel})`;
+    console.warn(`[DocAgent] ${finalFailureReason}`);
+    await trace({
+      event: "error",
+      failureReason: finalFailureReason,
+    });
+    yield { type: "error", content: finalFailureReason };
+  }
+
+  await trace({
+    event: "done",
+    iterations,
+    filePath: finalFilePath,
+    previewPath: finalPreviewPath,
+    docxPath: finalDocxPath,
+    failureReason: finalFailureReason,
+  });
+
   yield {
     type: "done",
     done: true,
+    content: finalFailureReason,
     filePath: finalFilePath,
     previewPath: finalPreviewPath,
     docxPath: finalDocxPath,
