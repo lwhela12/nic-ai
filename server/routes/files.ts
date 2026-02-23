@@ -137,7 +137,9 @@ function joinRelativePath(folderName: string, fileName: string): string {
 function resolveCasePath(caseFolder: string, relativePath: string): string {
   const base = resolve(caseFolder);
   const target = resolve(base, relativePath);
-  if (target !== base && !target.startsWith(base + sep)) {
+  // Use endsWith(sep) to avoid double-separator when base is a drive root (e.g. "C:\")
+  const prefix = base.endsWith(sep) ? base : base + sep;
+  if (target !== base && !target.startsWith(prefix)) {
     throw new Error(`Path is outside case folder: ${relativePath}`);
   }
   return target;
