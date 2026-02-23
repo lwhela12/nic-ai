@@ -41,6 +41,7 @@ export interface PacketState {
   piiScanned: boolean
   generatedAt: string | null
   outputPath: string | null
+  frontMatterDocxPath: string | null
   draftId: string | null
   draftName?: string
 }

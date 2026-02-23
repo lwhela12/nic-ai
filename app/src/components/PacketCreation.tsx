@@ -261,8 +261,8 @@ export default function PacketCreation({
         }),
       })
       if (res.ok) {
-        const { url } = await res.json()
-        onPreviewReady(`${apiUrl}${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}`)
+        const data = await res.json()
+        onPreviewReady(`${apiUrl}${data.url}${data.url.includes('?') ? '&' : '?'}t=${Date.now()}`)
       }
     } catch { /* ignore */ }
     setIsPreviewing(false)
@@ -380,6 +380,7 @@ export default function PacketCreation({
           ...prev,
           generatedAt: new Date().toISOString(),
           outputPath: data.outputPath,
+          frontMatterDocxPath: data.frontMatterDocxPath || null,
         }))
         if (data.outputPath) {
           onGenerated(data.outputPath)
@@ -486,9 +487,17 @@ export default function PacketCreation({
           <p className="text-xs text-red-600 flex-1">{generateError}</p>
         )}
         {packetState.generatedAt && !generateError && (
-          <p className="text-xs text-emerald-600 flex-1">
-            Packet generated {packetState.outputPath ? `at ${packetState.outputPath}` : ''}
-          </p>
+          <div className="text-xs text-emerald-600 flex-1 flex items-center gap-3">
+            <span>Packet generated {packetState.outputPath ? `at ${packetState.outputPath}` : ''}</span>
+            {packetState.frontMatterDocxPath && (
+              <button
+                onClick={() => onShowFile(packetState.frontMatterDocxPath!)}
+                className="text-blue-600 hover:text-blue-800 underline"
+              >
+                Open Front Matter (.docx)
+              </button>
+            )}
+          </div>
         )}
         {!generateError && !packetState.generatedAt && <div className="flex-1" />}
         <button
@@ -846,45 +855,21 @@ function FrontMatterTab({
 
   return (
     <div className="p-4 space-y-4">
-      {/* Template and Signer dropdowns */}
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className={labelClass}>Template</label>
-          <select
-            className={inputClass}
-            value={frontMatter.templateId || ''}
-            onChange={e => handleTemplateChange(e.target.value)}
-          >
-            <option value="">Default (HO)</option>
-            {templates.map(t => (
-              <option key={t.id} value={t.id}>
-                {t.name}{t.builtIn ? '' : ' (Custom)'}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label className={labelClass}>Signer</label>
-          {attorneys.length > 0 ? (
-            <select
-              className={inputClass}
-              value={frontMatter.signerName || ''}
-              onChange={e => handleSignerChange(e.target.value)}
-            >
-              <option value="">Select signer...</option>
-              {attorneys.map((a, i) => (
-                <option key={i} value={a.name}>{a.name}</option>
-              ))}
-            </select>
-          ) : (
-            <input
-              className={inputClass}
-              value={frontMatter.signerName || ''}
-              onChange={e => onUpdate('signerName', e.target.value)}
-              placeholder="Attorney name"
-            />
-          )}
-        </div>
+      {/* Template dropdown */}
+      <div>
+        <label className={labelClass}>Template</label>
+        <select
+          className={inputClass}
+          value={frontMatter.templateId || ''}
+          onChange={e => handleTemplateChange(e.target.value)}
+        >
+          <option value="">Default (HO)</option>
+          {templates.map(t => (
+            <option key={t.id} value={t.id}>
+              {t.name}{t.builtIn ? '' : ' (Custom)'}
+            </option>
+          ))}
+        </select>
       </div>
 
       <CaptionFieldsGrid
@@ -984,7 +969,28 @@ function FrontMatterTab({
       </div>
 
       <div>
-        <label className={labelClass}>Firm Block (7 lines)</label>
+        <label className={labelClass}>Firm Block</label>
+        <div className="mb-2">
+          {attorneys.length > 0 ? (
+            <select
+              className={inputClass}
+              value={frontMatter.signerName || ''}
+              onChange={e => handleSignerChange(e.target.value)}
+            >
+              <option value="">Select signer...</option>
+              {attorneys.map((a, i) => (
+                <option key={i} value={a.name}>{a.name}</option>
+              ))}
+            </select>
+          ) : (
+            <input
+              className={inputClass}
+              value={frontMatter.signerName || ''}
+              onChange={e => onUpdate('signerName', e.target.value)}
+              placeholder="Signer name"
+            />
+          )}
+        </div>
         <div className="space-y-1">
           {firmLines.slice(0, 7).map((line, i) => (
             <input
@@ -998,14 +1004,16 @@ function FrontMatterTab({
         </div>
       </div>
 
-      <button
-        onClick={onPreview}
-        disabled={isPreviewing}
-        className="px-4 py-2 text-sm font-medium bg-surface-100 text-brand-700 rounded-lg
-                   hover:bg-surface-200 transition-colors disabled:opacity-50"
-      >
-        {isPreviewing ? 'Generating Preview...' : 'Preview Front Matter'}
-      </button>
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          onClick={onPreview}
+          disabled={isPreviewing}
+          className="px-4 py-2 text-sm font-medium bg-surface-100 text-brand-700 rounded-lg
+                     hover:bg-surface-200 transition-colors disabled:opacity-50"
+        >
+          {isPreviewing ? 'Generating Preview...' : 'Preview Front Matter'}
+        </button>
+      </div>
     </div>
   )
 }

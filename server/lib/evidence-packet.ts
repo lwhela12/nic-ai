@@ -2,7 +2,8 @@ import { readFile } from "fs/promises";
 import { resolve, sep, join } from "path";
 import { PDFDocument, PDFFont, PDFPage, StandardFonts, degrees, rgb } from "pdf-lib";
 import { runPdftotext } from "./pdftotext";
-import { renderHtmlFrontMatter } from "./evidence-packet-html";
+import { renderHtmlFrontMatter, buildFrontMatterHtml } from "./evidence-packet-html";
+import { htmlToDocx } from "./export";
 import Docxtemplater from "docxtemplater";
 import PizZip from "pizzip";
 import { execFileSync } from "child_process";
@@ -228,6 +229,7 @@ export interface EvidencePacketManualRedactionBox {
 
 export interface BuildEvidencePacketResult {
   pdfBytes: Uint8Array;
+  frontMatterDocxBytes?: Buffer;
   orderedDocuments: EvidencePacketDocumentInput[];
   tocEntries: EvidencePacketTocEntry[];
   warnings: string[];
@@ -357,6 +359,9 @@ export async function buildEvidencePacket(
   const regularFont = await pdf.embedFont(StandardFonts.TimesRoman);
   const boldFont = await pdf.embedFont(StandardFonts.TimesRomanBold);
 
+  // Track front matter HTML for DOCX export (populated by HTML-template path)
+  let frontMatterHtml: string | undefined;
+
   // Branch: HTML-template path vs pdf-lib path
   // CRITICAL: .docx files MUST use the native docxtemplater + LibreOffice path
   // to preserve pleading paper fidelity and absolute formatting.
@@ -414,18 +419,17 @@ export async function buildEvidencePacket(
       pdf.addPage(page);
     }
   } else if (options.template?.htmlTemplate) {
-    const htmlBuffer = await renderHtmlFrontMatter(
-      {
-        caption: options.caption,
-        template: options.template,
-        firmBlockLines: options.firmBlockLines,
-        service: options.service,
-        signerName: options.signerName,
-        extraSectionValues: options.extraSectionValues,
-        includeAffirmationPage: options.includeAffirmationPage,
-      },
-      tocEntries,
-    );
+    const htmlFmOptions = {
+      caption: options.caption,
+      template: options.template,
+      firmBlockLines: options.firmBlockLines,
+      service: options.service,
+      signerName: options.signerName,
+      extraSectionValues: options.extraSectionValues,
+      includeAffirmationPage: options.includeAffirmationPage,
+    };
+    frontMatterHtml = buildFrontMatterHtml(htmlFmOptions, tocEntries);
+    const htmlBuffer = await renderHtmlFrontMatter(htmlFmOptions, tocEntries);
     const frontMatterPdf = await PDFDocument.load(htmlBuffer);
     const fmPages = await pdf.copyPages(frontMatterPdf, frontMatterPdf.getPageIndices());
     for (const page of fmPages) {
@@ -458,9 +462,23 @@ export async function buildEvidencePacket(
     }
   }
 
+  // Generate front matter DOCX for editable Word export
+  let frontMatterDocxBytes: Buffer | undefined;
+  if (frontMatterHtml) {
+    try {
+      frontMatterDocxBytes = await htmlToDocx(frontMatterHtml, "Front Matter", {
+        documentType: "hearing_decision",
+      });
+    } catch (docxErr) {
+      console.error(`[EvidencePacket] Front matter DOCX generation failed:`, docxErr);
+      warnings.push("Front matter Word document could not be generated.");
+    }
+  }
+
   const pdfBytes = await pdf.save();
   return {
     pdfBytes,
+    frontMatterDocxBytes,
     orderedDocuments: orderedDocs,
     tocEntries,
     warnings,
@@ -509,7 +527,7 @@ export async function buildFrontMatterPreview(options: {
       // Fall through to pdf-lib fallback below
     }
   } else if (options.template?.sourceFile && options.template.sourceFile.toLowerCase().endsWith(".pdf")) {
-    return buildPdfFrontMatter(
+    const pdfBytes = await buildPdfFrontMatter(
       options.template,
       options.caption,
       options.service,
@@ -517,6 +535,7 @@ export async function buildFrontMatterPreview(options: {
       options.firmName,
       resolveDoc
     );
+    return pdfBytes;
   } else if (options.template?.htmlTemplate) {
     const htmlBuffer = await renderHtmlFrontMatter(
       {
@@ -1952,7 +1971,7 @@ async function buildDocxFrontMatter(
   extraSectionValues?: Record<string, string>,
   firmBlockLines?: string[],
   signerName?: string,
-): Promise<Uint8Array> {
+): Promise<{ pdfBytes: Uint8Array; docxBytes: Buffer }> {
   if (!template.sourceFile) throw new Error("Template missing sourceFile property");
   // sourceFile can be "templatized/filename.docx" or "source/filename.docx"
   // Resolve the path accordingly
@@ -2099,7 +2118,8 @@ async function buildDocxFrontMatter(
     console.log(`[DOCX] Pre-LibreOffice DOCX saved for inspection`);
   } catch { /* non-fatal */ }
 
-  return renderDocxWithLibreOffice(fulfilledBuffer);
+  const pdfBytes = await renderDocxWithLibreOffice(fulfilledBuffer);
+  return { pdfBytes, docxBytes: fulfilledBuffer };
 }
 
 /**

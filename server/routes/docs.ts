@@ -1650,12 +1650,20 @@ app.post("/generate-packet", async (c) => {
       firmName: firmNameValue,
     });
 
-    // Determine output path
+    // Determine output paths
     const dateStr = new Date().toISOString().slice(0, 10);
     const outputRelPath = `Evidence Packet - ${dateStr}.pdf`;
     const fullOutputPath = join(caseFolder, outputRelPath);
     await mkdir(dirname(fullOutputPath), { recursive: true });
     await writeFile(fullOutputPath, result.pdfBytes);
+
+    // Save front matter DOCX alongside the packet PDF
+    let frontMatterDocxPath: string | undefined;
+    if (result.frontMatterDocxBytes) {
+      const docxRelPath = `Front Matter - ${dateStr}.docx`;
+      await writeFile(join(caseFolder, docxRelPath), result.frontMatterDocxBytes);
+      frontMatterDocxPath = docxRelPath;
+    }
 
     // Auto-save state as a draft for future reference
     try {
@@ -1672,6 +1680,7 @@ app.post("/generate-packet", async (c) => {
     return c.json({
       success: true,
       outputPath: outputRelPath,
+      frontMatterDocxPath,
       totalPages: result.totalPages,
       warnings: result.warnings,
     });

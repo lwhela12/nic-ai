@@ -373,10 +373,10 @@ export interface RenderHtmlFrontMatterOptions {
   includeAffirmationPage?: boolean;
 }
 
-export async function renderHtmlFrontMatter(
+export function buildFrontMatterHtml(
   options: RenderHtmlFrontMatterOptions,
   tocEntries: Array<{ title: string; date?: string; startPage: number; endPage: number }>,
-): Promise<Buffer> {
+): string {
   const tpl = options.template;
 
   // Build value map from all available fields
@@ -487,12 +487,19 @@ export async function renderHtmlFrontMatter(
     htmlBody += affirmationHtml;
   }
 
-  const fullHtml = wrapWithPleadingCss(htmlBody, tpl.htmlTemplateCss, {
+  return wrapWithPleadingCss(htmlBody, tpl.htmlTemplateCss, {
     renderMode: tpl.renderMode ?? "pleading-legacy",
     suppressPleadingLineNumbers: tpl.renderMode === "template-native"
       ? (tpl.suppressPleadingLineNumbers ?? true)
       : false,
   });
+}
+
+export async function renderHtmlFrontMatter(
+  options: RenderHtmlFrontMatterOptions,
+  tocEntries: Array<{ title: string; date?: string; startPage: number; endPage: number }>,
+): Promise<Buffer> {
+  const fullHtml = buildFrontMatterHtml(options, tocEntries);
   return htmlToPdf(fullHtml, "front-matter", {
     documentType: "hearing_decision",
   });

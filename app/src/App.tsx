@@ -710,6 +710,7 @@ function App() {
       piiScanned: false,
       generatedAt: null,
       outputPath: null,
+      frontMatterDocxPath: null,
       draftId: null,
     })
     setPacketMode(true)
@@ -830,6 +831,7 @@ function App() {
       piiScanned: false,
       generatedAt: null,
       outputPath: null,
+      frontMatterDocxPath: null,
       draftId: null,
     })
     setPacketMode(true)
