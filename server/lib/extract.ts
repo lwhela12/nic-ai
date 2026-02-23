@@ -480,7 +480,7 @@ export async function extractTemplateSchemaAndInjectionMap(
       indexTitle: "DOCUMENT INDEX",
       counselPreamble: "COMES NOW, {{claimantName}}, by and through counsel, and submits the attached documentation for consideration in the above-cited matter.",
       affirmationTitle: "AFFIRMATION",
-      affirmationText: "Pursuant to NRS 239B, the undersigned affirms the attached documents do not expose the personal information of any person.",
+      affirmationText: "Pursuant to NRS 239B.030, the undersigned does hereby affirm the attached documents do not expose the personal information of any person",
       certTitle: "CERTIFICATE OF SERVICE",
       certIntro: "I certify that a true and correct copy of the foregoing Claimant Document Index was served on the following:",
       firmBlockPosition: "header",

@@ -96,7 +96,7 @@ export const BUILT_IN_TEMPLATES: PacketTemplate[] = [
       "COMES NOW, {{claimantName}}, by and through counsel, and submits the attached documentation for consideration in the above-cited matter.",
     affirmationTitle: "AFFIRMATION",
     affirmationText:
-      "Pursuant to NRS 239B, the undersigned affirms the attached documents do not expose the personal information of any person.",
+      "Pursuant to NRS 239B.030, the undersigned does hereby affirm the attached documents do not expose the personal information of any person",
     certTitle: "CERTIFICATE OF SERVICE",
     certIntro:
       "I certify that a true and correct copy of the foregoing Claimant Document Index was served on the following:",
@@ -1126,6 +1126,8 @@ interface ProcessedDocument {
   pageCount: number;
 }
 
+type SupportedPacketFileKind = "pdf" | "jpg" | "png";
+
 interface WordBox {
   text: string;
   xMin: number;
@@ -1171,8 +1173,9 @@ export async function buildEvidencePacket(
     const absolutePath = options.resolveDocPath
       ? options.resolveDocPath(doc.path)
       : resolveCasePath(options.caseFolder, doc.path);
-    if (!doc.path.toLowerCase().endsWith(".pdf")) {
-      throw new Error(`Only PDF documents are supported in packets: ${doc.path}`);
+    const fileKind = getSupportedPacketFileKind(doc.path);
+    if (!fileKind) {
+      throw new Error(`Only PDF, PNG, and JPG/JPEG documents are supported in packets: ${doc.path}`);
     }
 
     let originalBytes: Buffer;
@@ -1185,18 +1188,29 @@ export async function buildEvidencePacket(
       }
       throw err;
     }
-    let pdfBytes: Uint8Array = originalBytes;
-
-    if (options.redaction?.enabled) {
-      const redactResult = await redactPdfIfRequested(
-        absolutePath,
-        originalBytes,
-        doc.path,
-        options.redaction
-      );
-      pdfBytes = redactResult.pdfBytes;
-      redactionFindings.push(...redactResult.findings);
-      warnings.push(...redactResult.warnings);
+    let pdfBytes: Uint8Array;
+    if (fileKind === "pdf") {
+      pdfBytes = originalBytes;
+      if (options.redaction?.enabled) {
+        const redactResult = await redactPdfIfRequested(
+          absolutePath,
+          originalBytes,
+          doc.path,
+          options.redaction
+        );
+        pdfBytes = redactResult.pdfBytes;
+        redactionFindings.push(...redactResult.findings);
+        warnings.push(...redactResult.warnings);
+      }
+    } else {
+      pdfBytes = await convertImageToPdfBytes(originalBytes, fileKind, doc.path);
+      if (options.redaction?.enabled) {
+        const message = `Could not run automatic redaction on image file: ${doc.path}`;
+        if (options.redaction.failOnUnprocessable) {
+          throw new Error(message);
+        }
+        warnings.push(message);
+      }
     }
 
     const pageCount = await getPdfPageCount(pdfBytes, doc.path);
@@ -1612,6 +1626,34 @@ function compareDocs(
   }
 
   return result * multiplier;
+}
+
+function getSupportedPacketFileKind(pathValue: string): SupportedPacketFileKind | null {
+  const lower = pathValue.toLowerCase();
+  if (lower.endsWith(".pdf")) return "pdf";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "jpg";
+  if (lower.endsWith(".png")) return "png";
+  return null;
+}
+
+async function convertImageToPdfBytes(
+  imageBytes: Uint8Array,
+  imageKind: Exclude<SupportedPacketFileKind, "pdf">,
+  pathLabel: string
+): Promise<Uint8Array> {
+  try {
+    const pdf = await PDFDocument.create();
+    const embeddedImage = imageKind === "png"
+      ? await pdf.embedPng(imageBytes)
+      : await pdf.embedJpg(imageBytes);
+    const width = Math.max(1, embeddedImage.width);
+    const height = Math.max(1, embeddedImage.height);
+    const page = pdf.addPage([width, height]);
+    page.drawImage(embeddedImage, { x: 0, y: 0, width, height });
+    return pdf.save();
+  } catch (error) {
+    throw new Error(`Failed to convert image to PDF for ${pathLabel}: ${formatError(error)}`);
+  }
 }
 
 async function getPdfPageCount(pdfBytes: Uint8Array, pathLabel: string): Promise<number> {
@@ -2391,7 +2433,7 @@ function addAffirmationPage(
 
   const serviceDate = options.service?.serviceDate || new Date().toLocaleDateString("en-US");
   const affirmationTextRaw = tpl?.affirmationText ??
-    "Pursuant to NRS 239B, the undersigned affirms the attached documents do not expose the personal information of any person.";
+    "Pursuant to NRS 239B.030, the undersigned does hereby affirm the attached documents do not expose the personal information of any person";
   const affirmationText = interpolateTemplateText(affirmationTextRaw, options.caption);
   let y = drawWrappedText(page, affirmationText, 84, 702, 470, regularFont, 11, 14);
   y -= 20;

@@ -458,7 +458,7 @@ export function buildFrontMatterHtml(
   // Build affirmation HTML
   const affirmationHtml = buildAffirmationHtml({
     affirmationTitle: tpl.affirmationTitle || "AFFIRMATION",
-    affirmationText: tpl.affirmationText || "Pursuant to NRS 239B, the undersigned affirms the attached documents do not expose the personal information of any person.",
+    affirmationText: tpl.affirmationText || "Pursuant to NRS 239B.030, the undersigned does hereby affirm the attached documents do not expose the personal information of any person",
     certTitle: tpl.certTitle || "CERTIFICATE OF SERVICE",
     certIntro: tpl.certIntro || "I certify that a true and correct copy of the foregoing Claimant Document Index was served on the following:",
     serviceDate,
