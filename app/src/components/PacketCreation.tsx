@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import type { PacketDocument, PacketFrontMatter, PacketPiiResult, PacketState } from '../types/packet'
 
 interface Props {
@@ -89,11 +89,16 @@ export default function PacketCreation({
   const [isSaving, setIsSaving] = useState(false)
   const [isScanning, setIsScanning] = useState(false)
   const [isPreviewing, setIsPreviewing] = useState(false)
+  const [isRefreshingPreview, setIsRefreshingPreview] = useState(false)
+  const [isOpeningWord, setIsOpeningWord] = useState(false)
+  const [isWatchingWordEdits, setIsWatchingWordEdits] = useState(false)
   const [generateError, setGenerateError] = useState<string | null>(null)
+  const [frontMatterError, setFrontMatterError] = useState<string | null>(null)
 
   // Drag state
   const dragIndexRef = useRef<number | null>(null)
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
+  const previewRefreshTimeoutRef = useRef<number | null>(null)
 
   const { documents, frontMatter, piiResults = [], piiScanned } = packetState
 
@@ -246,7 +251,48 @@ export default function PacketCreation({
     })
   }
 
+  const clearPendingPreviewRefresh = () => {
+    if (previewRefreshTimeoutRef.current !== null) {
+      window.clearTimeout(previewRefreshTimeoutRef.current)
+      previewRefreshTimeoutRef.current = null
+    }
+  }
+
+  const refreshPreviewFromDocx = useCallback(async (docxPath: string) => {
+    setIsRefreshingPreview(true)
+    try {
+      const res = await fetch(`${apiUrl}/api/docs/preview-front-matter-from-docx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseFolder,
+          docxPath,
+        }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: 'Preview refresh failed' }))
+        throw new Error(data.error || 'Preview refresh failed')
+      }
+      const data = await res.json()
+      const refreshedDocxPath = typeof data.docxPath === 'string' ? data.docxPath : docxPath
+      const refreshedDocxMtime = typeof data.docxMtimeMs === 'number' ? data.docxMtimeMs : null
+      onUpdateState(prev => ({
+        ...prev,
+        frontMatterWorkingDocxPath: refreshedDocxPath,
+        frontMatterWorkingDocxMtime: refreshedDocxMtime,
+      }))
+      onPreviewReady(`${apiUrl}${data.url}${data.url.includes('?') ? '&' : '?'}t=${Date.now()}`)
+      setFrontMatterError(null)
+    } catch (err) {
+      setFrontMatterError(err instanceof Error ? err.message : 'Preview refresh failed')
+    } finally {
+      setIsRefreshingPreview(false)
+    }
+  }, [apiUrl, caseFolder, onPreviewReady, onUpdateState])
+
   const handlePreviewFrontMatter = async () => {
+    setFrontMatterError(null)
+    setIsWatchingWordEdits(false)
     setIsPreviewing(true)
     try {
       const res = await fetch(`${apiUrl}/api/docs/preview-front-matter`, {
@@ -262,11 +308,116 @@ export default function PacketCreation({
       })
       if (res.ok) {
         const data = await res.json()
+        const workingDocxPath = typeof data.docxPath === 'string' ? data.docxPath : null
+        const workingDocxMtime = typeof data.docxMtimeMs === 'number' ? data.docxMtimeMs : null
+        onUpdateState(prev => ({
+          ...prev,
+          frontMatterWorkingDocxPath: workingDocxPath,
+          frontMatterWorkingDocxMtime: workingDocxMtime,
+        }))
         onPreviewReady(`${apiUrl}${data.url}${data.url.includes('?') ? '&' : '?'}t=${Date.now()}`)
+      } else {
+        const data = await res.json().catch(() => ({ error: 'Preview failed' }))
+        setFrontMatterError(data.error || 'Preview failed')
       }
-    } catch { /* ignore */ }
+    } catch (err) {
+      setFrontMatterError(err instanceof Error ? err.message : 'Preview failed')
+    }
     setIsPreviewing(false)
   }
+
+  const handleEditInWord = async () => {
+    const docxPath = packetState.frontMatterWorkingDocxPath
+    if (!docxPath) return
+    setFrontMatterError(null)
+    setIsOpeningWord(true)
+    try {
+      const res = await fetch(`${apiUrl}/api/docs/open-local-file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseFolder,
+          path: docxPath,
+        }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: 'Could not open Word' }))
+        throw new Error(data.error || 'Could not open Word')
+      }
+      setIsWatchingWordEdits(true)
+    } catch (err) {
+      setFrontMatterError(err instanceof Error ? err.message : 'Could not open Word')
+    } finally {
+      setIsOpeningWord(false)
+    }
+  }
+
+  useEffect(() => {
+    return () => clearPendingPreviewRefresh()
+  }, [])
+
+  useEffect(() => {
+    if (activeTab !== 'frontmatter') {
+      setIsWatchingWordEdits(false)
+      clearPendingPreviewRefresh()
+    }
+  }, [activeTab])
+
+  useEffect(() => {
+    if (!isWatchingWordEdits || activeTab !== 'frontmatter') return
+    const docxPath = packetState.frontMatterWorkingDocxPath
+    if (!docxPath) return
+
+    let disposed = false
+    const pollMtime = async () => {
+      if (disposed || isPreviewing || isRefreshingPreview) return
+      try {
+        const res = await fetch(`${apiUrl}/api/docs/file-mtime?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(docxPath)}`)
+        if (!res.ok) return
+        const data = await res.json()
+        if (!data.exists || typeof data.mtimeMs !== 'number') return
+
+        const knownMtime = packetState.frontMatterWorkingDocxMtime
+        if (typeof knownMtime === 'number' && data.mtimeMs <= knownMtime) {
+          return
+        }
+
+        onUpdateState(prev => ({
+          ...prev,
+          frontMatterWorkingDocxMtime: data.mtimeMs,
+        }))
+
+        clearPendingPreviewRefresh()
+        previewRefreshTimeoutRef.current = window.setTimeout(() => {
+          previewRefreshTimeoutRef.current = null
+          void refreshPreviewFromDocx(docxPath)
+        }, 700)
+      } catch {
+        // Keep polling; transient errors are expected during save operations.
+      }
+    }
+
+    void pollMtime()
+    const intervalId = window.setInterval(() => {
+      void pollMtime()
+    }, 2000)
+
+    return () => {
+      disposed = true
+      window.clearInterval(intervalId)
+    }
+  }, [
+    activeTab,
+    apiUrl,
+    caseFolder,
+    isPreviewing,
+    isRefreshingPreview,
+    isWatchingWordEdits,
+    onUpdateState,
+    packetState.frontMatterWorkingDocxMtime,
+    packetState.frontMatterWorkingDocxPath,
+    refreshPreviewFromDocx,
+  ])
 
   // --- PII Scan ---
   const handleRunPiiScan = async () => {
@@ -461,7 +612,13 @@ export default function PacketCreation({
             onRemoveRecipient={removeRecipient}
             onUpdateFirmBlockLine={updateFirmBlockLine}
             onPreview={handlePreviewFrontMatter}
+            onEditInWord={handleEditInWord}
             isPreviewing={isPreviewing}
+            isOpeningWord={isOpeningWord}
+            isWatchingWordEdits={isWatchingWordEdits}
+            isRefreshingPreview={isRefreshingPreview}
+            canEditInWord={Boolean(packetState.frontMatterWorkingDocxPath)}
+            frontMatterError={frontMatterError}
             apiUrl={apiUrl}
             firmRoot={firmRoot}
             caseFolder={caseFolder}
@@ -747,7 +904,13 @@ function FrontMatterTab({
   onRemoveRecipient,
   onUpdateFirmBlockLine,
   onPreview,
+  onEditInWord,
   isPreviewing,
+  isOpeningWord,
+  isWatchingWordEdits,
+  isRefreshingPreview,
+  canEditInWord,
+  frontMatterError,
   apiUrl,
   firmRoot,
   caseFolder,
@@ -759,7 +922,13 @@ function FrontMatterTab({
   onRemoveRecipient: (index: number) => void
   onUpdateFirmBlockLine: (index: number, value: string) => void
   onPreview: () => void
+  onEditInWord: () => void
   isPreviewing: boolean
+  isOpeningWord: boolean
+  isWatchingWordEdits: boolean
+  isRefreshingPreview: boolean
+  canEditInWord: boolean
+  frontMatterError: string | null
   apiUrl: string
   firmRoot?: string
   caseFolder: string
@@ -1013,7 +1182,26 @@ function FrontMatterTab({
         >
           {isPreviewing ? 'Generating Preview...' : 'Preview Front Matter'}
         </button>
+        {canEditInWord && (
+          <button
+            onClick={onEditInWord}
+            disabled={isOpeningWord}
+            className="px-4 py-2 text-sm font-medium bg-accent-600 text-white rounded-lg
+                       hover:bg-accent-700 transition-colors disabled:opacity-50"
+          >
+            {isOpeningWord ? 'Opening Word...' : 'Edit in Word'}
+          </button>
+        )}
+        {isRefreshingPreview && (
+          <span className="text-xs text-brand-500">Refreshing preview...</span>
+        )}
+        {isWatchingWordEdits && !isRefreshingPreview && (
+          <span className="text-xs text-emerald-600">Watching for Word saves...</span>
+        )}
       </div>
+      {frontMatterError && (
+        <p className="text-xs text-red-600">{frontMatterError}</p>
+      )}
     </div>
   )
 }

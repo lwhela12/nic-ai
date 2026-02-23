@@ -509,7 +509,14 @@ function App() {
   const [packetState, setPacketState] = useState<PacketState | null>(() => {
     try {
       const raw = sessionStorage.getItem('pi-packet-state')
-      return raw ? JSON.parse(raw) as PacketState : null
+      const parsed = raw ? JSON.parse(raw) as PacketState : null
+      if (!parsed) return null
+      return {
+        ...parsed,
+        frontMatterDocxPath: typeof parsed.frontMatterDocxPath === 'string' ? parsed.frontMatterDocxPath : null,
+        frontMatterWorkingDocxPath: typeof parsed.frontMatterWorkingDocxPath === 'string' ? parsed.frontMatterWorkingDocxPath : null,
+        frontMatterWorkingDocxMtime: typeof parsed.frontMatterWorkingDocxMtime === 'number' ? parsed.frontMatterWorkingDocxMtime : null,
+      }
     } catch { return null }
   })
 
@@ -711,6 +718,8 @@ function App() {
       generatedAt: null,
       outputPath: null,
       frontMatterDocxPath: null,
+      frontMatterWorkingDocxPath: null,
+      frontMatterWorkingDocxMtime: null,
       draftId: null,
     })
     setPacketMode(true)
@@ -832,6 +841,8 @@ function App() {
       generatedAt: null,
       outputPath: null,
       frontMatterDocxPath: null,
+      frontMatterWorkingDocxPath: null,
+      frontMatterWorkingDocxMtime: null,
       draftId: null,
     })
     setPacketMode(true)
@@ -860,7 +871,14 @@ function App() {
           })
           .filter((doc): doc is PacketDocument => Boolean(doc))
 
-        setPacketState({ ...draft, documents: canonicalDocs, draftId })
+        setPacketState({
+          ...draft,
+          documents: canonicalDocs,
+          draftId,
+          frontMatterDocxPath: typeof draft.frontMatterDocxPath === 'string' ? draft.frontMatterDocxPath : null,
+          frontMatterWorkingDocxPath: typeof draft.frontMatterWorkingDocxPath === 'string' ? draft.frontMatterWorkingDocxPath : null,
+          frontMatterWorkingDocxMtime: typeof draft.frontMatterWorkingDocxMtime === 'number' ? draft.frontMatterWorkingDocxMtime : null,
+        })
         setPacketMode(true)
       }
     } catch { /* ignore */ }

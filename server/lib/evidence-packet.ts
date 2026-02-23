@@ -1,14 +1,31 @@
-import { readFile } from "fs/promises";
+import { readFile, writeFile, mkdtemp, rm, mkdir, stat } from "fs/promises";
 import { resolve, sep, join } from "path";
 import { PDFDocument, PDFFont, PDFPage, StandardFonts, degrees, rgb } from "pdf-lib";
 import { runPdftotext } from "./pdftotext";
 import { renderHtmlFrontMatter, buildFrontMatterHtml } from "./evidence-packet-html";
 import { htmlToDocx } from "./export";
+import { injectVariablesIntoDocx } from "./extract";
+import {
+  Document as WordDocument,
+  Packer as WordPacker,
+  Paragraph as WordParagraph,
+  TextRun as WordTextRun,
+  Table as WordTable,
+  TableRow as WordTableRow,
+  TableCell as WordTableCell,
+  WidthType as WordWidthType,
+  AlignmentType as WordAlignmentType,
+  BorderStyle as WordBorderStyle,
+  UnderlineType as WordUnderlineType,
+  LineNumberRestartFormat as WordLineNumberRestartFormat,
+  PageBorderDisplay as WordPageBorderDisplay,
+  PageBorderOffsetFrom as WordPageBorderOffsetFrom,
+} from "docx";
 import Docxtemplater from "docxtemplater";
 import PizZip from "pizzip";
 import { execFileSync } from "child_process";
-import { writeFile, mkdtemp, rm } from "fs/promises";
 import * as os from "os";
+import { fileURLToPath } from "url";
 
 type SortBy = "none" | "date" | "title" | "path";
 type SortDirection = "asc" | "desc";
@@ -125,6 +142,596 @@ export const BUILT_IN_TEMPLATES: PacketTemplate[] = [
   },
 ];
 
+type BuiltInPacketTemplateId = "ho-standard" | "ao-standard";
+
+const BUILT_IN_DOCX_FILENAMES: Record<BuiltInPacketTemplateId, string> = {
+  "ho-standard": "__builtin-ho-standard.docx",
+  "ao-standard": "__builtin-ao-standard.docx",
+};
+
+const BUILT_IN_DOCX_TEMPLATE_VERSION = 7;
+const BUILT_IN_DOCX_VERSION_FILE = "__builtin-docx-versions.json";
+const DOC_INDEX_RIGHT_TAB_POS = 9360;
+const DOC_INDEX_LEFT_MAX_CHARS = 76;
+const HO_SEED_DOCX_PATH = fileURLToPath(
+  new URL("../assets/builtin-templates/ho-standard-seed.docx", import.meta.url)
+);
+const AO_SEED_DOCX_PATH = fileURLToPath(
+  new URL("../assets/builtin-templates/ao-standard-seed.docx", import.meta.url)
+);
+
+const HO_SEED_DOCX_REPLACEMENTS: Record<string, string> = {
+  "STATE OF NEVADA DEPARTMENT OF ADMINISTRATION": "{{omit}}",
+  "BEFORE THE APPEALS OFFICER": "{{heading}}",
+  "Industrial Insurance Claim of:": "{{hoCaptionPreamble2}}",
+  "VALerie owens,": "{{claimantName}},",
+  "Appeal No. : 2691432-GK": "{{hoCaptionLine1}}",
+  "Claim No.   : 003071-029380-WC-01": "{{hoCaptionLine2}}",
+  "Hearing No.: 2687918-TH": "{{hoCaptionLine3}}",
+  "Employer    : Mechanics Bank": "{{hoCaptionLine4}}",
+  "CLAIMANT’S HEARING STATEMENT AND DOCUMENTARY EVIDENCE": "{{indexTitle}}",
+  "COMES NOW, Claimant, VALERIE OWENS, (hereinafter referred to as “Claimant”), by and through her attorneys, JASON H. WEINSTOCK, ESQ., and NICOLE C. FARRELL, ESQ., of LAW OFFICE OF JASON H. WEINSTOCK, PLLC., and submit the attached Hearing Statement and Index of Documents relating to the above-referenced matter.": "{{counselPreamble}}",
+  "ISSUE": "{{omit}}",
+  "This is Claimant’s appeal of the 1/23/26 Hearing Officer’s Decision and Order remanding the TPA’s 12/15/2025 denial to offer the PPD award.": "{{omit}}",
+  "WITNESSES": "{{omit}}",
+  "The Claimant may testify regarding the events of this industrial insurance claim.": "{{omit}}",
+  "DURATION": "{{omit}}",
+  "It is estimated that this case will take approximately 30 minutes to present.": "{{omit}}",
+  "///": "{{omit}}",
+  "AFFIRMATION PURSUANT TO NRS 239B.030": "{{affirmationTitle}}",
+  "The undersigned does hereby affirm that the attached Claimant’s Documentary Evidence filed in Appeal No.: 2691432-GK": "{{affirmationText}}",
+  "Dated this ____  day of February, 2026.": "{{datedLine}}",
+  "×  Does not contain the social security number of any person.": "{{omit}}",
+  "Respectfully submitted,": "{{omit}}",
+  "LAW OFFICES OF JASON H. WEINSTOCK, PLLC.": "{{firmName}}",
+  "By:": "{{omit}}",
+  "JASON H. WEINSTOCK, ESQ.": "{{signerName}}",
+  "Nevada Bar No.: 15114": "{{omit}}",
+  "NICOLE C. FARRELL": "{{omit}}",
+  "Nevada Bar No.: 16532": "{{omit}}",
+  "2470 St. Rose Pkwy., Suite 214": "{{omit}}",
+  "Henderson, Nevada 89074": "{{omit}}",
+  "Attorney for Claimant": "{{omit}}",
+  "On this ______ day February, 2026, the undersigned, an employee of the Law Office of Jason H. Weinstock, PLLC., does hereby certify that on the date shown below, a true and correct copy of the foregoing CLAIMANT’S HEARING STATEMENT AND DOCUMENTARY EVIDENCE was duly mailed, postage prepaid OR placed in the appropriate addressee runner file maintained by the State of Nevada Department of Administration, Appeals Division, 2200 S. Rancho Dr., Ste. 220, Las Vegas, NV 89102, to the following:": "{{certIntro}}",
+  "Valerie Owens": "{{serviceRecipientsText}}",
+  "6118 Wheat Penny Ave.": "{{omit}}",
+  "Las Vegas, NV 89122": "{{omit}}",
+  "Mechanics Bank": "{{omit}}",
+  "915 Highland Pointe Dr.": "{{omit}}",
+  "Walnut Creek, CA 95678": "{{omit}}",
+  "Gallagher Bassett": "{{omit}}",
+  "PO Box 2934": "{{omit}}",
+  "Clinton, IA 52733-2934": "{{omit}}",
+  "Daniel L. Schwartz, Esq.": "{{omit}}",
+  "Hooks Meng and Clement": "{{omit}}",
+  "2300 W. Sahara Ave., Ste. 1100": "{{omit}}",
+  "Las Vegas, NV 89102": "{{omit}}",
+  "An Employee of Law Office of Jason H. Weinstock, PLLC.": "{{servedBy}}",
+};
+
+const AO_SEED_DOCX_REPLACEMENTS: Record<string, string> = {
+  "VALerie owens,": "{{claimantName}},",
+  "VALERIE OWENS": "{{claimantName}}",
+  "2691432-GK": "{{hearingNumber}}",
+  "003071-029380-WC-01": "{{claimNumber}}",
+  "2687918-TH": "{{hearingNo}}",
+  "Mechanics Bank": "{{employer}}",
+  "COMES NOW, Claimant, VALERIE OWENS, (hereinafter referred to as “Claimant”), by and through her attorneys, JASON H. WEINSTOCK, ESQ., and NICOLE C. FARRELL, ESQ., of LAW OFFICE OF JASON H. WEINSTOCK, PLLC., and submit the attached Hearing Statement and Index of Documents relating to the above-referenced matter.": "{{counselPreamble}}",
+  "This is Claimant’s appeal of the 1/23/26 Hearing Officer’s Decision and Order remanding the TPA’s 12/15/2025 denial to offer the PPD award.": "{{issueOnAppeal}}",
+  "The Claimant may testify regarding the events of this industrial insurance claim.": "{{witnesses}}",
+  "It is estimated that this case will take approximately 30 minutes to present.": "{{duration}}",
+  "The undersigned does hereby affirm that the attached Claimant’s Documentary Evidence filed in Appeal No.\t: 2691432-GK": "{{affirmationText}}",
+  "Dated this ____  day of February, 2026.": "{{datedLine}}",
+  "LAW OFFICES OF JASON H. WEINSTOCK, PLLC.": "{{firmName}}",
+  "JASON H. WEINSTOCK, ESQ.": "{{signerName}}",
+  "Nevada Bar No.: 15114": "{{omit}}",
+  "NICOLE C. FARRELL": "{{omit}}",
+  "Nevada Bar No.: 16532": "{{omit}}",
+  "2470 St. Rose Pkwy., Suite 214": "{{omit}}",
+  "Henderson, Nevada 89074": "{{omit}}",
+  "On this ______ day February, 2026, the undersigned, an employee of the Law Office of Jason H. Weinstock, PLLC., does hereby certify that on the date shown below, a true and correct copy of the foregoing CLAIMANT’S HEARING STATEMENT AND DOCUMENTARY EVIDENCE was duly mailed, postage prepaid OR placed in the appropriate addressee runner file maintained by the State of Nevada Department of Administration, Appeals Division, 2200 S. Rancho Dr., Ste. 220, Las Vegas, NV 89102, to the following:": "{{certIntro}}",
+  "Valerie Owens": "{{serviceRecipientsText}}",
+  "6118 Wheat Penny Ave.": "{{omit}}",
+  "Las Vegas, NV 89122": "{{omit}}",
+  "915 Highland Pointe Dr.": "{{omit}}",
+  "Walnut Creek, CA 95678": "{{omit}}",
+  "Gallagher Bassett": "{{omit}}",
+  "PO Box 2934": "{{omit}}",
+  "Clinton, IA 52733-2934": "{{omit}}",
+  "Daniel L. Schwartz, Esq.": "{{omit}}",
+  "Hooks Meng and Clement": "{{omit}}",
+  "2300 W. Sahara Ave., Ste. 1100": "{{omit}}",
+  "Las Vegas, NV 89102": "{{omit}}",
+  "An Employee of Law Office of Jason H. Weinstock, PLLC.": "{{servedBy}}",
+};
+
+function moveHoDocumentIndexAfterCounselPreamble(docxBytes: Buffer): Buffer {
+  try {
+    const zip = new PizZip(docxBytes);
+    const docNode = zip.file("word/document.xml");
+    if (!docNode) return docxBytes;
+    let xml = docNode.asText();
+    const paraRegex = /<w:p[\s>][\s\S]*?<\/w:p>/g;
+    const paragraphs: Array<{ start: number; end: number; xml: string; text: string }> = [];
+    let match: RegExpExecArray | null;
+    while ((match = paraRegex.exec(xml)) !== null) {
+      const text = [...match[0].matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)]
+        .map((m) => m[1])
+        .join("");
+      paragraphs.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        xml: match[0],
+        text,
+      });
+    }
+
+    const indexParagraph = paragraphs.find((p) => p.text.includes("{{documentIndexText}}"));
+    if (!indexParagraph) return docxBytes;
+    const insertionTarget =
+      paragraphs.find((p) => p.text.includes("{{counselPreamble}}"))
+      ?? paragraphs.find((p) => p.text.includes("{{indexTitle}}"));
+    if (!insertionTarget) return docxBytes;
+
+    const removedLength = indexParagraph.end - indexParagraph.start;
+    let insertAt = insertionTarget.end;
+    if (insertAt > indexParagraph.start) {
+      insertAt -= removedLength;
+    }
+
+    xml = xml.slice(0, indexParagraph.start) + xml.slice(indexParagraph.end);
+    xml = xml.slice(0, insertAt) + indexParagraph.xml + xml.slice(insertAt);
+    zip.file("word/document.xml", xml);
+    return zip.generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+  } catch {
+    return docxBytes;
+  }
+}
+
+function enforceDocumentIndexRightTabLeader(docxBytes: Buffer): Buffer {
+  try {
+    const zip = new PizZip(docxBytes);
+    const docNode = zip.file("word/document.xml");
+    if (!docNode) return docxBytes;
+    let xml = docNode.asText();
+    const paraRegex = /<w:p[\s>][\s\S]*?<\/w:p>/g;
+    let match: RegExpExecArray | null;
+    while ((match = paraRegex.exec(xml)) !== null) {
+      const paragraphXml = match[0];
+      const paragraphText = [...paragraphXml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)]
+        .map((m) => m[1])
+        .join("");
+      if (!paragraphText.includes("{{documentIndexText}}")) continue;
+
+      const tabSpec = `<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="${DOC_INDEX_RIGHT_TAB_POS}"/></w:tabs>`;
+      let updatedParagraph = paragraphXml;
+      if (updatedParagraph.includes("<w:pPr>")) {
+        updatedParagraph = updatedParagraph.replace(/<w:pPr>([\s\S]*?)<\/w:pPr>/, (_full, inner) => {
+          const withoutTabs = String(inner).replace(/<w:tabs>[\s\S]*?<\/w:tabs>/g, "");
+          return `<w:pPr>${tabSpec}${withoutTabs}</w:pPr>`;
+        });
+      } else {
+        updatedParagraph = updatedParagraph.replace(/^<w:p([^>]*)>/, `<w:p$1><w:pPr>${tabSpec}</w:pPr>`);
+      }
+
+      xml = xml.slice(0, match.index) + updatedParagraph + xml.slice(match.index + paragraphXml.length);
+      zip.file("word/document.xml", xml);
+      return zip.generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+    }
+
+    return docxBytes;
+  } catch {
+    return docxBytes;
+  }
+}
+
+function truncateDocIndexLabel(text: string, maxChars = DOC_INDEX_LEFT_MAX_CHARS): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) return normalized;
+  const slice = normalized.slice(0, Math.max(0, maxChars - 3));
+  const breakAt = slice.lastIndexOf(" ");
+  const safe = (breakAt > Math.floor(maxChars * 0.6) ? slice.slice(0, breakAt) : slice)
+    .replace(/[\s.,;:!-]+$/g, "");
+  return `${safe}...`;
+}
+
+async function buildHoDocxTemplateFromSeed(): Promise<Buffer> {
+  const templated = await injectVariablesIntoDocx(
+    HO_SEED_DOCX_PATH,
+    HO_SEED_DOCX_REPLACEMENTS
+  );
+  let output = moveHoDocumentIndexAfterCounselPreamble(Buffer.from(templated));
+  output = enforceDocumentIndexRightTabLeader(output);
+  return output;
+}
+
+async function buildAoDocxTemplateFromSeed(): Promise<Buffer> {
+  const templated = await injectVariablesIntoDocx(
+    AO_SEED_DOCX_PATH,
+    AO_SEED_DOCX_REPLACEMENTS
+  );
+  return enforceDocumentIndexRightTabLeader(Buffer.from(templated));
+}
+
+interface BuiltInWordParagraphOptions {
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  alignment?: (typeof WordAlignmentType)[keyof typeof WordAlignmentType];
+  spacingAfter?: number;
+  spacingBefore?: number;
+  pageBreakBefore?: boolean;
+}
+
+function builtInWordRun(
+  text: string,
+  options: Partial<Record<string, unknown>> = {}
+): WordTextRun {
+  return new WordTextRun({
+    text,
+    font: "Times New Roman",
+    size: 24, // 12pt (half-point units)
+    ...(options as Record<string, unknown>),
+  });
+}
+
+function builtInWordParagraph(
+  text: string,
+  options: BuiltInWordParagraphOptions = {}
+): WordParagraph {
+  const runs: WordTextRun[] = [];
+  if (text.length > 0) {
+    runs.push(
+      builtInWordRun(text, {
+        bold: options.bold,
+        italics: options.italic,
+        underline: options.underline ? { type: WordUnderlineType.SINGLE } : undefined,
+      })
+    );
+  } else {
+    runs.push(builtInWordRun(""));
+  }
+
+  return new WordParagraph({
+    children: runs,
+    alignment: options.alignment,
+    pageBreakBefore: options.pageBreakBefore,
+    spacing: {
+      before: options.spacingBefore ?? 0,
+      after: options.spacingAfter ?? 120,
+    },
+  });
+}
+
+function builtInWordHeading(text: string): WordParagraph {
+  return builtInWordParagraph(text, {
+    bold: true,
+    underline: true,
+    alignment: WordAlignmentType.CENTER,
+    spacingAfter: 180,
+  });
+}
+
+function builtInWordCaptionTable(template: PacketTemplate): WordTable {
+  const leftCellParagraphs: WordParagraph[] = (template.captionPreambleLines || []).map((line) =>
+    builtInWordParagraph(line, { spacingAfter: 80 })
+  );
+  leftCellParagraphs.push(builtInWordParagraph("", { spacingAfter: 60 }));
+  leftCellParagraphs.push(builtInWordParagraph("{{claimantName}},", { spacingAfter: 80 }));
+  leftCellParagraphs.push(builtInWordParagraph("Claimant.", { spacingAfter: 0 }));
+
+  const rightCellParagraphs: WordParagraph[] = (template.captionFields || []).map((field) =>
+    new WordParagraph({
+      children: [
+        builtInWordRun(field.label, { bold: true }),
+        builtInWordRun(` {{${field.key}}}`),
+      ],
+      spacing: { after: 80 },
+    })
+  );
+
+  const border = { style: WordBorderStyle.NONE, size: 0, color: "FFFFFF" };
+  return new WordTable({
+    width: { size: 100, type: WordWidthType.PERCENTAGE },
+    borders: {
+      top: border,
+      bottom: border,
+      left: border,
+      right: border,
+      insideHorizontal: border,
+      insideVertical: border,
+    },
+    rows: [
+      new WordTableRow({
+        children: [
+          new WordTableCell({
+            width: { size: 62, type: WordWidthType.PERCENTAGE },
+            children: leftCellParagraphs,
+          }),
+          new WordTableCell({
+            width: { size: 38, type: WordWidthType.PERCENTAGE },
+            children: rightCellParagraphs,
+          }),
+        ],
+      }),
+    ],
+  });
+}
+
+function builtInWordHoIndexTable(): WordTable {
+  const border = { style: WordBorderStyle.NONE, size: 0, color: "FFFFFF" };
+  return new WordTable({
+    width: { size: 100, type: WordWidthType.PERCENTAGE },
+    borders: {
+      top: border,
+      bottom: border,
+      left: border,
+      right: border,
+      insideHorizontal: border,
+      insideVertical: border,
+    },
+    rows: [
+      new WordTableRow({
+        children: [
+          new WordTableCell({
+            width: { size: 78, type: WordWidthType.PERCENTAGE },
+            children: [builtInWordParagraph("Document", { bold: true })],
+          }),
+          new WordTableCell({
+            width: { size: 22, type: WordWidthType.PERCENTAGE },
+            children: [builtInWordParagraph("Page(s)", { bold: true, alignment: WordAlignmentType.RIGHT })],
+          }),
+        ],
+      }),
+      new WordTableRow({
+        children: [
+          new WordTableCell({
+            width: { size: 78, type: WordWidthType.PERCENTAGE },
+            children: [builtInWordParagraph("{{#tocEntries}}{{number}}. {{title}}{{dateLine}}", { spacingAfter: 60 })],
+          }),
+          new WordTableCell({
+            width: { size: 22, type: WordWidthType.PERCENTAGE },
+            children: [builtInWordParagraph("Pg. {{pageRange}}{{/tocEntries}}", { alignment: WordAlignmentType.RIGHT, spacingAfter: 60 })],
+          }),
+        ],
+      }),
+    ],
+  });
+}
+
+function builtInWordAoIndexTable(): WordTable {
+  const border = { style: WordBorderStyle.NONE, size: 0, color: "FFFFFF" };
+  return new WordTable({
+    width: { size: 100, type: WordWidthType.PERCENTAGE },
+    borders: {
+      top: border,
+      bottom: border,
+      left: border,
+      right: border,
+      insideHorizontal: border,
+      insideVertical: border,
+    },
+    rows: [
+      new WordTableRow({
+        children: [
+          new WordTableCell({
+            width: { size: 20, type: WordWidthType.PERCENTAGE },
+            children: [builtInWordParagraph("DATE", { bold: true })],
+          }),
+          new WordTableCell({
+            width: { size: 62, type: WordWidthType.PERCENTAGE },
+            children: [builtInWordParagraph("DOCUMENTS", { bold: true })],
+          }),
+          new WordTableCell({
+            width: { size: 18, type: WordWidthType.PERCENTAGE },
+            children: [builtInWordParagraph("PAGE NO(S)", { bold: true, alignment: WordAlignmentType.RIGHT })],
+          }),
+        ],
+      }),
+      new WordTableRow({
+        children: [
+          new WordTableCell({
+            width: { size: 20, type: WordWidthType.PERCENTAGE },
+            children: [builtInWordParagraph("{{#tocEntries}}{{date}}", { spacingAfter: 60 })],
+          }),
+          new WordTableCell({
+            width: { size: 62, type: WordWidthType.PERCENTAGE },
+            children: [builtInWordParagraph("{{title}}", { spacingAfter: 60 })],
+          }),
+          new WordTableCell({
+            width: { size: 18, type: WordWidthType.PERCENTAGE },
+            children: [builtInWordParagraph("{{pageRange}}{{/tocEntries}}", { alignment: WordAlignmentType.RIGHT, spacingAfter: 60 })],
+          }),
+        ],
+      }),
+    ],
+  });
+}
+
+function buildBuiltInHoDocxChildren(template: PacketTemplate): Array<WordParagraph | WordTable> {
+  const children: Array<WordParagraph | WordTable> = [];
+  children.push(builtInWordParagraph("{{firmBlockText}}", { spacingAfter: 180 }));
+  children.push(builtInWordHeading(template.heading));
+  children.push(builtInWordCaptionTable(template));
+  children.push(builtInWordParagraph("", { spacingAfter: 140 }));
+  children.push(builtInWordHeading(template.indexTitle || "DOCUMENT INDEX"));
+  children.push(builtInWordParagraph("{{counselPreamble}}", { spacingAfter: 180 }));
+  children.push(builtInWordHoIndexTable());
+  children.push(builtInWordParagraph("", { pageBreakBefore: true, spacingAfter: 0 }));
+  children.push(builtInWordHeading(template.affirmationTitle || "AFFIRMATION"));
+  children.push(builtInWordParagraph("{{affirmationText}}", { spacingAfter: 180 }));
+  children.push(builtInWordParagraph("Dated: {{serviceDate}}", { spacingAfter: 180 }));
+  children.push(builtInWordParagraph("Respectfully submitted,", { spacingAfter: 80 }));
+  children.push(builtInWordParagraph("{{firmName}}", { bold: true, spacingAfter: 80 }));
+  children.push(builtInWordParagraph("By: __________________________", { spacingAfter: 80 }));
+  children.push(builtInWordParagraph("{{signerName}}", { spacingAfter: 80 }));
+  children.push(builtInWordParagraph("Attorney for Claimant", { italic: true, spacingAfter: 220 }));
+  children.push(builtInWordHeading(template.certTitle || "CERTIFICATE OF SERVICE"));
+  children.push(builtInWordParagraph("{{certIntro}}", { spacingAfter: 180 }));
+  children.push(builtInWordParagraph("{{serviceMethodPlain}}", { spacingAfter: 140 }));
+  children.push(builtInWordParagraph("{{serviceRecipientsText}}", { spacingAfter: 140 }));
+  return children;
+}
+
+function buildBuiltInAoDocxChildren(template: PacketTemplate): Array<WordParagraph | WordTable> {
+  const children: Array<WordParagraph | WordTable> = [];
+  children.push(builtInWordParagraph("{{firmBlockText}}", { spacingAfter: 180 }));
+  if (template.agencyLine) {
+    children.push(builtInWordHeading(template.agencyLine));
+  }
+  children.push(builtInWordHeading(template.heading));
+  children.push(builtInWordCaptionTable(template));
+  children.push(builtInWordParagraph("", { spacingAfter: 120 }));
+  if (template.documentTitle) {
+    children.push(builtInWordHeading(template.documentTitle));
+  }
+  children.push(builtInWordParagraph("{{counselPreamble}}", { spacingAfter: 180 }));
+  for (const section of template.extraSections || []) {
+    children.push(builtInWordHeading(section.title));
+    children.push(builtInWordParagraph(`{{${section.key}}}`, { spacingAfter: 180 }));
+  }
+  children.push(builtInWordParagraph("", { pageBreakBefore: true, spacingAfter: 0 }));
+  children.push(builtInWordHeading(template.indexTitle || "DOCUMENT INDEX"));
+  children.push(builtInWordAoIndexTable());
+  children.push(builtInWordParagraph("", { pageBreakBefore: true, spacingAfter: 0 }));
+  children.push(builtInWordHeading(template.certTitle || "CERTIFICATE OF SERVICE"));
+  children.push(builtInWordParagraph("{{certIntro}}", { spacingAfter: 180 }));
+  children.push(builtInWordParagraph("{{serviceMethodPlain}}", { spacingAfter: 120 }));
+  children.push(builtInWordParagraph("{{serviceRecipientsText}}", { spacingAfter: 120 }));
+  children.push(builtInWordParagraph("Dated: {{serviceDate}}", { spacingAfter: 120 }));
+  children.push(builtInWordParagraph("{{signerName}}", { spacingAfter: 80 }));
+  children.push(builtInWordParagraph("{{firmName}}", { bold: true, spacingAfter: 80 }));
+  return children;
+}
+
+async function buildBuiltInDocxTemplateBuffer(template: PacketTemplate): Promise<Buffer> {
+  if (template.id === "ho-standard") {
+    try {
+      return await buildHoDocxTemplateFromSeed();
+    } catch (error) {
+      console.warn(
+        `[EvidencePacket] Failed to build HO seed DOCX template, falling back to generated template: ${formatError(error)}`
+      );
+    }
+  }
+
+  if (template.id === "ao-standard" || template.pageFlow === "statement-first") {
+    try {
+      return await buildAoDocxTemplateFromSeed();
+    } catch (error) {
+      console.warn(
+        `[EvidencePacket] Failed to build AO seed DOCX template, falling back to generated template: ${formatError(error)}`
+      );
+    }
+  }
+
+  const children = template.pageFlow === "statement-first"
+    ? buildBuiltInAoDocxChildren(template)
+    : buildBuiltInHoDocxChildren(template);
+
+  const doc = new WordDocument({
+    sections: [
+      {
+        properties: {
+          page: {
+            margin: {
+              top: 1080,
+              right: 936,
+              bottom: 1080,
+              left: 1440,
+            },
+            borders: {
+              pageBorders: {
+                display: WordPageBorderDisplay.ALL_PAGES,
+                offsetFrom: WordPageBorderOffsetFrom.PAGE,
+              },
+              pageBorderLeft: {
+                style: WordBorderStyle.SINGLE,
+                size: 8,
+                color: "8A8A8A",
+                space: 24,
+              },
+              pageBorderTop: { style: WordBorderStyle.NONE, size: 0, color: "FFFFFF" },
+              pageBorderRight: { style: WordBorderStyle.NONE, size: 0, color: "FFFFFF" },
+              pageBorderBottom: { style: WordBorderStyle.NONE, size: 0, color: "FFFFFF" },
+            },
+          },
+          lineNumbers: {
+            countBy: 1,
+            start: 1,
+            restart: WordLineNumberRestartFormat.NEW_PAGE,
+            distance: 420,
+          },
+        },
+        children,
+      },
+    ],
+  });
+  return WordPacker.toBuffer(doc);
+}
+
+async function readBuiltInDocxVersionMap(
+  versionsPath: string
+): Promise<Partial<Record<BuiltInPacketTemplateId, number>>> {
+  try {
+    const raw = await readFile(versionsPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const result: Partial<Record<BuiltInPacketTemplateId, number>> = {};
+    for (const id of Object.keys(BUILT_IN_DOCX_FILENAMES) as BuiltInPacketTemplateId[]) {
+      const value = (parsed as Record<string, unknown>)[id];
+      if (typeof value === "number" && Number.isFinite(value)) {
+        result[id] = value;
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+export async function ensureBuiltInPacketDocxTemplate(
+  firmRoot: string,
+  templateId: BuiltInPacketTemplateId,
+  options: { force?: boolean } = {}
+): Promise<string> {
+  const filename = BUILT_IN_DOCX_FILENAMES[templateId];
+  const relativePath = `source/${filename}`;
+  const sourceDir = join(firmRoot, ".ai_tool", "templates", "source");
+  const fullPath = join(sourceDir, filename);
+  const versionsPath = join(sourceDir, BUILT_IN_DOCX_VERSION_FILE);
+
+  await mkdir(sourceDir, { recursive: true });
+  const existingVersions = await readBuiltInDocxVersionMap(versionsPath);
+  let hasExistingFile = false;
+  try {
+    await stat(fullPath);
+    hasExistingFile = true;
+  } catch {
+    hasExistingFile = false;
+  }
+
+  const currentVersion = existingVersions[templateId] ?? 0;
+  if (!options.force && hasExistingFile && currentVersion >= BUILT_IN_DOCX_TEMPLATE_VERSION) {
+    return relativePath;
+  }
+
+  const builtIn = BUILT_IN_TEMPLATES.find((template) => template.id === templateId);
+  if (!builtIn) {
+    throw new Error(`Built-in packet template not found: ${templateId}`);
+  }
+
+  const docxBuffer = await buildBuiltInDocxTemplateBuffer(builtIn);
+  await writeFile(fullPath, docxBuffer);
+  const nextVersions: Partial<Record<BuiltInPacketTemplateId, number>> = {
+    ...existingVersions,
+    [templateId]: BUILT_IN_DOCX_TEMPLATE_VERSION,
+  };
+  await writeFile(versionsPath, JSON.stringify(nextVersions, null, 2), "utf-8");
+
+  return relativePath;
+}
+
 export interface EvidencePacketDocumentInput {
   path: string;
   title: string;
@@ -183,6 +790,8 @@ export interface BuildEvidencePacketOptions {
   firmBlockLines?: string[];
   /** Override default path resolution (for year-based cases). */
   resolveDocPath?: (relativePath: string) => string;
+  /** Override template path resolution (defaults to resolveDocPath). */
+  resolveTemplatePath?: (relativePath: string) => string;
   /** Template to drive front matter heading, caption layout, and boilerplate. */
   template?: PacketTemplate;
   /** Name to display in the signer block (overrides introductoryCounselLine). */
@@ -217,6 +826,44 @@ export interface EvidencePacketSensitiveDetectionBox {
   yMin: number;
   xMax: number;
   yMax: number;
+}
+
+function drawFrontMatterPageBadge(page: PDFPage, font: PDFFont, label: string): void {
+  const size = 10;
+  const marginRight = 30;
+  const marginBottom = 16;
+  const textWidth = font.widthOfTextAtSize(label, size);
+  const { width } = page.getSize();
+  const x = width - marginRight - textWidth;
+  const y = marginBottom;
+
+  page.drawText(label, {
+    x,
+    y,
+    size,
+    font,
+    color: rgb(0, 0, 0),
+  });
+}
+
+function stampFrontMatterPageNumbers(
+  pdf: PDFDocument,
+  font: PDFFont,
+  frontMatterPageCount: number
+): void {
+  if (frontMatterPageCount <= 0) return;
+  for (let i = 0; i < frontMatterPageCount; i++) {
+    const page = pdf.getPage(i);
+    const label = `${i + 1}`;
+    drawFrontMatterPageBadge(page, font, label);
+  }
+}
+
+export async function addFrontMatterPageNumberBadgesToPdfBytes(pdfBytes: Uint8Array): Promise<Uint8Array> {
+  const pdf = await PDFDocument.load(pdfBytes);
+  const font = await pdf.embedFont(StandardFonts.TimesRoman);
+  stampFrontMatterPageNumbers(pdf, font, pdf.getPageCount());
+  return pdf.save();
 }
 
 export interface EvidencePacketManualRedactionBox {
@@ -361,6 +1008,7 @@ export async function buildEvidencePacket(
 
   // Track front matter HTML for DOCX export (populated by HTML-template path)
   let frontMatterHtml: string | undefined;
+  let frontMatterDocxBytes: Buffer | undefined;
 
   // Branch: HTML-template path vs pdf-lib path
   // CRITICAL: .docx files MUST use the native docxtemplater + LibreOffice path
@@ -370,13 +1018,15 @@ export async function buildEvidencePacket(
     let docxRendered = false;
     try {
       console.log(`[EvidencePacket] Using DOCX template path: ${options.template.sourceFile}`);
-      const docxPdfBytes = await buildDocxFrontMatter(
+      const { pdfBytes: docxPdfBytes, docxBytes } = await buildDocxFrontMatter(
         options.template,
         options.caption,
         options.service,
         tocEntries,
         options.firmName,
-        options.resolveDocPath || ((p) => resolveCasePath(options.caseFolder, p)),
+        options.resolveTemplatePath
+          || options.resolveDocPath
+          || ((p) => resolveCasePath(options.caseFolder, p)),
         options.extraSectionValues,
         options.firmBlockLines,
         options.signerName,
@@ -386,6 +1036,7 @@ export async function buildEvidencePacket(
       for (const page of fmPages) {
         pdf.addPage(page);
       }
+      frontMatterDocxBytes = docxBytes;
       docxRendered = true;
     } catch (docxErr) {
       console.error(`[EvidencePacket] DOCX rendering failed:`, docxErr);
@@ -443,6 +1094,8 @@ export async function buildEvidencePacket(
       frontMatterPages += addAffirmationPage(pdf, regularFont, boldFont, options, frontMatterPages + 1);
     }
   }
+  const frontMatterPageCount = pdf.getPageCount();
+  stampFrontMatterPageNumbers(pdf, regularFont, frontMatterPageCount);
 
   let exhibitPageNumber = pageStampStart;
   for (const processed of processedDocs) {
@@ -463,8 +1116,7 @@ export async function buildEvidencePacket(
   }
 
   // Generate front matter DOCX for editable Word export
-  let frontMatterDocxBytes: Buffer | undefined;
-  if (frontMatterHtml) {
+  if (frontMatterHtml && !frontMatterDocxBytes) {
     try {
       frontMatterDocxBytes = await htmlToDocx(frontMatterHtml, "Front Matter", {
         documentType: "hearing_decision",
@@ -498,10 +1150,12 @@ export async function buildFrontMatterPreview(options: {
   extraSectionValues?: Record<string, string>;
   firmName?: string;
   caseFolder?: string;
-}): Promise<Uint8Array> {
+  resolveTemplatePath?: (relativePath: string) => string;
+}): Promise<{ pdfBytes: Uint8Array; docxBytes?: Buffer }> {
   const resolveDoc = options.caseFolder
     ? (p: string) => resolveCasePath(options.caseFolder!, p)
     : (p: string) => join(process.cwd(), p);
+  const resolveTemplatePath = options.resolveTemplatePath || resolveDoc;
 
   // Branch: HTML-template path vs pdf-lib path
   // CRITICAL: .docx files MUST use the native docxtemplater + LibreOffice path
@@ -510,17 +1164,21 @@ export async function buildFrontMatterPreview(options: {
   if (options.template?.sourceFile && options.template.sourceFile.toLowerCase().endsWith(".docx")) {
     try {
       console.log(`[FrontMatterPreview] Using DOCX template path: ${options.template.sourceFile}`);
-      return await buildDocxFrontMatter(
+      const result = await buildDocxFrontMatter(
         options.template,
         options.caption,
         options.service,
         options.tocEntries,
         options.firmName,
-        resolveDoc,
+        resolveTemplatePath,
         options.extraSectionValues,
         options.firmBlockLines,
         options.signerName,
       );
+      return {
+        pdfBytes: await addFrontMatterPageNumberBadgesToPdfBytes(result.pdfBytes),
+        docxBytes: result.docxBytes,
+      };
     } catch (docxErr) {
       console.error(`[FrontMatterPreview] DOCX rendering failed:`, docxErr);
       console.error(`[FrontMatterPreview] FALLING BACK to pdf-lib layout`);
@@ -535,7 +1193,7 @@ export async function buildFrontMatterPreview(options: {
       options.firmName,
       resolveDoc
     );
-    return pdfBytes;
+    return { pdfBytes: await addFrontMatterPageNumberBadgesToPdfBytes(pdfBytes) };
   } else if (options.template?.htmlTemplate) {
     const htmlBuffer = await renderHtmlFrontMatter(
       {
@@ -549,7 +1207,9 @@ export async function buildFrontMatterPreview(options: {
       },
       options.tocEntries,
     );
-    return new Uint8Array(htmlBuffer);
+    return {
+      pdfBytes: await addFrontMatterPageNumberBadgesToPdfBytes(new Uint8Array(htmlBuffer)),
+    };
   }
 
   const pdf = await PDFDocument.create();
@@ -585,7 +1245,7 @@ export async function buildFrontMatterPreview(options: {
     }
   }
 
-  return pdf.save();
+  return { pdfBytes: await addFrontMatterPageNumberBadgesToPdfBytes(await pdf.save()) };
 }
 
 function resolveCasePath(caseFolder: string, relativePath: string): string {
@@ -1958,6 +2618,33 @@ export async function renderDocxWithLibreOffice(docxBuffer: Buffer): Promise<Uin
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function renderDocxWithLibreOfficeWithRetry(
+  docxBuffer: Buffer,
+  options: { attempts?: number; initialDelayMs?: number } = {}
+): Promise<Uint8Array> {
+  const attempts = Math.max(1, options.attempts ?? 4);
+  const initialDelayMs = Math.max(10, options.initialDelayMs ?? 150);
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await renderDocxWithLibreOffice(docxBuffer);
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts - 1) break;
+      await sleep(initialDelayMs * (2 ** attempt));
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`DOCX render failed: ${String(lastError)}`);
+}
+
 /**
  * Native DOCX Front Matter Generation
  */
@@ -2001,20 +2688,44 @@ async function buildDocxFrontMatter(
 
   // Build document index text for {{documentIndexText}} placeholder
   const documentIndexLines: string[] = [];
+  const useNumberedRightAlignedIndex =
+    template.id === "ho-standard"
+    || template.id === "ao-standard"
+    || template.sourceFile === "source/__builtin-ho-standard.docx"
+    || template.sourceFile === "source/__builtin-ao-standard.docx";
   for (let i = 0; i < tocEntries.length; i++) {
     const entry = tocEntries[i];
     const pageRange = entry.startPage === entry.endPage
       ? `${entry.startPage}`
       : `${entry.startPage}-${entry.endPage}`;
     const dateStr = entry.date || "";
-    if (template.tocFormat === "date-doc-page") {
+    if (useNumberedRightAlignedIndex) {
+      const label = truncateDocIndexLabel(
+        `${i + 1}. ${entry.title}${dateStr ? ` - ${dateStr}` : ""}`
+      );
+      documentIndexLines.push(`${label}\tPg. ${pageRange}`);
+    } else if (template.tocFormat === "date-doc-page") {
       documentIndexLines.push(`${dateStr}\t${entry.title}\t${pageRange}`);
     } else {
-      const label = `${i + 1}. ${entry.title}${dateStr ? ` - ${dateStr}` : ""}`;
-      documentIndexLines.push(`${label} ... Pg. ${pageRange}`);
+      const label = truncateDocIndexLabel(
+        `${i + 1}. ${entry.title}${dateStr ? ` - ${dateStr}` : ""}`
+      );
+      documentIndexLines.push(`${label}\tPg. ${pageRange}`);
     }
   }
   const documentIndexText = documentIndexLines.join("\n");
+  const serviceDate = service?.serviceDate || new Date().toLocaleDateString("en-US");
+  const serviceMethodPlain = (service?.serviceMethod || "")
+    .replace(/^\[[xX]\]\s*/, "")
+    .trim()
+    || "Via E-File";
+  const serviceRecipientsText = (service?.recipients || []).join("\n");
+  const datedLine = `Dated this ____  day of ${sDate.toLocaleString('default', { month: 'long' })}, ${sDate.getFullYear()}.`;
+  const hoCaptionLine1 = `Claim No.: ${caption.claimNumber || caption.captionValues?.["claimNumber"] || ""}`.trimEnd();
+  const hoCaptionLine2 = `Hearing No.: ${caption.hearingNumber || caption.captionValues?.["hearingNumber"] || ""}`.trimEnd();
+  const hoCaptionLine3 = `Date/Time: ${caption.hearingDateTime || caption.captionValues?.["hearingDateTime"] || ""}`.trimEnd();
+  const hoCaptionLine4 = `Appearance: ${caption.appearance || caption.captionValues?.["appearance"] || ""}`.trimEnd();
+  const hoCaptionPreamble2 = template.captionPreambleLines?.[1] || "Industrial Insurance Claim of";
 
   const docxData: Record<string, string | object[]> = {
     // Standard fields
@@ -2032,11 +2743,24 @@ async function buildDocxFrontMatter(
     serviceMonth: sDate.toLocaleString('default', { month: 'long' }),
     serviceYear: sDate.getFullYear().toString(),
     serviceDay: sDate.getDate().toString(),
+    serviceDate,
+    serviceMethodPlain,
+    serviceRecipientsText,
+    serviceRecipients: serviceRecipientsText,
+    datedLine,
+    servedBy: service?.servedBy || "An employee of counsel",
+    omit: "",
+    hoCaptionLine1,
+    hoCaptionLine2,
+    hoCaptionLine3,
+    hoCaptionLine4,
+    hoCaptionPreamble2,
     documentIndexText,
     tocEntries: tocEntries.map((entry, i) => ({
       number: String(i + 1),
       title: entry.title,
       date: entry.date || "",
+      dateLine: entry.date ? ` - ${entry.date}` : "",
       startPage: String(entry.startPage),
       endPage: String(entry.endPage),
       pageRange: entry.startPage === entry.endPage
@@ -2078,7 +2802,8 @@ async function buildDocxFrontMatter(
     }
   }
   const dataKeys = new Set(Object.keys(docxData));
-  const unresolved = [...templateVars].filter(v => !dataKeys.has(v));
+  const loopValueKeys = new Set(["number", "title", "date", "dateLine", "startPage", "endPage", "pageRange"]);
+  const unresolved = [...templateVars].filter(v => !dataKeys.has(v) && !loopValueKeys.has(v));
   const unused = [...dataKeys].filter(k => !templateVars.has(k));
   console.log(`[DOCX] Template variables found: ${[...templateVars].join(", ") || "(none)"}`);
   console.log(`[DOCX] Data keys provided: ${[...dataKeys].join(", ")}`);
@@ -2118,7 +2843,7 @@ async function buildDocxFrontMatter(
     console.log(`[DOCX] Pre-LibreOffice DOCX saved for inspection`);
   } catch { /* non-fatal */ }
 
-  const pdfBytes = await renderDocxWithLibreOffice(fulfilledBuffer);
+  const pdfBytes = await renderDocxWithLibreOfficeWithRetry(fulfilledBuffer);
   return { pdfBytes, docxBytes: fulfilledBuffer };
 }
 

@@ -21,7 +21,9 @@ import {
   applyManualRedactionBoxes,
   buildEvidencePacket,
   buildFrontMatterPreview,
-  renderDocxWithLibreOffice,
+  renderDocxWithLibreOfficeWithRetry,
+  addFrontMatterPageNumberBadgesToPdfBytes,
+  ensureBuiltInPacketDocxTemplate,
   BUILT_IN_TEMPLATES,
   type PacketTemplate,
   type EvidencePacketManualRedactionBox,
@@ -110,6 +112,49 @@ function resolveCasePath(caseFolder: string, relativePath: string): string {
   return target;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+async function renderDocxFileToPdfWithRetry(
+  fullDocxPath: string,
+  options: { attempts?: number; initialDelayMs?: number } = {}
+): Promise<Uint8Array> {
+  const attempts = Math.max(1, options.attempts ?? 4);
+  const initialDelayMs = Math.max(10, options.initialDelayMs ?? 150);
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const docxBytes = await readFile(fullDocxPath);
+      return await renderDocxWithLibreOfficeWithRetry(docxBytes, { attempts: 2, initialDelayMs: 100 });
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts - 1) break;
+      await sleep(initialDelayMs * (2 ** attempt));
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`DOCX preview render failed: ${String(lastError)}`);
+}
+
+async function openFileInDefaultApp(fullPath: string): Promise<void> {
+  const platform = process.platform;
+  let openCmd: string;
+
+  if (platform === "darwin") {
+    openCmd = `open "${fullPath}"`;
+  } else if (platform === "win32") {
+    openCmd = `start "" "${fullPath}"`;
+  } else {
+    openCmd = `xdg-open "${fullPath}"`;
+  }
+
+  await execAsync(openCmd);
+}
+
 /**
  * Build a year-mode-aware path resolver for a case folder.
  * Returns a function that resolves relative doc paths to absolute paths.
@@ -135,6 +180,26 @@ function normalizeRelativePath(path: string): string {
     .replace(/^\/+/, "")
     .replace(/\/+/g, "/")
     .trim();
+}
+
+function resolveTemplateAssetPath(firmRoot: string, relativePath: string): string {
+  const normalized = normalizeRelativePath(relativePath);
+  if (!normalized) {
+    throw new Error("Template path is empty");
+  }
+
+  const lower = normalized.toLowerCase();
+  if (normalized.startsWith(".ai_tool/")) {
+    return resolveCasePath(firmRoot, normalized);
+  }
+  if (
+    lower.startsWith("source/")
+    || lower.startsWith("parsed/")
+    || lower.startsWith("templatized/")
+  ) {
+    return resolveCasePath(firmRoot, join(".ai_tool", "templates", normalized));
+  }
+  return resolveCasePath(firmRoot, normalized);
 }
 
 function normalizeComparablePath(path: string): string {
@@ -477,7 +542,7 @@ app.post("/export", async (c) => {
           });
           doc.render({ documentBody: content });
           const filledBuffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
-          const pdfBytes = await renderDocxWithLibreOffice(filledBuffer);
+          const pdfBytes = await renderDocxWithLibreOfficeWithRetry(filledBuffer);
           await writeFile(fullOutputPath, pdfBytes);
           usedDocxTemplate = true;
           console.log(`[Export] Used DOCX template "${templateId}" for pixel-perfect PDF export`);
@@ -507,20 +572,7 @@ app.post("/export", async (c) => {
     // Auto-open in default application if requested
     if (openAfter) {
       try {
-        // Cross-platform open command
-        const platform = process.platform;
-        let openCmd: string;
-
-        if (platform === "darwin") {
-          openCmd = `open "${fullOutputPath}"`;
-        } else if (platform === "win32") {
-          openCmd = `start "" "${fullOutputPath}"`;
-        } else {
-          // Linux and others
-          openCmd = `xdg-open "${fullOutputPath}"`;
-        }
-
-        await execAsync(openCmd);
+        await openFileInDefaultApp(fullOutputPath);
       } catch (openErr) {
         console.error("Failed to open file:", openErr);
         // Don't fail the export just because open failed
@@ -1508,7 +1560,7 @@ app.post("/preview-front-matter", async (c) => {
       template = (await findTemplateById(configRoot, templateId)) ?? undefined;
     }
 
-    const pdfBytes = await buildFrontMatterPreview({
+    const previewResult = await buildFrontMatterPreview({
       caption,
       firmBlockLines,
       service,
@@ -1519,6 +1571,7 @@ app.post("/preview-front-matter", async (c) => {
       extraSectionValues: frontMatter.extraSectionValues,
       firmName: firmNameValue,
       caseFolder: configRoot,
+      resolveTemplatePath: (relativePath: string) => resolveTemplateAssetPath(configRoot, relativePath),
     });
 
     // Write to .ai_tool so the preview can be served via GET /api/files/view
@@ -1526,13 +1579,122 @@ app.post("/preview-front-matter", async (c) => {
     const piToolDir = join(caseFolder, ".ai_tool");
     await mkdir(piToolDir, { recursive: true });
     const previewPath = join(piToolDir, "front-matter-preview.pdf");
-    await writeFile(previewPath, pdfBytes);
+    await writeFile(previewPath, previewResult.pdfBytes);
+
+    let docxPath: string | null = null;
+    let docxMtimeMs: number | null = null;
+    if (previewResult.docxBytes) {
+      const workingDocxRelPath = ".ai_tool/front-matter-working.docx";
+      const workingDocxFullPath = join(caseFolder, workingDocxRelPath);
+      await writeFile(workingDocxFullPath, previewResult.docxBytes);
+      const docxStat = await stat(workingDocxFullPath);
+      docxPath = workingDocxRelPath;
+      docxMtimeMs = docxStat.mtimeMs;
+    }
 
     const viewUrl = `/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(".ai_tool/front-matter-preview.pdf")}#view=FitH`;
-    return c.json({ url: viewUrl });
+    return c.json({
+      url: viewUrl,
+      docxPath,
+      docxMtimeMs,
+    });
   } catch (err) {
     console.error("preview-front-matter error:", err);
     return c.json({ error: `Preview failed: ${err}` }, 500);
+  }
+});
+
+// Re-render front matter preview from an existing working DOCX
+app.post("/preview-front-matter-from-docx", async (c) => {
+  const { caseFolder, docxPath } = await c.req.json();
+
+  if (!caseFolder || !docxPath) {
+    return c.json({ error: "caseFolder and docxPath required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  if (typeof docxPath !== "string" || !docxPath.toLowerCase().endsWith(".docx")) {
+    return c.json({ error: "docxPath must be a .docx file" }, 400);
+  }
+
+  try {
+    const fullDocxPath = resolveCasePath(caseFolder, docxPath);
+    const rawPdfBytes = await renderDocxFileToPdfWithRetry(fullDocxPath, {
+      attempts: 5,
+      initialDelayMs: 120,
+    });
+    const pdfBytes = await addFrontMatterPageNumberBadgesToPdfBytes(rawPdfBytes);
+
+    const piToolDir = join(caseFolder, ".ai_tool");
+    await mkdir(piToolDir, { recursive: true });
+    const previewPath = join(piToolDir, "front-matter-preview.pdf");
+    await writeFile(previewPath, pdfBytes);
+
+    const docxStat = await stat(fullDocxPath);
+    const viewUrl = `/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(".ai_tool/front-matter-preview.pdf")}#view=FitH`;
+    return c.json({
+      url: viewUrl,
+      docxPath,
+      docxMtimeMs: docxStat.mtimeMs,
+    });
+  } catch (err) {
+    console.error("preview-front-matter-from-docx error:", err);
+    return c.json({ error: `Preview refresh failed: ${err}` }, 500);
+  }
+});
+
+// Open a local case-relative file using the system default app (Word for .docx, etc.)
+app.post("/open-local-file", async (c) => {
+  const { caseFolder, path } = await c.req.json();
+
+  if (!caseFolder || !path) {
+    return c.json({ error: "caseFolder and path required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  try {
+    const fullPath = resolveCasePath(caseFolder, String(path));
+    await stat(fullPath);
+    await openFileInDefaultApp(fullPath);
+    return c.json({ success: true });
+  } catch (err) {
+    console.error("open-local-file error:", err);
+    return c.json({ error: `Failed to open file: ${err}` }, 500);
+  }
+});
+
+// Get mtime for a case-relative file (used by front matter Word-save polling)
+app.get("/file-mtime", async (c) => {
+  const caseFolder = c.req.query("case");
+  const path = c.req.query("path");
+
+  if (!caseFolder || !path) {
+    return c.json({ error: "case and path query params required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  try {
+    const fullPath = resolveCasePath(caseFolder, path);
+    const fileStats = await stat(fullPath);
+    return c.json({ exists: true, mtimeMs: fileStats.mtimeMs });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return c.json({ exists: false, mtimeMs: null });
+    }
+    console.error("file-mtime error:", err);
+    return c.json({ error: `Failed to stat file: ${err}` }, 500);
   }
 });
 
@@ -1644,6 +1806,7 @@ app.post("/generate-packet", async (c) => {
       includeAffirmationPage: true,
       firmBlockLines: frontMatter.firmBlockLines,
       resolveDocPath,
+      resolveTemplatePath: (relativePath: string) => resolveTemplateAssetPath(configRoot, relativePath),
       template,
       signerName: frontMatter.signerName,
       extraSectionValues: frontMatter.extraSectionValues,
@@ -1749,7 +1912,17 @@ app.post("/batch-scan-pii", async (c) => {
 async function findTemplateById(firmRoot: string, id: string): Promise<PacketTemplate | null> {
   // 1. Check built-in templates
   const builtIn = BUILT_IN_TEMPLATES.find(t => t.id === id);
-  if (builtIn) return builtIn;
+  if (builtIn) {
+    if (builtIn.id === "ho-standard" || builtIn.id === "ao-standard") {
+      try {
+        const sourceFile = await ensureBuiltInPacketDocxTemplate(firmRoot, builtIn.id);
+        return { ...builtIn, sourceFile };
+      } catch (error) {
+        console.warn(`[PacketTemplate] Built-in DOCX materialization failed for ${id}; falling back to legacy render`, error);
+      }
+    }
+    return builtIn;
+  }
 
   // 2. Check doc-templates index for auto-detected packet templates
   try {

@@ -42,6 +42,8 @@ export interface PacketState {
   generatedAt: string | null
   outputPath: string | null
   frontMatterDocxPath: string | null
+  frontMatterWorkingDocxPath: string | null
+  frontMatterWorkingDocxMtime: number | null
   draftId: string | null
   draftName?: string
 }
