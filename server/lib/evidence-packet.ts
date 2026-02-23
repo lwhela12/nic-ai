@@ -149,7 +149,7 @@ const BUILT_IN_DOCX_FILENAMES: Record<BuiltInPacketTemplateId, string> = {
   "ao-standard": "__builtin-ao-standard.docx",
 };
 
-const BUILT_IN_DOCX_TEMPLATE_VERSION = 7;
+const BUILT_IN_DOCX_TEMPLATE_VERSION = 11;
 const BUILT_IN_DOCX_VERSION_FILE = "__builtin-docx-versions.json";
 const DOC_INDEX_RIGHT_TAB_POS = 9360;
 const DOC_INDEX_LEFT_MAX_CHARS = 76;
@@ -186,7 +186,7 @@ const HO_SEED_DOCX_REPLACEMENTS: Record<string, string> = {
   "LAW OFFICES OF JASON H. WEINSTOCK, PLLC.": "{{firmName}}",
   "By:": "{{omit}}",
   "JASON H. WEINSTOCK, ESQ.": "{{signerName}}",
-  "Nevada Bar No.: 15114": "{{omit}}",
+  "Nevada Bar No.: 15114": "{{signatureFirmBlock}}",
   "NICOLE C. FARRELL": "{{omit}}",
   "Nevada Bar No.: 16532": "{{omit}}",
   "2470 St. Rose Pkwy., Suite 214": "{{omit}}",
@@ -220,11 +220,12 @@ const AO_SEED_DOCX_REPLACEMENTS: Record<string, string> = {
   "This is Claimant’s appeal of the 1/23/26 Hearing Officer’s Decision and Order remanding the TPA’s 12/15/2025 denial to offer the PPD award.": "{{issueOnAppeal}}",
   "The Claimant may testify regarding the events of this industrial insurance claim.": "{{witnesses}}",
   "It is estimated that this case will take approximately 30 minutes to present.": "{{duration}}",
+  "AFFIRMATION PURSUANT TO NRS 239B.030": "{{affirmationTitle}}",
   "The undersigned does hereby affirm that the attached Claimant’s Documentary Evidence filed in Appeal No.\t: 2691432-GK": "{{affirmationText}}",
   "Dated this ____  day of February, 2026.": "{{datedLine}}",
   "LAW OFFICES OF JASON H. WEINSTOCK, PLLC.": "{{firmName}}",
   "JASON H. WEINSTOCK, ESQ.": "{{signerName}}",
-  "Nevada Bar No.: 15114": "{{omit}}",
+  "Nevada Bar No.: 15114": "{{signatureFirmBlock}}",
   "NICOLE C. FARRELL": "{{omit}}",
   "Nevada Bar No.: 16532": "{{omit}}",
   "2470 St. Rose Pkwy., Suite 214": "{{omit}}",
@@ -335,6 +336,232 @@ function truncateDocIndexLabel(text: string, maxChars = DOC_INDEX_LEFT_MAX_CHARS
   return `${safe}...`;
 }
 
+function ensurePageBreakBeforeHeadings(
+  docxBytes: Buffer,
+  headingNeedles: string[]
+): Buffer {
+  try {
+    const zip = new PizZip(docxBytes);
+    const docNode = zip.file("word/document.xml");
+    if (!docNode) return docxBytes;
+    const xml = docNode.asText();
+    const paraRegex = /<w:p[\s>][\s\S]*?<\/w:p>/g;
+    const normalizedNeedles = headingNeedles.map((value) => value.toUpperCase());
+    type Segment = { type: "raw"; xml: string } | { type: "paragraph"; xml: string };
+    const segments: Segment[] = [];
+    let changed = false;
+    let cursor = 0;
+
+    const paragraphText = (paragraphXml: string): string => {
+      return [...paragraphXml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)]
+        .map((m) => m[1])
+        .join("")
+        .replace(/\s+/g, " ")
+        .trim();
+    };
+
+    const isSpacerParagraph = (paragraphXml: string): boolean => {
+      const text = paragraphText(paragraphXml);
+      if (!text) return true;
+      const withoutOmit = text.replace(/\{\{\s*omit\s*\}\}/gi, "").trim();
+      if (!withoutOmit) return true;
+      return /^[\/\\|._-]+$/.test(withoutOmit);
+    };
+
+    let match: RegExpExecArray | null;
+    while ((match = paraRegex.exec(xml)) !== null) {
+      if (match.index > cursor) {
+        segments.push({ type: "raw", xml: xml.slice(cursor, match.index) });
+      }
+      segments.push({ type: "paragraph", xml: match[0] });
+      cursor = match.index + match[0].length;
+    }
+    if (cursor < xml.length) {
+      segments.push({ type: "raw", xml: xml.slice(cursor) });
+    }
+
+    const output: Segment[] = [];
+    for (const segment of segments) {
+      if (segment.type !== "paragraph") {
+        output.push(segment);
+        continue;
+      }
+
+      const textUpper = paragraphText(segment.xml).toUpperCase();
+      const shouldBreak = normalizedNeedles.some((needle) => textUpper.includes(needle));
+      if (!shouldBreak) {
+        output.push(segment);
+        continue;
+      }
+
+      while (output.length > 0) {
+        const previous = output[output.length - 1];
+        if (previous.type === "raw") {
+          if (previous.xml.trim().length > 0) break;
+          output.pop();
+          changed = true;
+          continue;
+        }
+        if (!isSpacerParagraph(previous.xml)) break;
+        output.pop();
+        changed = true;
+      }
+
+      let updatedParagraph = segment.xml;
+      if (updatedParagraph.includes("<w:lastRenderedPageBreak/>")) {
+        updatedParagraph = updatedParagraph.replace(/<w:lastRenderedPageBreak\/>/g, "");
+        changed = true;
+      }
+      if (!updatedParagraph.includes("<w:pageBreakBefore")) {
+        if (updatedParagraph.includes("<w:pPr>")) {
+          updatedParagraph = updatedParagraph.replace("<w:pPr>", "<w:pPr><w:pageBreakBefore/>");
+        } else {
+          updatedParagraph = updatedParagraph.replace(/^<w:p([^>]*)>/, "<w:p$1><w:pPr><w:pageBreakBefore/></w:pPr>");
+        }
+        changed = true;
+      }
+
+      output.push({ type: "paragraph", xml: updatedParagraph });
+    }
+
+    if (!changed) return docxBytes;
+    zip.file("word/document.xml", output.map((segment) => segment.xml).join(""));
+    return zip.generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+  } catch {
+    return docxBytes;
+  }
+}
+
+function trimSpacerParagraphsBeforeNeedles(
+  docxBytes: Buffer,
+  targetNeedles: string[]
+): Buffer {
+  try {
+    const zip = new PizZip(docxBytes);
+    const docNode = zip.file("word/document.xml");
+    if (!docNode) return docxBytes;
+    const xml = docNode.asText();
+    const paraRegex = /<w:p[\s>][\s\S]*?<\/w:p>/g;
+    const normalizedNeedles = targetNeedles.map((needle) => needle.toUpperCase());
+    type Segment = { type: "raw"; xml: string } | { type: "paragraph"; xml: string };
+    const segments: Segment[] = [];
+    let cursor = 0;
+    let changed = false;
+
+    const paragraphText = (paragraphXml: string): string => {
+      return [...paragraphXml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)]
+        .map((m) => m[1])
+        .join("")
+        .replace(/\s+/g, " ")
+        .trim();
+    };
+
+    const isSpacerParagraph = (paragraphXml: string): boolean => {
+      const text = paragraphText(paragraphXml);
+      if (!text) return true;
+      const withoutOmit = text.replace(/\{\{\s*omit\s*\}\}/gi, "").trim();
+      if (!withoutOmit) return true;
+      return /^[\/\\|._-]+$/.test(withoutOmit);
+    };
+
+    let match: RegExpExecArray | null;
+    while ((match = paraRegex.exec(xml)) !== null) {
+      if (match.index > cursor) {
+        segments.push({ type: "raw", xml: xml.slice(cursor, match.index) });
+      }
+      segments.push({ type: "paragraph", xml: match[0] });
+      cursor = match.index + match[0].length;
+    }
+    if (cursor < xml.length) {
+      segments.push({ type: "raw", xml: xml.slice(cursor) });
+    }
+
+    const output: Segment[] = [];
+    for (const segment of segments) {
+      if (segment.type !== "paragraph") {
+        output.push(segment);
+        continue;
+      }
+
+      const textUpper = paragraphText(segment.xml).toUpperCase();
+      const isTarget = normalizedNeedles.some((needle) => textUpper.includes(needle));
+      if (!isTarget) {
+        output.push(segment);
+        continue;
+      }
+
+      while (output.length > 0) {
+        const previous = output[output.length - 1];
+        if (previous.type === "raw") {
+          if (previous.xml.trim().length > 0) break;
+          output.pop();
+          changed = true;
+          continue;
+        }
+        if (!isSpacerParagraph(previous.xml)) break;
+        output.pop();
+        changed = true;
+      }
+
+      output.push(segment);
+    }
+
+    if (!changed) return docxBytes;
+    zip.file("word/document.xml", output.map((segment) => segment.xml).join(""));
+    return zip.generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+  } catch {
+    return docxBytes;
+  }
+}
+
+function ensureDocxFooterPageNumberFields(docxBytes: Buffer): Buffer {
+  try {
+    const zip = new PizZip(docxBytes);
+    const footerParts = ["word/footer1.xml", "word/footer2.xml", "word/footer3.xml"];
+    let changed = false;
+    const hasPageFieldRegex = /<w:fldSimple[^>]*w:instr="[^"]*\bPAGE\b[^"]*"|<w:instrText[^>]*>[^<]*\bPAGE\b[^<]*<\/w:instrText>/i;
+    const pageFieldParagraphRegex =
+      /<w:p[\s\S]*?(?:<w:fldSimple[^>]*w:instr="[^"]*\bPAGE\b[^"]*"[\s\S]*?<\/w:fldSimple>|<w:instrText[^>]*>[^<]*\bPAGE\b[^<]*<\/w:instrText>[\s\S]*?)<\/w:p>/gi;
+    const pageFieldParagraph =
+      `<w:p>` +
+      `<w:pPr>` +
+      `<w:pStyle w:val="Footer"/>` +
+      `<w:jc w:val="right"/>` +
+      `<w:ind w:right="420"/>` +
+      `<w:spacing w:before="180" w:after="0"/>` +
+      `</w:pPr>` +
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
+      `<w:r><w:t>1</w:t></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="end"/></w:r>` +
+      `</w:p>`;
+
+    for (const part of footerParts) {
+      const footerNode = zip.file(part);
+      if (!footerNode) continue;
+      const xml = footerNode.asText();
+      if (!xml.includes("</w:ftr>")) continue;
+      let updated = xml;
+      if (hasPageFieldRegex.test(updated)) {
+        updated = updated.replace(pageFieldParagraphRegex, "");
+        updated = updated.replace("</w:ftr>", `${pageFieldParagraph}</w:ftr>`);
+      } else {
+        updated = updated.replace("</w:ftr>", `${pageFieldParagraph}</w:ftr>`);
+      }
+      if (updated !== xml) {
+        zip.file(part, updated);
+        changed = true;
+      }
+    }
+
+    if (!changed) return docxBytes;
+    return zip.generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+  } catch {
+    return docxBytes;
+  }
+}
+
 async function buildHoDocxTemplateFromSeed(): Promise<Buffer> {
   const templated = await injectVariablesIntoDocx(
     HO_SEED_DOCX_PATH,
@@ -342,6 +569,7 @@ async function buildHoDocxTemplateFromSeed(): Promise<Buffer> {
   );
   let output = moveHoDocumentIndexAfterCounselPreamble(Buffer.from(templated));
   output = enforceDocumentIndexRightTabLeader(output);
+  output = ensurePageBreakBeforeHeadings(output, ["{{affirmationTitle}}", "CERTIFICATE OF MAILING"]);
   return output;
 }
 
@@ -350,7 +578,14 @@ async function buildAoDocxTemplateFromSeed(): Promise<Buffer> {
     AO_SEED_DOCX_PATH,
     AO_SEED_DOCX_REPLACEMENTS
   );
-  return enforceDocumentIndexRightTabLeader(Buffer.from(templated));
+  let output = enforceDocumentIndexRightTabLeader(Buffer.from(templated));
+  output = trimSpacerParagraphsBeforeNeedles(output, ["{{documentIndexText}}"]);
+  output = ensurePageBreakBeforeHeadings(output, [
+    "{{documentIndexText}}",
+    "{{affirmationTitle}}",
+    "CERTIFICATE OF MAILING",
+  ]);
+  return output;
 }
 
 interface BuiltInWordParagraphOptions {
@@ -1009,6 +1244,7 @@ export async function buildEvidencePacket(
   // Track front matter HTML for DOCX export (populated by HTML-template path)
   let frontMatterHtml: string | undefined;
   let frontMatterDocxBytes: Buffer | undefined;
+  let frontMatterHasNativePageNumbers = false;
 
   // Branch: HTML-template path vs pdf-lib path
   // CRITICAL: .docx files MUST use the native docxtemplater + LibreOffice path
@@ -1037,6 +1273,7 @@ export async function buildEvidencePacket(
         pdf.addPage(page);
       }
       frontMatterDocxBytes = docxBytes;
+      frontMatterHasNativePageNumbers = true;
       docxRendered = true;
     } catch (docxErr) {
       console.error(`[EvidencePacket] DOCX rendering failed:`, docxErr);
@@ -1095,7 +1332,9 @@ export async function buildEvidencePacket(
     }
   }
   const frontMatterPageCount = pdf.getPageCount();
-  stampFrontMatterPageNumbers(pdf, regularFont, frontMatterPageCount);
+  if (!frontMatterHasNativePageNumbers) {
+    stampFrontMatterPageNumbers(pdf, regularFont, frontMatterPageCount);
+  }
 
   let exhibitPageNumber = pageStampStart;
   for (const processed of processedDocs) {
@@ -1175,10 +1414,7 @@ export async function buildFrontMatterPreview(options: {
         options.firmBlockLines,
         options.signerName,
       );
-      return {
-        pdfBytes: await addFrontMatterPageNumberBadgesToPdfBytes(result.pdfBytes),
-        docxBytes: result.docxBytes,
-      };
+      return result;
     } catch (docxErr) {
       console.error(`[FrontMatterPreview] DOCX rendering failed:`, docxErr);
       console.error(`[FrontMatterPreview] FALLING BACK to pdf-lib layout`);
@@ -2726,6 +2962,16 @@ async function buildDocxFrontMatter(
   const hoCaptionLine3 = `Date/Time: ${caption.hearingDateTime || caption.captionValues?.["hearingDateTime"] || ""}`.trimEnd();
   const hoCaptionLine4 = `Appearance: ${caption.appearance || caption.captionValues?.["appearance"] || ""}`.trimEnd();
   const hoCaptionPreamble2 = template.captionPreambleLines?.[1] || "Industrial Insurance Claim of";
+  const cleanedFirmLines = (firmBlockLines || [])
+    .map((line) => line.replace(/\[[^\]]+\]/g, "").trim())
+    .filter((line) => line && !/not configured/i.test(line));
+  const signerDisplayName = signerName || caption.introductoryCounselLine || "";
+  const signatureFirmLines = cleanedFirmLines.filter((line) => {
+    if (signerDisplayName && line.toLowerCase() === signerDisplayName.toLowerCase()) return false;
+    if (firmName && line.toLowerCase() === firmName.toLowerCase()) return false;
+    return true;
+  });
+  const signatureFirmBlock = signatureFirmLines.join("\n");
 
   const docxData: Record<string, string | object[]> = {
     // Standard fields
@@ -2755,6 +3001,7 @@ async function buildDocxFrontMatter(
     hoCaptionLine3,
     hoCaptionLine4,
     hoCaptionPreamble2,
+    signatureFirmBlock,
     documentIndexText,
     tocEntries: tocEntries.map((entry, i) => ({
       number: String(i + 1),
@@ -2834,7 +3081,8 @@ async function buildDocxFrontMatter(
     console.log(`[DOCX] All template variables resolved successfully`);
   }
 
-  const fulfilledBuffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+  const renderedBuffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+  const fulfilledBuffer = ensureDocxFooterPageNumberFields(renderedBuffer);
 
   // --- Save debug DOCX for inspection ---
   try {

@@ -22,7 +22,6 @@ import {
   buildEvidencePacket,
   buildFrontMatterPreview,
   renderDocxWithLibreOfficeWithRetry,
-  addFrontMatterPageNumberBadgesToPdfBytes,
   ensureBuiltInPacketDocxTemplate,
   BUILT_IN_TEMPLATES,
   type PacketTemplate,
@@ -110,6 +109,37 @@ function resolveCasePath(caseFolder: string, relativePath: string): string {
     throw new Error(`Path is outside case folder: ${relativePath}`);
   }
   return target;
+}
+
+const WORKING_DOCS_REL_DIR = ".ai_tool/working-docs";
+const FRONT_MATTER_PREVIEW_REL_PATH = `${WORKING_DOCS_REL_DIR}/front-matter-preview.pdf`;
+const FRONT_MATTER_WORKING_DOCX_REL_PATH = `${WORKING_DOCS_REL_DIR}/front-matter-working.docx`;
+const LEGACY_FRONT_MATTER_PREVIEW_REL_PATH = ".ai_tool/front-matter-preview.pdf";
+const LEGACY_FRONT_MATTER_WORKING_DOCX_REL_PATH = ".ai_tool/front-matter-working.docx";
+
+async function ensureWorkingDocsDir(caseFolder: string): Promise<string> {
+  const workingDocsDir = resolveCasePath(caseFolder, WORKING_DOCS_REL_DIR);
+  await mkdir(workingDocsDir, { recursive: true });
+  return workingDocsDir;
+}
+
+async function cleanupFrontMatterWorkingArtifacts(caseFolder: string): Promise<void> {
+  const relPaths = [
+    FRONT_MATTER_PREVIEW_REL_PATH,
+    FRONT_MATTER_WORKING_DOCX_REL_PATH,
+    LEGACY_FRONT_MATTER_PREVIEW_REL_PATH,
+    LEGACY_FRONT_MATTER_WORKING_DOCX_REL_PATH,
+  ];
+  await Promise.all(relPaths.map(async (relativePath) => {
+    try {
+      await unlink(resolveCasePath(caseFolder, relativePath));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return;
+      }
+      throw err;
+    }
+  }));
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1574,25 +1604,24 @@ app.post("/preview-front-matter", async (c) => {
       resolveTemplatePath: (relativePath: string) => resolveTemplateAssetPath(configRoot, relativePath),
     });
 
-    // Write to .ai_tool so the preview can be served via GET /api/files/view
+    // Write preview/working files under .ai_tool/working-docs to keep artifacts contained.
     // (blob URLs don't work with Electron's window.open pop-out on Windows)
-    const piToolDir = join(caseFolder, ".ai_tool");
-    await mkdir(piToolDir, { recursive: true });
-    const previewPath = join(piToolDir, "front-matter-preview.pdf");
+    const workingDocsDir = await ensureWorkingDocsDir(caseFolder);
+    const previewPath = join(workingDocsDir, "front-matter-preview.pdf");
     await writeFile(previewPath, previewResult.pdfBytes);
 
     let docxPath: string | null = null;
     let docxMtimeMs: number | null = null;
     if (previewResult.docxBytes) {
-      const workingDocxRelPath = ".ai_tool/front-matter-working.docx";
-      const workingDocxFullPath = join(caseFolder, workingDocxRelPath);
+      const workingDocxRelPath = FRONT_MATTER_WORKING_DOCX_REL_PATH;
+      const workingDocxFullPath = resolveCasePath(caseFolder, workingDocxRelPath);
       await writeFile(workingDocxFullPath, previewResult.docxBytes);
       const docxStat = await stat(workingDocxFullPath);
       docxPath = workingDocxRelPath;
       docxMtimeMs = docxStat.mtimeMs;
     }
 
-    const viewUrl = `/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(".ai_tool/front-matter-preview.pdf")}#view=FitH`;
+    const viewUrl = `/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(FRONT_MATTER_PREVIEW_REL_PATH)}#view=FitH`;
     return c.json({
       url: viewUrl,
       docxPath,
@@ -1623,19 +1652,17 @@ app.post("/preview-front-matter-from-docx", async (c) => {
 
   try {
     const fullDocxPath = resolveCasePath(caseFolder, docxPath);
-    const rawPdfBytes = await renderDocxFileToPdfWithRetry(fullDocxPath, {
+    const pdfBytes = await renderDocxFileToPdfWithRetry(fullDocxPath, {
       attempts: 5,
       initialDelayMs: 120,
     });
-    const pdfBytes = await addFrontMatterPageNumberBadgesToPdfBytes(rawPdfBytes);
 
-    const piToolDir = join(caseFolder, ".ai_tool");
-    await mkdir(piToolDir, { recursive: true });
-    const previewPath = join(piToolDir, "front-matter-preview.pdf");
+    const workingDocsDir = await ensureWorkingDocsDir(caseFolder);
+    const previewPath = join(workingDocsDir, "front-matter-preview.pdf");
     await writeFile(previewPath, pdfBytes);
 
     const docxStat = await stat(fullDocxPath);
-    const viewUrl = `/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(".ai_tool/front-matter-preview.pdf")}#view=FitH`;
+    const viewUrl = `/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(FRONT_MATTER_PREVIEW_REL_PATH)}#view=FitH`;
     return c.json({
       url: viewUrl,
       docxPath,
@@ -1839,6 +1866,12 @@ app.post("/generate-packet", async (c) => {
         "utf-8"
       );
     } catch { /* ignore draft save errors */ }
+
+    try {
+      await cleanupFrontMatterWorkingArtifacts(caseFolder);
+    } catch (cleanupErr) {
+      console.warn("generate-packet cleanup warning:", cleanupErr);
+    }
 
     return c.json({
       success: true,

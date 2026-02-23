@@ -6,6 +6,25 @@ import PizZip from "pizzip";
 
 const tempDirs: string[] = [];
 
+function paragraphText(paragraphXml: string): string {
+  return [...paragraphXml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)]
+    .map((match) => match[1])
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function expectNoSpacerParagraphBefore(docXml: string, headingNeedle: string): void {
+  const paragraphs = docXml.match(/<w:p[\s>][\s\S]*?<\/w:p>/g) || [];
+  const idx = paragraphs.findIndex((paragraph) => paragraph.includes(headingNeedle));
+  expect(idx).toBeGreaterThan(0);
+  const previous = paragraphs[idx - 1] || "";
+  const normalized = paragraphText(previous);
+  const withoutOmit = normalized.replace(/\{\{\s*omit\s*\}\}/gi, "").trim();
+  expect(withoutOmit.length).toBeGreaterThan(0);
+  expect(/^[\/\\|._-]+$/.test(withoutOmit)).toBe(false);
+}
+
 async function makeTempDir(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
   tempDirs.push(dir);
@@ -73,6 +92,7 @@ describe("ensureBuiltInPacketDocxTemplate", () => {
     expect(hoDoc).toContain("{{hoCaptionLine1}}");
     expect(hoDoc).toContain("{{hoCaptionLine4}}");
     expect(hoDoc).toContain("{{affirmationTitle}}");
+    expect(hoDoc).toContain("{{signatureFirmBlock}}");
     expect(hoDoc).toContain("{{certIntro}}");
     expect(hoDoc).toContain("{{serviceRecipientsText}}");
     const hoCounselPos = hoDoc.indexOf("{{counselPreamble}}");
@@ -84,6 +104,11 @@ describe("ensureBuiltInPacketDocxTemplate", () => {
     const hoIndexParagraph = hoDoc.split("</w:p>").find((p) => p.includes("{{documentIndexText}}")) || "";
     expect(hoIndexParagraph).toContain('w:tab w:val="right"');
     expect(hoIndexParagraph).toContain('w:leader="dot"');
+    expectNoSpacerParagraphBefore(hoDoc, "{{documentIndexText}}");
+    expect(hoDoc).toMatch(/<w:p[\s\S]*?<w:pageBreakBefore\/>[\s\S]*?\{\{affirmationTitle\}\}[\s\S]*?<\/w:p>/);
+    expect(hoDoc).toMatch(/<w:p[\s\S]*?<w:pageBreakBefore\/>[\s\S]*?CERTIFICATE OF MAILING[\s\S]*?<\/w:p>/);
+    expectNoSpacerParagraphBefore(hoDoc, "{{affirmationTitle}}");
+    expectNoSpacerParagraphBefore(hoDoc, "CERTIFICATE OF MAILING");
     expect(hoDoc).not.toContain(">ISSUE<");
     expect(hoDoc).not.toContain(">WITNESSES<");
     expect(hoDoc).not.toContain(">DURATION<");
@@ -98,6 +123,13 @@ describe("ensureBuiltInPacketDocxTemplate", () => {
     const aoIndexParagraph = aoDoc.split("</w:p>").find((p) => p.includes("{{documentIndexText}}")) || "";
     expect(aoIndexParagraph).toContain('w:tab w:val="right"');
     expect(aoIndexParagraph).toContain('w:leader="dot"');
+    expect(aoDoc).toMatch(/<w:p[\s\S]*?<w:pageBreakBefore\/>[\s\S]*?\{\{documentIndexText\}\}[\s\S]*?<\/w:p>/);
+    expectNoSpacerParagraphBefore(aoDoc, "{{documentIndexText}}");
+    expect(aoDoc).toContain("{{signatureFirmBlock}}");
+    expect(aoDoc).toMatch(/<w:p[\s\S]*?<w:pageBreakBefore\/>[\s\S]*?\{\{affirmationTitle\}\}[\s\S]*?<\/w:p>/);
+    expect(aoDoc).toMatch(/<w:p[\s\S]*?<w:pageBreakBefore\/>[\s\S]*?CERTIFICATE OF MAILING[\s\S]*?<\/w:p>/);
+    expectNoSpacerParagraphBefore(aoDoc, "{{affirmationTitle}}");
+    expectNoSpacerParagraphBefore(aoDoc, "CERTIFICATE OF MAILING");
 
     const versionMap = JSON.parse(await readFile(versionsPath, "utf-8"));
     expect(typeof versionMap["ho-standard"]).toBe("number");

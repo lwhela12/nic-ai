@@ -82,7 +82,7 @@ describe("docs front-matter DOCX flow", () => {
     expect(body.docxPath).toBeNull();
     expect(body.docxMtimeMs).toBeNull();
 
-    const previewPath = join(caseFolder, ".ai_tool", "front-matter-preview.pdf");
+    const previewPath = join(caseFolder, ".ai_tool", "working-docs", "front-matter-preview.pdf");
     const previewBytes = await readFile(previewPath);
     expect(previewBytes.length).toBeGreaterThan(0);
   });
@@ -95,7 +95,7 @@ describe("docs front-matter DOCX flow", () => {
     await saveTeamState(firmRoot, seedTeam(authEmail));
 
     const app = await createAuthedDocsApp(authEmail);
-    const relativePath = ".ai_tool/front-matter-working.docx";
+    const relativePath = ".ai_tool/working-docs/front-matter-working.docx";
     const fullPath = join(caseFolder, relativePath);
     await mkdir(dirname(fullPath), { recursive: true });
     await writeFile(fullPath, "v1", "utf-8");
