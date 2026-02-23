@@ -33,14 +33,20 @@ const MODEL_PRIMARY = "openai/gpt-oss-120b";
 const MODEL_FALLBACK = "openai/gpt-oss-20b";
 const CONCURRENCY = 5;
 
-const SYSTEM_PROMPT = `You are a classifier for law firm knowledge base sections. Given a section title and content, output a JSON object with exactly these fields:
+const SYSTEM_PROMPT = `You are a classifier for law firm knowledge base sections.
 
-- "topics": array of 2-6 short lowercase kebab-case topic tags (e.g. "document-ordering", "hearing-procedures", "medical-records")
-- "applies_to": array of workflow identifiers this section provides SUBSTANTIVE GUIDANCE for. Only include a workflow if this section contains detailed instructions, rules, or procedures for that workflow — not if it merely mentions the workflow in passing.
-  Valid values: ${APPLIES_TO_ENUM.join(", ")}
-- "summary": a single sentence (max 120 chars) describing what this section is FOR — what a practitioner would use it to accomplish.
+Output only plain text in this exact format:
 
-Output ONLY valid JSON, no markdown fences, no explanation.`;
+topics: <comma-separated tags>
+applies_to: <comma-separated workflow ids>
+summary: <single sentence summary>
+
+- topics must be 2-6 short lowercase kebab-case tags (e.g. document-ordering, hearing-procedures, medical-records)
+- applies_to must be one or more values from this list only:
+  ${APPLIES_TO_ENUM.join(", ")}
+- summary is one short sentence (max 120 chars) explaining what this section is for
+
+Use only these three lines. No markdown fences, no JSON, no extra fields.`;
 
 async function callGroq(
   title: string,
@@ -52,13 +58,117 @@ async function callGroq(
     model,
     temperature: 0,
     max_tokens: 300,
-    response_format: { type: "json_object" },
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: `Section title: ${title}\n\nContent:\n${content}` },
     ],
   });
   return response.choices?.[0]?.message?.content || "";
+}
+
+function getGroqErrorDetails(err: unknown): { code?: string; message?: string; failedGeneration?: string } {
+  const candidate = err as {
+    error?: { code?: string; message?: string; failed_generation?: string };
+    code?: string;
+    message?: string;
+  };
+  return {
+    code: candidate?.error?.code || candidate?.code,
+    message: candidate?.error?.message || candidate?.message,
+    failedGeneration: candidate?.error?.failed_generation,
+  };
+}
+
+function splitCommaList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function parseTagPayload(raw: string): {
+  topics: string[];
+  applies_to: string[];
+  summary: string;
+} {
+  const sanitized = raw.replace(/```[a-zA-Z]*\s*$/gm, "").replace(/```$/gm, "").trim();
+  const lines = sanitized.split(/\r?\n/);
+  const buckets: Record<"topics" | "applies_to" | "summary", string[]> = {
+    topics: [],
+    applies_to: [],
+    summary: [],
+  };
+  let current: keyof typeof buckets | null = null;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (current === "summary") current = null;
+      continue;
+    }
+
+    const headingMatch = trimmed.match(
+      /^(topics|applies_to|summary)\s*:\s*(.*)$/i
+    );
+    if (headingMatch) {
+      const key = headingMatch[1].toLowerCase() as keyof typeof buckets;
+      current = key;
+      const initial = headingMatch[2].trim();
+      if (initial) buckets[key].push(initial);
+      continue;
+    }
+
+    const bullet = trimmed.match(/^[-*•]\s*(.+)$/);
+    if (bullet && current && current !== "summary") {
+      buckets[current].push(bullet[1].trim());
+      continue;
+    }
+
+    if (current === "summary") {
+      buckets.summary.push(trimmed);
+    }
+  }
+
+  const topics = splitCommaList(buckets.topics.join(","))
+    .filter((topic) => topic.length > 0)
+    .slice(0, 8);
+
+  const applies_to = splitCommaList(buckets.applies_to.join(","))
+    .filter((value) => (APPLIES_TO_ENUM as readonly string[]).includes(value))
+    .slice(0, 12);
+
+  const summary = buckets.summary.join(" ").replace(/\s+/g, " ").trim().slice(0, 200) || "";
+
+  return {
+    topics,
+    applies_to: applies_to.length > 0 ? applies_to : ["general_reference"],
+    summary,
+  };
+}
+
+async function generateTagsWithRetry(title: string, content: string): Promise<string> {
+  const attempts: string[] = [MODEL_PRIMARY, MODEL_FALLBACK];
+
+  let lastErr: unknown = null;
+  for (const model of attempts) {
+    try {
+      return await callGroq(title, content, model);
+    } catch (err) {
+      lastErr = err;
+      const details = getGroqErrorDetails(err);
+      console.warn(
+        `[knowledge-tagger] Failed to run tags model for "${title}" using ${model}:`,
+        JSON.stringify({
+          code: details.code,
+          message: details.message,
+          failed_generation: details.failedGeneration || "",
+        })
+      );
+      continue;
+    }
+  }
+
+  throw lastErr;
 }
 
 export async function generateSectionTags(
@@ -72,15 +182,8 @@ export async function generateSectionTags(
   };
 
   try {
-    let text: string;
-    try {
-      text = await callGroq(title, content, MODEL_PRIMARY);
-    } catch {
-      text = await callGroq(title, content, MODEL_FALLBACK);
-    }
-
-    const cleaned = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
-    const parsed = JSON.parse(cleaned);
+    const text = await generateTagsWithRetry(title, content);
+    const parsed = parseTagPayload(text);
 
     return {
       topics: Array.isArray(parsed.topics)
@@ -99,6 +202,17 @@ export async function generateSectionTags(
           : title,
     };
   } catch (err) {
+    const details = getGroqErrorDetails(err);
+    if (details.code) {
+      console.warn(
+        `[knowledge-tagger] Failed to generate tags for "${title}":`,
+        JSON.stringify({
+          code: details.code,
+          message: details.message,
+          failed_generation: details.failedGeneration || "",
+        })
+      );
+    }
     console.warn(
       `[knowledge-tagger] Failed to generate tags for "${title}":`,
       err instanceof Error ? err.message : err

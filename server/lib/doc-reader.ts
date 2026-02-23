@@ -11,8 +11,8 @@
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { getSDKCliOptions } from "./sdk-cli-options";
-import { join } from "path";
 import { stat } from "fs/promises";
+import { resolve, relative } from "path";
 
 // Events yielded by readDocument
 export type DocReaderEvent =
@@ -53,9 +53,13 @@ export async function* readDocument(
   documentPath: string,
   question: string
 ): AsyncGenerator<DocReaderEvent> {
+  const normalizedDocumentPath = documentPath.trim().replace(/^["']|["']$/g, "");
+  const resolvedCaseFolder = resolve(caseFolder);
+
   // Validate path
-  const fullPath = join(caseFolder, documentPath);
-  if (!fullPath.startsWith(caseFolder)) {
+  const fullPath = resolve(resolvedCaseFolder, normalizedDocumentPath);
+  const relativePath = relative(resolvedCaseFolder, fullPath);
+  if (!relativePath || relativePath.startsWith("..")) {
     yield { type: "error", content: "Error: Cannot read files outside the case folder" };
     return;
   }
@@ -77,13 +81,14 @@ export async function* readDocument(
     return;
   }
 
-  const isPdf = documentPath.toLowerCase().endsWith(".pdf");
+  const isPdf = normalizedDocumentPath.toLowerCase().endsWith(".pdf");
   yield {
     type: "status",
-    content: `Reading ${documentPath}${isPdf ? " with vision" : ""}...`
+    content: `Reading ${normalizedDocumentPath}${isPdf ? " with vision" : ""}...`
   };
 
-  const prompt = `Read the file at this absolute path: ${fullPath}
+  const prompt = `Read the file at this absolute path, exactly as written:
+${JSON.stringify(fullPath)}
 
 Then answer this question about the document:
 ${question}`;
@@ -94,7 +99,6 @@ ${question}`;
     for await (const msg of query({
       prompt,
       options: {
-        cwd: caseFolder,
         systemPrompt: SYSTEM_PROMPT,
         model: "haiku",
         allowedTools: ["Read"],
@@ -111,8 +115,8 @@ ${question}`;
         }
       }
 
-      if (msg.type === "tool_use") {
-        yield { type: "tool", content: `Reading ${documentPath}...` };
+          if (msg.type === "tool_use") {
+        yield { type: "tool", content: `Reading ${normalizedDocumentPath}...` };
       }
 
       if (msg.type === "result") {

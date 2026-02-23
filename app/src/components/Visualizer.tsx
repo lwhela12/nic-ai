@@ -17,11 +17,52 @@ interface Draft {
   type: string
   createdAt: string
   targetPath: string
+  workingDocxPath?: string
+  workingDocxMtimeMs?: number
+  previewPdfPath?: string
   generatedAt?: string
   outputPath?: string
 }
 
-type ExportStyleProfile = 'auto' | 'court_safe' | 'template'
+type ExportStyleProfile = 'court_safe' | 'd_and_o' | 'letter' | 'text_only'
+
+const EXPORT_STYLE_OPTIONS: Array<{ value: ExportStyleProfile; label: string }> = [
+  { value: 'court_safe', label: 'Court Safe' },
+  { value: 'd_and_o', label: 'D&O' },
+  { value: 'letter', label: 'Letter' },
+  { value: 'text_only', label: 'Text Only' },
+]
+
+const inferStyleProfileFromHint = (hint: string): ExportStyleProfile => {
+  const normalized = hint.toLowerCase()
+  if (
+    normalized.includes('hearing_decision') ||
+    normalized.includes('decision_and_order') ||
+    normalized.includes('decision_order') ||
+    normalized.includes('d&o') ||
+    normalized.includes('dao') ||
+    normalized.includes('decision and order') ||
+    normalized.includes('hearing officer') ||
+    normalized.includes('appeals officer')
+  ) {
+    return 'd_and_o'
+  }
+  if (
+    normalized.includes('letter') ||
+    normalized.includes('lor') ||
+    normalized.includes('letter_of_representation') ||
+    normalized.includes('demand')
+  ) {
+    return 'letter'
+  }
+  return 'court_safe'
+}
+
+const inferStyleProfileFromDraft = (draft: Draft | null): ExportStyleProfile => {
+  if (!draft) return 'court_safe'
+  const hint = [draft.type, draft.name, draft.path].filter(Boolean).join(' ')
+  return inferStyleProfileFromHint(hint)
+}
 
 interface Props {
   content: string
@@ -519,7 +560,7 @@ export default function Visualizer({
   const [activeTab, setActiveTab] = useState<'view' | 'review' | 'drafts'>('view')
   const [verifiedItems, setVerifiedItems] = useState<Set<string>>(new Set())
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
-  const [exportStyleProfile, setExportStyleProfile] = useState<ExportStyleProfile>('auto')
+  const [exportStyleProfile, setExportStyleProfile] = useState<ExportStyleProfile>('court_safe')
   const [editingItem, setEditingItem] = useState<string | null>(null)
   const [correctionValue, setCorrectionValue] = useState('')
 
@@ -530,6 +571,13 @@ export default function Visualizer({
   const [isApprovingDraft, setIsApprovingDraft] = useState(false)
   const [draftExportMenuOpen, setDraftExportMenuOpen] = useState(false)
   const [pendingEvidencePacketPath, setPendingEvidencePacketPath] = useState<string | null>(null)
+  const [draftPreviewUrl, setDraftPreviewUrl] = useState<string | null>(null)
+  const [isOpeningDraftWord, setIsOpeningDraftWord] = useState(false)
+  const [isWatchingDraftWordEdits, setIsWatchingDraftWordEdits] = useState(false)
+  const [isRefreshingDraftPreview, setIsRefreshingDraftPreview] = useState(false)
+  const draftPreviewRefreshTimeoutRef = useRef<number | null>(null)
+  const selectedDraftIdRef = useRef<string | null>(null)
+  const previousStyleProfileRef = useRef<ExportStyleProfile>(exportStyleProfile)
 
   // Bundle state
   const [canBundle, setCanBundle] = useState(false)
@@ -566,8 +614,32 @@ export default function Visualizer({
   const [documentSummarySaveError, setDocumentSummarySaveError] = useState<string | null>(null)
   const [documentSummarySaveMessage, setDocumentSummarySaveMessage] = useState<string | null>(null)
 
+  const handleExportStyleChange = useCallback((nextStyle: ExportStyleProfile) => {
+    setExportStyleProfile(nextStyle)
+  }, [])
+
   const errata: ErrataItem[] = Array.isArray(documentIndex?.errata) ? documentIndex.errata : []
   const needsReview: NeedsReviewItem[] = Array.isArray(documentIndex?.needs_review) ? documentIndex.needs_review : []
+  const normalizedFilePath = filePath ? normalizeRelativePath(filePath).toLowerCase() : ''
+  const normalizedSelectedDraftPreviewPath = selectedDraft?.previewPdfPath
+    ? normalizeRelativePath(selectedDraft.previewPdfPath).toLowerCase()
+    : ''
+  const normalizedSelectedDraftSourcePath = selectedDraft?.path
+    ? normalizeRelativePath(selectedDraft.path).toLowerCase()
+    : ''
+  const normalizedSelectedDraftDocxPath = selectedDraft?.workingDocxPath
+    ? normalizeRelativePath(selectedDraft.workingDocxPath).toLowerCase()
+    : ''
+  const isViewingSelectedDraft = Boolean(
+    selectedDraft &&
+    normalizedFilePath &&
+    (
+      normalizedFilePath === normalizedSelectedDraftPreviewPath ||
+      normalizedFilePath === normalizedSelectedDraftSourcePath ||
+      normalizedFilePath === normalizedSelectedDraftDocxPath
+    ),
+  )
+  const activeFileUrl = isViewingSelectedDraft && draftPreviewUrl ? draftPreviewUrl : fileUrl
 
   const clampPdfPageNumber = useCallback((requestedPage: number): number => {
     const maxPage = pdfNumPages ?? 1
@@ -650,6 +722,202 @@ export default function Visualizer({
     }
   }, [refreshDraftsKey, loadDrafts])
 
+  useEffect(() => {
+    if (activeTab !== 'view' || !filePath || drafts.length === 0) return
+    const normalizedFilePath = normalizeRelativePath(filePath).toLowerCase()
+    if (!normalizedFilePath) return
+
+    const matchingDraft = drafts.find((draft) => {
+      const candidates = [draft.previewPdfPath, draft.path, draft.workingDocxPath]
+      return candidates.some((candidate) => {
+        if (!candidate) return false
+        return normalizeRelativePath(candidate).toLowerCase() === normalizedFilePath
+      })
+    })
+
+    if (matchingDraft) {
+      setSelectedDraft((prev) => (prev?.id === matchingDraft.id ? prev : matchingDraft))
+    }
+  }, [activeTab, drafts, filePath])
+
+  const clearDraftPreviewRefresh = useCallback(() => {
+    if (draftPreviewRefreshTimeoutRef.current !== null) {
+      window.clearTimeout(draftPreviewRefreshTimeoutRef.current)
+      draftPreviewRefreshTimeoutRef.current = null
+    }
+  }, [])
+
+  const refreshDraftPreviewFromDocx = useCallback(async (draft: Draft) => {
+    if (!caseFolder || !draft.workingDocxPath || !draft.previewPdfPath) return
+
+    setIsRefreshingDraftPreview(true)
+    try {
+      const res = await fetch(`${apiUrl}/api/docs/preview-draft-from-docx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseFolder,
+          docxPath: draft.workingDocxPath,
+          previewPath: draft.previewPdfPath,
+        }),
+      })
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: 'Draft preview refresh failed' }))
+        throw new Error(data.error || 'Draft preview refresh failed')
+      }
+
+      const data = await res.json()
+      const refreshedPreviewPath = typeof data.previewPath === 'string' ? data.previewPath : draft.previewPdfPath
+      const refreshedDocxMtime = typeof data.docxMtimeMs === 'number' ? data.docxMtimeMs : draft.workingDocxMtimeMs
+      const refreshedUrl = `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(refreshedPreviewPath)}&t=${Date.now()}#view=FitH`
+
+      setSelectedDraft((prev) => {
+        if (!prev || prev.id !== draft.id) return prev
+        return {
+          ...prev,
+          previewPdfPath: refreshedPreviewPath,
+          workingDocxMtimeMs: refreshedDocxMtime,
+        }
+      })
+      setDraftPreviewUrl(refreshedUrl)
+      await loadDrafts()
+    } catch (err) {
+      console.error('Failed to refresh draft preview:', err)
+    } finally {
+      setIsRefreshingDraftPreview(false)
+    }
+  }, [apiUrl, caseFolder, loadDrafts])
+
+  const refreshDraftPreviewFromStyle = useCallback(async (draft: Draft, styleProfile: ExportStyleProfile) => {
+    if (!caseFolder || !draft.path) return
+
+    setIsRefreshingDraftPreview(true)
+    try {
+      const res = await fetch(`${apiUrl}/api/docs/preview-draft-from-docx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseFolder,
+          draftPath: draft.path,
+          docxPath: draft.workingDocxPath,
+          previewPath: draft.previewPdfPath,
+          styleProfile,
+        }),
+      })
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: 'Styled draft preview refresh failed' }))
+        throw new Error(data.error || 'Styled draft preview refresh failed')
+      }
+
+      const data = await res.json()
+      const refreshedPreviewPath = typeof data.previewPath === 'string' ? data.previewPath : draft.previewPdfPath
+      const refreshedDocxPath = typeof data.docxPath === 'string' ? data.docxPath : draft.workingDocxPath
+      const refreshedDocxMtime = typeof data.docxMtimeMs === 'number' ? data.docxMtimeMs : draft.workingDocxMtimeMs
+
+      setSelectedDraft((prev) => {
+        if (!prev || prev.id !== draft.id) return prev
+        return {
+          ...prev,
+          workingDocxPath: refreshedDocxPath,
+          previewPdfPath: refreshedPreviewPath,
+          workingDocxMtimeMs: refreshedDocxMtime,
+        }
+      })
+
+      if (refreshedPreviewPath) {
+        const refreshedUrl = `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(refreshedPreviewPath)}&t=${Date.now()}#view=FitH`
+        setDraftPreviewUrl(refreshedUrl)
+      } else {
+        setDraftPreviewUrl(null)
+      }
+
+      await loadDrafts()
+    } catch (err) {
+      console.error('Failed to refresh styled draft preview:', err)
+    } finally {
+      setIsRefreshingDraftPreview(false)
+    }
+  }, [apiUrl, caseFolder, loadDrafts])
+
+  const handleEditDraftInWord = useCallback(async () => {
+    const docxPath = selectedDraft?.workingDocxPath
+    if (!caseFolder || !docxPath) return
+
+    setIsOpeningDraftWord(true)
+    try {
+      const res = await fetch(`${apiUrl}/api/docs/open-local-file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseFolder,
+          path: docxPath,
+        }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: 'Could not open Word' }))
+        throw new Error(data.error || 'Could not open Word')
+      }
+      setIsWatchingDraftWordEdits(true)
+    } catch (err) {
+      console.error('Failed to open draft in Word:', err)
+    } finally {
+      setIsOpeningDraftWord(false)
+    }
+  }, [apiUrl, caseFolder, selectedDraft])
+
+  const handleViewDraft = useCallback(async (draft: Draft) => {
+    if (!caseFolder) return
+
+    setSelectedDraft(draft)
+    setActiveTab('view')
+
+    let previewPath = draft.previewPdfPath
+    let nextDraft = draft
+
+    if (!previewPath && draft.workingDocxPath) {
+      setIsRefreshingDraftPreview(true)
+      try {
+        const res = await fetch(`${apiUrl}/api/docs/preview-draft-from-docx`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            caseFolder,
+            docxPath: draft.workingDocxPath,
+            previewPath: draft.workingDocxPath.replace(/\.docx$/i, '.preview.pdf'),
+          }),
+        })
+
+        if (res.ok) {
+          const data = await res.json()
+          previewPath = typeof data.previewPath === 'string' ? data.previewPath : previewPath
+          nextDraft = {
+            ...draft,
+            previewPdfPath: previewPath,
+            workingDocxMtimeMs: typeof data.docxMtimeMs === 'number' ? data.docxMtimeMs : draft.workingDocxMtimeMs,
+          }
+          setSelectedDraft(nextDraft)
+          await loadDrafts()
+        }
+      } catch (err) {
+        console.error('Failed to generate draft preview:', err)
+      } finally {
+        setIsRefreshingDraftPreview(false)
+      }
+    }
+
+    if (previewPath) {
+      setDraftPreviewUrl(
+        `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(previewPath)}&t=${Date.now()}#view=FitH`,
+      )
+      onOpenFilePath?.(previewPath)
+      return
+    }
+
+    onOpenFilePath?.(nextDraft.path)
+  }, [apiUrl, caseFolder, loadDrafts, onOpenFilePath])
+
   const handleDuplicatePacketDraft = useCallback(async (draftId: string) => {
     if (!caseFolder) return
     try {
@@ -687,31 +955,138 @@ export default function Visualizer({
     if (!evidencePacketPath) return
     setPendingEvidencePacketPath(evidencePacketPath)
     setSelectedDraft(null)
-    setDraftContent('')
     setActiveTab('drafts')
   }, [evidencePacketPath, evidencePacketVersion])
 
-  // Load draft content when selected
+  // Track currently selected draft preview metadata
   useEffect(() => {
     if (!selectedDraft || !caseFolder) {
-      setDraftContent('')
+      selectedDraftIdRef.current = null
+      setDraftPreviewUrl(null)
+      setIsWatchingDraftWordEdits(false)
+      clearDraftPreviewRefresh()
       return
     }
 
-    const loadDraftContent = async () => {
+    const isNewDraftSelection = selectedDraftIdRef.current !== selectedDraft.id
+    if (isNewDraftSelection) {
+      setIsWatchingDraftWordEdits(false)
+      clearDraftPreviewRefresh()
+    }
+    selectedDraftIdRef.current = selectedDraft.id
+
+    if (selectedDraft.previewPdfPath) {
+      setDraftPreviewUrl(
+        `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(selectedDraft.previewPdfPath)}&t=${Date.now()}#view=FitH`,
+      )
+    } else {
+      setDraftPreviewUrl(null)
+    }
+  }, [selectedDraft, caseFolder, apiUrl, clearDraftPreviewRefresh])
+
+  useEffect(() => {
+    if (selectedDraft) {
+      const inferredDraftStyle = inferStyleProfileFromDraft(selectedDraft)
+      setExportStyleProfile((current) => (current === inferredDraftStyle ? current : inferredDraftStyle))
+      return
+    }
+
+    const inferredDocumentStyle = inferStyleProfileFromHint(`${fileName} ${filePath || ''}`)
+    setExportStyleProfile((current) => (current === inferredDocumentStyle ? current : inferredDocumentStyle))
+  }, [selectedDraft?.id, selectedDraft?.type, fileName, filePath])
+
+  useEffect(() => {
+    if (previousStyleProfileRef.current === exportStyleProfile) return
+    previousStyleProfileRef.current = exportStyleProfile
+    if (activeTab !== 'view' || !selectedDraft || !isViewingSelectedDraft) return
+    void refreshDraftPreviewFromStyle(selectedDraft, exportStyleProfile)
+  }, [activeTab, exportStyleProfile, isViewingSelectedDraft, refreshDraftPreviewFromStyle, selectedDraft])
+
+  useEffect(() => {
+    return () => {
+      clearDraftPreviewRefresh()
+    }
+  }, [clearDraftPreviewRefresh])
+
+  useEffect(() => {
+    if (activeTab !== 'view') {
+      setIsWatchingDraftWordEdits(false)
+      clearDraftPreviewRefresh()
+    }
+  }, [activeTab, clearDraftPreviewRefresh])
+
+  useEffect(() => {
+    if (activeTab === 'drafts') {
+      setSelectedDraft(null)
+      setDraftExportMenuOpen(false)
+      setDraftContent('')
+    }
+  }, [activeTab])
+
+  useEffect(() => {
+    if (!isWatchingDraftWordEdits || activeTab !== 'view' || !selectedDraft) return
+    const docxPath = selectedDraft.workingDocxPath
+    const previewPath = selectedDraft.previewPdfPath
+    if (!docxPath || !previewPath || !caseFolder) return
+
+    let disposed = false
+    const pollMtime = async () => {
+      if (disposed || isRefreshingDraftPreview) return
       try {
-        const res = await fetch(`${apiUrl}/api/docs/read?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(selectedDraft.path)}`)
-        if (res.ok) {
-          const data = await res.json()
-          setDraftContent(data.content || '')
+        const res = await fetch(
+          `${apiUrl}/api/docs/file-mtime?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(docxPath)}`,
+        )
+        if (!res.ok) return
+        const data = await res.json()
+        if (!data.exists || typeof data.mtimeMs !== 'number') return
+
+        const knownMtime = selectedDraft.workingDocxMtimeMs
+        if (typeof knownMtime === 'number' && data.mtimeMs <= knownMtime) {
+          return
         }
-      } catch (err) {
-        console.error('Failed to load draft content:', err)
+
+        setSelectedDraft((prev) => {
+          if (!prev || prev.id !== selectedDraft.id) return prev
+          return {
+            ...prev,
+            workingDocxMtimeMs: data.mtimeMs,
+          }
+        })
+
+        clearDraftPreviewRefresh()
+        draftPreviewRefreshTimeoutRef.current = window.setTimeout(() => {
+          draftPreviewRefreshTimeoutRef.current = null
+          void refreshDraftPreviewFromDocx({
+            ...selectedDraft,
+            workingDocxPath: docxPath,
+            previewPdfPath: previewPath,
+            workingDocxMtimeMs: data.mtimeMs,
+          })
+        }, 700)
+      } catch {
+        // Keep polling while Word may still be writing.
       }
     }
 
-    loadDraftContent()
-  }, [selectedDraft, caseFolder, apiUrl])
+    void pollMtime()
+    const intervalId = window.setInterval(() => {
+      void pollMtime()
+    }, 2000)
+
+    return () => {
+      disposed = true
+      window.clearInterval(intervalId)
+    }
+  }, [
+    activeTab,
+    apiUrl,
+    caseFolder,
+    clearDraftPreviewRefresh,
+    isRefreshingDraftPreview,
+    isWatchingDraftWordEdits,
+    refreshDraftPreviewFromDocx,
+    selectedDraft,
+  ])
 
   // Check bundle status when a demand letter draft is selected
   useEffect(() => {
@@ -756,7 +1131,7 @@ export default function Visualizer({
     setPdfPageInput('1')
     setPdfNumPages(null)
     setPdfScale(1.0)
-  }, [fileUrl])
+  }, [activeFileUrl])
 
   useEffect(() => {
     setPdfPageInput(String(pdfPageNumber))
@@ -774,7 +1149,7 @@ export default function Visualizer({
 
     resizeObserver.observe(pdfContainerRef.current)
     return () => resizeObserver.disconnect()
-  }, [fileUrl])
+  }, [activeFileUrl])
 
   useEffect(() => {
     if (!pageLayerRef.current) {
@@ -793,7 +1168,7 @@ export default function Visualizer({
 
     observer.observe(pageLayerRef.current)
     return () => observer.disconnect()
-  }, [fileUrl, pdfPageNumber, pdfScale, pdfContainerWidth])
+  }, [activeFileUrl, pdfPageNumber, pdfScale, pdfContainerWidth])
 
   useEffect(() => {
     setPiiFindings([])
@@ -1212,7 +1587,7 @@ export default function Visualizer({
     }
   }
 
-  const buildExportUrl = useCallback((path: string, format: 'md' | 'docx' | 'pdf') => {
+  const buildExportUrl = useCallback((path: string, format: 'md' | 'docx' | 'pdf' | 'txt') => {
     const params = new URLSearchParams({
       case: caseFolder,
       path,
@@ -1222,7 +1597,7 @@ export default function Visualizer({
     return `${apiUrl}/api/docs/download?${params.toString()}`
   }, [apiUrl, caseFolder, exportStyleProfile])
 
-  const handleExportDraft = (format: 'md' | 'docx' | 'pdf') => {
+  const handleExportDraft = (format: 'md' | 'docx' | 'pdf' | 'txt') => {
     setDraftExportMenuOpen(false)
     if (!selectedDraft || !caseFolder) return
 
@@ -1318,8 +1693,8 @@ export default function Visualizer({
   }
 
   const handleDownload = () => {
-    if (fileUrl) {
-      window.open(fileUrl, '_blank')
+    if (activeFileUrl) {
+      window.open(activeFileUrl, '_blank')
       return
     }
     if (!content) return
@@ -1333,7 +1708,7 @@ export default function Visualizer({
     URL.revokeObjectURL(url)
   }
 
-  const handleExport = (format: 'md' | 'docx' | 'pdf') => {
+  const handleExport = (format: 'md' | 'docx' | 'pdf' | 'txt') => {
     setExportMenuOpen(false)
     if (!docPath || !caseFolder) return
 
@@ -1434,7 +1809,11 @@ export default function Visualizer({
           Review {totalReviewItems > 0 && <span className={`ml-1.5 text-xs px-1.5 py-0.5 rounded-full ${needsReview.length > 0 ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>{totalReviewItems}</span>}
         </button>
         <button
-          onClick={() => setActiveTab('drafts')}
+          onClick={() => {
+            setSelectedDraft(null)
+            setDraftContent('')
+            setActiveTab('drafts')
+          }}
           className={`flex-1 px-6 py-3 text-sm font-medium transition-colors ${
             activeTab === 'drafts'
               ? 'text-brand-900 border-b-2 border-brand-900 bg-white'
@@ -1448,7 +1827,7 @@ export default function Visualizer({
       {/* Content */}
       {activeTab === 'drafts' ? (
         <div className="flex-1 overflow-auto">
-          {selectedDraft ? (
+          {selectedDraft && String(activeTab) === 'view' ? (
             // Draft preview view
             <div className="flex flex-col h-full">
               {/* Draft header */}
@@ -1468,15 +1847,25 @@ export default function Visualizer({
 
               {/* Draft content */}
               <div className="flex-1 overflow-auto p-6">
-                <div className="prose prose-sm max-w-none
-                                prose-headings:my-3 prose-headings:text-brand-900
-                                prose-p:my-2 prose-ul:my-2 prose-li:my-0.5
-                                prose-table:border-collapse prose-th:border prose-th:border-surface-200
-                                prose-th:bg-surface-50 prose-th:px-3 prose-th:py-2
-                                prose-td:border prose-td:border-surface-200 prose-td:px-3 prose-td:py-2
-                                prose-a:text-accent-600">
-                  <Markdown remarkPlugins={[remarkGfm]}>{draftContent}</Markdown>
-                </div>
+                {draftPreviewUrl ? (
+                  <div className="h-full min-h-[400px] border border-surface-200 rounded-xl overflow-hidden bg-surface-100">
+                    <iframe
+                      title={`${selectedDraft.name} PDF preview`}
+                      src={draftPreviewUrl}
+                      className="w-full h-full"
+                    />
+                  </div>
+                ) : (
+                  <div className="prose prose-sm max-w-none
+                                  prose-headings:my-3 prose-headings:text-brand-900
+                                  prose-p:my-2 prose-ul:my-2 prose-li:my-0.5
+                                  prose-table:border-collapse prose-th:border prose-th:border-surface-200
+                                  prose-th:bg-surface-50 prose-th:px-3 prose-th:py-2
+                                  prose-td:border prose-td:border-surface-200 prose-td:px-3 prose-td:py-2
+                                  prose-a:text-accent-600">
+                    <Markdown remarkPlugins={[remarkGfm]}>{draftContent}</Markdown>
+                  </div>
+                )}
               </div>
 
               {/* Draft actions */}
@@ -1485,12 +1874,12 @@ export default function Visualizer({
                   Style
                   <select
                     value={exportStyleProfile}
-                    onChange={(e) => setExportStyleProfile(e.target.value as ExportStyleProfile)}
+                    onChange={(e) => handleExportStyleChange(e.target.value as ExportStyleProfile)}
                     className="px-2 py-1.5 text-xs rounded border border-surface-300 bg-white text-brand-700"
                   >
-                    <option value="auto">Auto</option>
-                    <option value="court_safe">Court-safe</option>
-                    <option value="template">Template-matched</option>
+                    {EXPORT_STYLE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
                   </select>
                 </label>
                 {/* Export dropdown */}
@@ -1534,6 +1923,17 @@ export default function Visualizer({
                           </span>
                           PDF
                         </button>
+                        <button
+                          onClick={() => handleExportDraft('txt')}
+                          className="w-full px-3 py-2 text-left text-sm text-brand-700 hover:bg-surface-100 flex items-center gap-2"
+                        >
+                          <span className="w-4 h-4 text-brand-600">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M4 6h16M4 12h16M4 18h10"/>
+                            </svg>
+                          </span>
+                          Text (.txt)
+                        </button>
                         <hr className="my-1 border-surface-200" />
                         <button
                           onClick={() => handleExportDraft('md')}
@@ -1550,6 +1950,25 @@ export default function Visualizer({
                     </>
                   )}
                 </div>
+
+                {selectedDraft.workingDocxPath && (
+                  <button
+                    onClick={handleEditDraftInWord}
+                    disabled={isOpeningDraftWord}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium
+                               bg-accent-600 text-white hover:bg-accent-700
+                               rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    {isOpeningDraftWord ? 'Opening Word...' : 'Edit in Word'}
+                  </button>
+                )}
+
+                {isRefreshingDraftPreview && (
+                  <span className="text-xs text-brand-500">Refreshing preview...</span>
+                )}
+                {isWatchingDraftWordEdits && !isRefreshingDraftPreview && (
+                  <span className="text-xs text-emerald-600">Watching for Word saves...</span>
+                )}
 
                 <div className="flex-1" />
 
@@ -1739,7 +2158,7 @@ export default function Visualizer({
                     return (
                       <button
                         key={draft.id}
-                        onClick={() => setSelectedDraft(draft)}
+                        onClick={() => { void handleViewDraft(draft) }}
                         className="w-full text-left p-4 bg-white rounded-xl border border-surface-200
                                    hover:border-accent-300 hover:bg-accent-50 transition-all"
                       >
@@ -1754,10 +2173,8 @@ export default function Visualizer({
                               → {draft.targetPath}
                             </p>
                           </div>
-                          <span className="text-brand-300">
-                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
-                            </svg>
+                          <span className="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-lg bg-white border border-surface-200 text-brand-600">
+                            View
                           </span>
                         </div>
                       </button>
@@ -1771,7 +2188,7 @@ export default function Visualizer({
       ) : activeTab === 'view' ? (
         <div className="flex-1 overflow-auto flex flex-col">
           {/* Determine what to show based on viewMode */}
-          {(viewMode === 'document' && fileUrl) || (viewMode === 'summary' && !content && fileUrl && !hasIndexedSummaryEditor) ? (
+          {(viewMode === 'document' && activeFileUrl) || (viewMode === 'summary' && !content && activeFileUrl && !hasIndexedSummaryEditor) ? (
             <>
               {/* File viewing header */}
               <div className="px-4 py-3 border-b border-surface-200 flex items-center justify-between bg-surface-50">
@@ -1792,9 +2209,110 @@ export default function Visualizer({
                       Summary
                     </button>
                   )}
+                  {isViewingSelectedDraft && selectedDraft && (
+                    <>
+                      <label className="inline-flex items-center gap-1.5 text-xs text-brand-600">
+                        Style
+                        <select
+                          value={exportStyleProfile}
+                          onChange={(e) => handleExportStyleChange(e.target.value as ExportStyleProfile)}
+                          className="px-2 py-1 text-xs rounded border border-surface-300 bg-white text-brand-700"
+                        >
+                          {EXPORT_STYLE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="relative">
+                        <button
+                          onClick={() => setDraftExportMenuOpen(!draftExportMenuOpen)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                     bg-white border border-surface-200 hover:bg-surface-100
+                                     rounded-lg text-brand-700 transition-colors"
+                        >
+                          <ArrowDownTrayIcon />
+                          Export
+                          <ChevronDownIcon />
+                        </button>
+                        {draftExportMenuOpen && (
+                          <>
+                            <div
+                              className="fixed inset-0 z-10"
+                              onClick={() => setDraftExportMenuOpen(false)}
+                            />
+                            <div className="absolute right-0 mt-1 w-40 bg-white rounded-lg shadow-lg border border-surface-200 py-1 z-20">
+                              <button
+                                onClick={() => handleExportDraft('docx')}
+                                className="w-full px-3 py-2 text-left text-sm text-brand-700 hover:bg-surface-100"
+                              >
+                                Word (.docx)
+                              </button>
+                              <button
+                                onClick={() => handleExportDraft('pdf')}
+                                className="w-full px-3 py-2 text-left text-sm text-brand-700 hover:bg-surface-100"
+                              >
+                                PDF
+                              </button>
+                              <button
+                                onClick={() => handleExportDraft('txt')}
+                                className="w-full px-3 py-2 text-left text-sm text-brand-700 hover:bg-surface-100"
+                              >
+                                Text (.txt)
+                              </button>
+                              <hr className="my-1 border-surface-200" />
+                              <button
+                                onClick={() => handleExportDraft('md')}
+                                className="w-full px-3 py-2 text-left text-sm text-brand-500 hover:bg-surface-100"
+                              >
+                                Markdown
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                      {selectedDraft.workingDocxPath && (
+                        <button
+                          onClick={handleEditDraftInWord}
+                          disabled={isOpeningDraftWord}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                     bg-accent-600 text-white hover:bg-accent-700
+                                     rounded-lg transition-colors disabled:opacity-50"
+                        >
+                          {isOpeningDraftWord ? 'Opening Word...' : 'Edit in Word'}
+                        </button>
+                      )}
+                      {selectedDraft.type === 'demand' && (
+                        <button
+                          onClick={handleGeneratePackage}
+                          disabled={isBundling || !canBundle}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                     bg-brand-700 text-white hover:bg-brand-800
+                                     rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          title={!canBundle ? (bundleError || 'Cannot bundle - no exhibits') : 'Bundle demand letter with exhibits'}
+                        >
+                          {isBundling ? 'Bundling...' : 'Generate Package'}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleApproveDraft(selectedDraft)}
+                        disabled={isApprovingDraft}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
+                                   bg-emerald-600 text-white hover:bg-emerald-700
+                                   rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        {isApprovingDraft ? 'Approving...' : 'Approve'}
+                      </button>
+                    </>
+                  )}
+                  {isViewingSelectedDraft && isRefreshingDraftPreview && (
+                    <span className="text-xs text-brand-500 self-center">Refreshing preview...</span>
+                  )}
+                  {isViewingSelectedDraft && isWatchingDraftWordEdits && !isRefreshingDraftPreview && (
+                    <span className="text-xs text-emerald-600 self-center">Watching for Word saves...</span>
+                  )}
                   {isPdf ? (
                     <button
-                      onClick={() => window.open(fileUrl, '_blank', 'width=1200,height=900')}
+                      onClick={() => window.open(activeFileUrl, '_blank', 'width=1200,height=900')}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
                                  bg-white border border-surface-200 hover:bg-surface-100
                                  rounded-lg text-brand-700 transition-colors"
@@ -2039,7 +2557,7 @@ export default function Visualizer({
                       <div className="absolute inset-0 overflow-auto p-4">
                         <div className="min-w-fit min-h-fit mx-auto" style={{ width: 'fit-content' }}>
                           <Document
-                            file={fileUrl}
+                            file={activeFileUrl}
                             onLoadSuccess={({ numPages }) => {
                               setPdfNumPages(numPages)
                               setPdfPageNumber((currentPage) => Math.min(numPages, Math.max(1, currentPage)))
@@ -2053,7 +2571,7 @@ export default function Visualizer({
                               <div className="flex flex-col items-center justify-center h-64 gap-3">
                                 <div className="text-red-500">Failed to load PDF</div>
                                 <button
-                                  onClick={() => window.open(fileUrl, '_blank')}
+                                  onClick={() => window.open(activeFileUrl, '_blank')}
                                   className="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800 text-sm"
                                 >
                                   Open in new tab
@@ -2143,7 +2661,7 @@ export default function Visualizer({
                 ) : isImage ? (
                   <div className="absolute inset-0 flex items-center justify-center p-6">
                     <img
-                      src={fileUrl}
+                      src={activeFileUrl}
                       alt={fileName}
                       className="max-w-full max-h-full object-contain rounded-lg shadow-card"
                     />
@@ -2151,7 +2669,7 @@ export default function Visualizer({
                 ) : (
                   <div className="absolute inset-0 flex items-center justify-center">
                     <button
-                      onClick={() => window.open(fileUrl, '_blank')}
+                      onClick={() => window.open(activeFileUrl, '_blank')}
                       className="px-6 py-3 bg-brand-900 text-white rounded-xl hover:bg-brand-800
                                  font-medium transition-colors flex items-center gap-2"
                     >
@@ -2162,7 +2680,7 @@ export default function Visualizer({
                 )}
               </div>
             </>
-          ) : hasIndexedSummaryEditor || (viewMode === 'summary' && content) || (viewMode === 'document' && !fileUrl && content) ? (
+          ) : hasIndexedSummaryEditor || (viewMode === 'summary' && content) || (viewMode === 'document' && !activeFileUrl && content) ? (
             <>
               {/* Summary header */}
               <div className="px-4 py-3 border-b border-surface-200 flex items-center justify-between bg-surface-50">
@@ -2212,12 +2730,12 @@ export default function Visualizer({
                         Style
                         <select
                           value={exportStyleProfile}
-                          onChange={(e) => setExportStyleProfile(e.target.value as ExportStyleProfile)}
+                          onChange={(e) => handleExportStyleChange(e.target.value as ExportStyleProfile)}
                           className="px-2 py-1 text-xs rounded border border-surface-300 bg-white text-brand-700"
                         >
-                          <option value="auto">Auto</option>
-                          <option value="court_safe">Court-safe</option>
-                          <option value="template">Template-matched</option>
+                          {EXPORT_STYLE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
                         </select>
                       </label>
                       <div className="relative">
@@ -2259,6 +2777,17 @@ export default function Visualizer({
                                 </svg>
                               </span>
                               PDF
+                            </button>
+                            <button
+                              onClick={() => handleExport('txt')}
+                              className="w-full px-3 py-2 text-left text-sm text-brand-700 hover:bg-surface-100 flex items-center gap-2"
+                            >
+                              <span className="w-4 h-4 text-brand-600">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <path d="M4 6h16M4 12h16M4 18h10"/>
+                                </svg>
+                              </span>
+                              Text (.txt)
                             </button>
                             <hr className="my-1 border-surface-200" />
                             <button

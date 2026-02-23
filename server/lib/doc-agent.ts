@@ -8,13 +8,21 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { readFile, writeFile, mkdir, readdir, stat } from "fs/promises";
-import { join, dirname, relative as pathRelative } from "path";
+import { join, relative as pathRelative, extname } from "path";
 import { resolveFirmRoot } from "./year-mode";
 import { execSync } from "child_process";
 import { loadSectionsByIds } from "../routes/knowledge";
 import { extractPdfText } from "./pdftotext";
 import { extractTextFromDocx } from "./extract";
 import { generateMetaIndex, buildMetaIndexPromptView } from "./meta-index";
+import {
+  markdownToHtml,
+  htmlToDocx,
+  markdownToHearingDecisionDocx,
+  loadFirmInfo,
+  type ExportOptions,
+} from "./export";
+import { renderDocxWithLibreOfficeWithRetry } from "./evidence-packet";
 
 // Lazy client creation - API key is set by auth middleware before requests
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -45,6 +53,191 @@ export interface DocGenResult {
 }
 
 const INDEX_SLICE_MAX_CHARS = 12000;
+const WORKING_DOCS_REL_DIR = ".ai_tool/working-docs";
+
+const DEFAULT_DRAFT_FILENAME: Record<DocumentType, string> = {
+  demand_letter: "demand_letter.md",
+  case_memo: "case_memo.md",
+  settlement: "settlement_calculation.md",
+  general_letter: "letter.md",
+  decision_order: "decision_and_order.md",
+};
+
+function formatDraftName(id: string): string {
+  return id
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function inferDraftMetadata(docType: DocumentType): { type: string; targetPath: string } {
+  switch (docType) {
+    case "demand_letter":
+      return { type: "demand", targetPath: "3P/3P Demand.pdf" };
+    case "case_memo":
+      return { type: "memo", targetPath: ".ai_tool/case_memo.pdf" };
+    case "settlement":
+      return { type: "settlement", targetPath: "Settlement/Settlement Memo.pdf" };
+    case "general_letter":
+      return { type: "letter", targetPath: "letter.pdf" };
+    case "decision_order":
+      return { type: "hearing_decision", targetPath: "Litigation/Decision and Order.pdf" };
+    default:
+      return { type: "document", targetPath: "document.pdf" };
+  }
+}
+
+function mapDocTypeToExportType(docType: DocumentType): ExportOptions["documentType"] {
+  switch (docType) {
+    case "demand_letter":
+      return "demand";
+    case "case_memo":
+      return "memo";
+    case "settlement":
+      return "settlement";
+    case "general_letter":
+      return "letter";
+    case "decision_order":
+      return "hearing_decision";
+    default:
+      return "generic";
+  }
+}
+
+function sanitizeDraftFilename(rawFilename: unknown, docType: DocumentType): string {
+  const fallback = DEFAULT_DRAFT_FILENAME[docType];
+  const requested = typeof rawFilename === "string" ? rawFilename.trim() : "";
+  let filename = requested
+    ? requested.replace(/\\/g, "/").split("/").pop() || ""
+    : "";
+
+  if (!filename) {
+    filename = fallback;
+  }
+
+  filename = filename
+    .replace(/[^A-Za-z0-9._ -]/g, "_")
+    .replace(/\s+/g, "_")
+    .replace(/^_+/, "");
+
+  if (!filename) {
+    filename = fallback;
+  }
+
+  if (extname(filename).toLowerCase() !== ".md") {
+    filename = `${filename.replace(/\.[^.]*$/, "")}.md`;
+  }
+
+  return filename;
+}
+
+interface DraftArtifacts {
+  docxPath?: string;
+  previewPath?: string;
+  docxMtimeMs?: number;
+}
+
+async function buildDraftArtifacts(
+  caseFolder: string,
+  firmRoot: string,
+  draftId: string,
+  content: string,
+  docType: DocumentType
+): Promise<DraftArtifacts> {
+  const workingDocsDir = join(caseFolder, WORKING_DOCS_REL_DIR);
+  await mkdir(workingDocsDir, { recursive: true });
+
+  const docxPath = `${WORKING_DOCS_REL_DIR}/${draftId}.docx`;
+  const previewPath = `${WORKING_DOCS_REL_DIR}/${draftId}.preview.pdf`;
+  const fullDocxPath = join(caseFolder, docxPath);
+  const fullPreviewPath = join(caseFolder, previewPath);
+
+  const documentType = mapDocTypeToExportType(docType);
+  const shouldShowLetterhead = documentType === "demand" || documentType === "letter";
+  const firmInfo = await loadFirmInfo(firmRoot);
+  const docxBuffer = documentType === "hearing_decision"
+    ? await markdownToHearingDecisionDocx(content, draftId, {
+      documentType,
+      firmInfo: firmInfo || undefined,
+      showPageNumbers: true,
+    })
+    : await htmlToDocx(
+      markdownToHtml(content, {
+        documentType,
+        firmInfo: firmInfo || undefined,
+        showLetterhead: shouldShowLetterhead,
+        showPageNumbers: documentType !== "memo",
+      }),
+      draftId,
+      {
+        documentType,
+        firmInfo: firmInfo || undefined,
+        showLetterhead: shouldShowLetterhead,
+      }
+    );
+
+  await writeFile(fullDocxPath, docxBuffer);
+  const docxStats = await stat(fullDocxPath);
+  let resolvedPreviewPath: string | undefined;
+  try {
+    const previewPdfBytes = await renderDocxWithLibreOfficeWithRetry(docxBuffer, {
+      attempts: 2,
+      initialDelayMs: 100,
+    });
+    await writeFile(fullPreviewPath, previewPdfBytes);
+    resolvedPreviewPath = previewPath;
+  } catch (previewError) {
+    console.warn(
+      `[DocAgent] Draft DOCX created but PDF preview render failed for ${draftId}: ${
+        previewError instanceof Error ? previewError.message : String(previewError)
+      }`
+    );
+  }
+
+  return {
+    docxPath,
+    previewPath: resolvedPreviewPath,
+    docxMtimeMs: docxStats.mtimeMs,
+  };
+}
+
+async function upsertDraftManifestEntry(
+  caseFolder: string,
+  draftFilename: string,
+  docType: DocumentType,
+  artifacts: DraftArtifacts
+): Promise<void> {
+  const draftsDir = join(caseFolder, ".ai_tool", "drafts");
+  await mkdir(draftsDir, { recursive: true });
+
+  const manifestPath = join(draftsDir, "manifest.json");
+  let manifest: Record<string, any> = {};
+  try {
+    manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
+  } catch {
+    manifest = {};
+  }
+
+  const id = draftFilename.replace(/\.md$/i, "");
+  const existing = manifest[id] || {};
+  const inferred = inferDraftMetadata(docType);
+
+  manifest[id] = {
+    ...existing,
+    name: existing.name || formatDraftName(id),
+    type: existing.type || inferred.type,
+    targetPath: existing.targetPath || inferred.targetPath,
+    sourcePath: `.ai_tool/drafts/${draftFilename}`,
+    createdAt: existing.createdAt || new Date().toISOString(),
+    workingDocxPath: artifacts.docxPath || existing.workingDocxPath,
+    previewPdfPath: artifacts.previewPath || existing.previewPdfPath,
+    workingDocxMtimeMs:
+      typeof artifacts.docxMtimeMs === "number"
+        ? artifacts.docxMtimeMs
+        : existing.workingDocxMtimeMs,
+  };
+
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+}
 
 // Tool definitions for the document agent
 const DOC_TOOLS: Anthropic.Tool[] = [
@@ -318,8 +511,9 @@ async function executeTool(
   toolName: string,
   toolInput: Record<string, any>,
   caseFolder: string,
-  firmRoot: string
-): Promise<{ result: string; filePath?: string }> {
+  firmRoot: string,
+  docType: DocumentType
+): Promise<{ result: string; filePath?: string; previewPath?: string; docxPath?: string }> {
   try {
     switch (toolName) {
       case "read_file": {
@@ -503,18 +697,39 @@ async function executeTool(
         const draftsDir = join(caseFolder, ".ai_tool", "drafts");
         await mkdir(draftsDir, { recursive: true });
 
-        const filePath = join(draftsDir, toolInput.filename);
+        const safeFilename = sanitizeDraftFilename(toolInput.filename, docType);
+        const filePath = join(draftsDir, safeFilename);
 
         // Security check: verify path is within case folder
         if (!filePath.startsWith(caseFolder)) {
           return { result: "Error: Cannot write files outside the case folder" };
         }
 
-        await writeFile(filePath, toolInput.content);
-        const relativePath = `.ai_tool/drafts/${toolInput.filename}`;
+        const markdownContent = String(toolInput.content ?? "");
+        await writeFile(filePath, markdownContent, "utf-8");
+        const relativePath = `.ai_tool/drafts/${safeFilename}`;
+        const draftId = safeFilename.replace(/\.md$/i, "");
+
+        let artifacts: DraftArtifacts = {};
+        try {
+          artifacts = await buildDraftArtifacts(caseFolder, firmRoot, draftId, markdownContent, docType);
+        } catch (artifactError) {
+          console.warn(
+            `[DocAgent] Draft saved but artifact generation failed for ${safeFilename}: ${
+              artifactError instanceof Error ? artifactError.message : String(artifactError)
+            }`
+          );
+        }
+
+        await upsertDraftManifestEntry(caseFolder, safeFilename, docType, artifacts);
+
         return {
-          result: `Draft saved to ${relativePath}`,
-          filePath: relativePath
+          result: artifacts.previewPath
+            ? `Draft saved to ${relativePath} with DOCX and PDF preview artifacts`
+            : `Draft saved to ${relativePath}`,
+          filePath: relativePath,
+          previewPath: artifacts.previewPath,
+          docxPath: artifacts.docxPath,
         };
       }
 
@@ -524,17 +739,38 @@ async function executeTool(
         const draftsDir = join(caseFolder, ".ai_tool", "drafts");
         await mkdir(draftsDir, { recursive: true });
 
-        const filePath = join(draftsDir, toolInput.filename);
+        const safeFilename = sanitizeDraftFilename(toolInput.filename, docType);
+        const filePath = join(draftsDir, safeFilename);
 
         if (!filePath.startsWith(caseFolder)) {
           return { result: "Error: Cannot write files outside the case folder" };
         }
 
-        await writeFile(filePath, toolInput.content);
-        const relativePath = `.ai_tool/drafts/${toolInput.filename}`;
+        const markdownContent = String(toolInput.content ?? "");
+        await writeFile(filePath, markdownContent, "utf-8");
+        const relativePath = `.ai_tool/drafts/${safeFilename}`;
+        const draftId = safeFilename.replace(/\.md$/i, "");
+
+        let artifacts: DraftArtifacts = {};
+        try {
+          artifacts = await buildDraftArtifacts(caseFolder, firmRoot, draftId, markdownContent, docType);
+        } catch (artifactError) {
+          console.warn(
+            `[DocAgent] Draft saved but artifact generation failed for ${safeFilename}: ${
+              artifactError instanceof Error ? artifactError.message : String(artifactError)
+            }`
+          );
+        }
+
+        await upsertDraftManifestEntry(caseFolder, safeFilename, docType, artifacts);
+
         return {
-          result: `Draft saved to ${relativePath}`,
-          filePath: relativePath
+          result: artifacts.previewPath
+            ? `Draft saved to ${relativePath} with DOCX and PDF preview artifacts`
+            : `Draft saved to ${relativePath}`,
+          filePath: relativePath,
+          previewPath: artifacts.previewPath,
+          docxPath: artifacts.docxPath,
         };
       }
 
@@ -638,6 +874,7 @@ IMPORTANT:
 - Include proper dates, amounts, and details
 - Write the complete document - do not leave placeholders unfilled
 - Save the document when complete using write_draft
+- write_draft filename must end in .md (never .txt or .docx)
 
 ## AVAILABLE TOOLS
 
@@ -658,7 +895,7 @@ export async function* generateDocument(
   caseFolder: string,
   docType: DocumentType,
   userPrompt: string
-): AsyncGenerator<{ type: string; content?: string; filePath?: string; done?: boolean }> {
+): AsyncGenerator<{ type: string; content?: string; filePath?: string; previewPath?: string; docxPath?: string; done?: boolean }> {
   const firmRoot = resolveFirmRoot(caseFolder);
 
   yield { type: "status", content: "Loading case data and templates..." };
@@ -692,6 +929,8 @@ Please generate the requested document. Start by reviewing the case context abov
   let iterations = 0;
   const maxIterations = 10;
   let finalFilePath: string | undefined;
+  let finalPreviewPath: string | undefined;
+  let finalDocxPath: string | undefined;
 
   while (iterations < maxIterations) {
     iterations++;
@@ -736,15 +975,22 @@ Please generate the requested document. Start by reviewing the case context abov
     for (const toolUse of toolUses) {
       yield { type: "tool", content: `Using ${toolUse.name}...` };
 
-      const { result, filePath } = await executeTool(
+      const { result, filePath, previewPath, docxPath } = await executeTool(
         toolUse.name,
         toolUse.input,
         caseFolder,
-        firmRoot
+        firmRoot,
+        docType
       );
 
       if (filePath) {
         finalFilePath = filePath;
+      }
+      if (previewPath) {
+        finalPreviewPath = previewPath;
+      }
+      if (docxPath) {
+        finalDocxPath = docxPath;
       }
 
       toolResults.push({
@@ -778,7 +1024,9 @@ Please generate the requested document. Start by reviewing the case context abov
   yield {
     type: "done",
     done: true,
-    filePath: finalFilePath
+    filePath: finalFilePath,
+    previewPath: finalPreviewPath,
+    docxPath: finalDocxPath,
   };
 }
 

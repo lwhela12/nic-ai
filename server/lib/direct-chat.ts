@@ -2671,7 +2671,7 @@ export async function* directChat(
   message: string,
   history: ChatMessage[] = [],
   options?: { lockOwner?: string; lockDisplayName?: string }
-): AsyncGenerator<{ type: string; content?: string; tool?: string; done?: boolean; usage?: any; filePath?: string; view?: AgentDocumentView; incomplete?: boolean; reason?: string }> {
+): AsyncGenerator<{ type: string; content?: string; tool?: string; done?: boolean; usage?: any; filePath?: string; previewPath?: string; docxPath?: string; view?: AgentDocumentView; incomplete?: boolean; reason?: string }> {
 
   // Build context and include it in the system prompt
   const context = await buildContext(caseFolder);
@@ -2710,6 +2710,8 @@ export async function* directChat(
   const MAX_TOOL_ITERATIONS = 16;
   let iterations = 0;
   let generatedFilePath: string | undefined;
+  let generatedPreviewPath: string | undefined;
+  let generatedDocxPath: string | undefined;
   let hitIterationLimit = false;
 
   try {
@@ -2796,6 +2798,8 @@ export async function* directChat(
         yield { type: "delegating", content: `Generating ${docTypeName}...` };
 
         let filePath: string | undefined;
+        let previewPath: string | undefined;
+        let docxPath: string | undefined;
         for await (const event of generateDocument(caseFolder, docType, instructions)) {
           if (event.type === "status") {
             yield { type: "status", content: event.content };
@@ -2805,15 +2809,21 @@ export async function* directChat(
             yield { type: "text", content: event.content };
           } else if (event.type === "done") {
             filePath = event.filePath;
+            previewPath = event.previewPath;
+            docxPath = event.docxPath;
           }
         }
 
         generatedFilePath = filePath;
+        generatedPreviewPath = previewPath;
+        generatedDocxPath = docxPath;
         toolResults.push({
           type: "tool_result",
           tool_use_id: toolUse.id,
           content: filePath
-            ? `Document successfully generated and saved to ${filePath}`
+            ? `Document successfully generated and saved to ${filePath}${
+                previewPath ? ` (preview: ${previewPath})` : ""
+              }`
             : "Document generation completed but no file was saved"
         });
       } else if (toolUse.name === "read_document") {
@@ -2930,6 +2940,8 @@ export async function* directChat(
       type: "done",
       done: true,
       filePath: generatedFilePath,
+      previewPath: generatedPreviewPath,
+      docxPath: generatedDocxPath,
       incomplete: hitIterationLimit,
       reason: hitIterationLimit ? "max_tool_iterations" : undefined,
     };

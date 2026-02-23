@@ -777,6 +777,8 @@ app.post("/chat-v2", async (c) => {
               success: true,
               usage: event.usage,
               filePath: event.filePath,
+              previewPath: event.previewPath,
+              docxPath: event.docxPath,
               incomplete: event.incomplete,
               reason: event.reason,
             }),

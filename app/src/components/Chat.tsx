@@ -794,6 +794,11 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                   onDraftsMayHaveChanged()
                 }
 
+                const generatedPreviewPath = typeof data.previewPath === 'string' ? data.previewPath.trim() : ''
+                if (generatedPreviewPath && onShowFile) {
+                  onShowFile(generatedPreviewPath)
+                }
+
                 // Trigger Drafts takeover flow when evidence packet tools create a file.
                 const evidencePacketTools = ['build_evidence_packet', 'create_evidence_packet']
                 const hasEvidencePacketWrite = toolsUsed.some(t => evidencePacketTools.some(tool => t.includes(tool)))

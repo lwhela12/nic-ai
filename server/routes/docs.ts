@@ -8,9 +8,11 @@ import { promisify } from "util";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import {
   markdownToHtml,
+  markdownToPlainText,
+  markdownToPlainTextDocx,
   htmlToDocx,
   htmlToPdf,
-  markdownToHearingDecisionPdf,
+  markdownToHearingDecisionDocx,
   loadFirmInfo,
 } from "../lib/export";
 import type { ExportOptions, ExportStyleProfile } from "../lib/export";
@@ -47,14 +49,63 @@ function isCourtCriticalDocumentType(documentType?: ExportOptions["documentType"
   return documentType === "letter" || documentType === "hearing_decision";
 }
 
-function resolveStyleProfile(
-  documentType: ExportOptions["documentType"],
+interface ResolvedExportStyle {
+  documentType: ExportOptions["documentType"];
+  styleProfile: ExportStyleProfile;
+}
+
+function resolveExportStyle(
+  inferredDocumentType: ExportOptions["documentType"],
   requested?: unknown
-): ExportStyleProfile {
-  if (requested === "court_safe" || requested === "template" || requested === "auto") {
-    if (requested !== "auto") return requested;
+): ResolvedExportStyle {
+  const normalized = typeof requested === "string" ? requested.trim().toLowerCase() : "";
+
+  if (
+    normalized === "d_and_o" ||
+    normalized === "d&o" ||
+    normalized === "dao" ||
+    normalized === "decision_order" ||
+    normalized === "decision_and_order"
+  ) {
+    return {
+      documentType: "hearing_decision",
+      styleProfile: "court_safe",
+    };
   }
-  return isCourtCriticalDocumentType(documentType) ? "court_safe" : "template";
+
+  if (normalized === "letter") {
+    return {
+      documentType: "letter",
+      styleProfile: "court_safe",
+    };
+  }
+
+  if (normalized === "court_safe") {
+    return {
+      documentType: inferredDocumentType,
+      styleProfile: "court_safe",
+    };
+  }
+
+  if (normalized === "template") {
+    return {
+      documentType: inferredDocumentType,
+      styleProfile: "template",
+    };
+  }
+
+  if (normalized === "text_only" || normalized === "text-only" || normalized === "plain_text" || normalized === "plain") {
+    return {
+      documentType: "generic",
+      styleProfile: "text_only",
+    };
+  }
+
+  // Legacy fallback for auto/unknown values.
+  return {
+    documentType: inferredDocumentType,
+    styleProfile: isCourtCriticalDocumentType(inferredDocumentType) ? "court_safe" : "template",
+  };
 }
 
 // Helper to load template styles from .ai_tool/template-styles.json
@@ -62,7 +113,7 @@ async function loadTemplateStyles(
   firmRoot: string,
   styleProfile: ExportStyleProfile
 ): Promise<DocxStyles | undefined> {
-  if (styleProfile === "court_safe") {
+  if (styleProfile === "court_safe" || styleProfile === "text_only") {
     return undefined;
   }
 
@@ -341,6 +392,9 @@ interface Draft {
   type: string;
   createdAt: string;
   targetPath: string;
+  workingDocxPath?: string;
+  workingDocxMtimeMs?: number;
+  previewPdfPath?: string;
   generatedAt?: string;
   outputPath?: string;
 }
@@ -510,8 +564,11 @@ app.post("/export", async (c) => {
 
     // Infer document type from path if not provided
     const inferredType = documentType || inferTypeFromPath(sourcePath);
-    const resolvedStyleProfile = resolveStyleProfile(inferredType, styleProfile);
-    console.log(`[Export] caseFolder=${caseFolder}, sourcePath=${sourcePath}, documentType=${inferredType}`);
+    const {
+      documentType: resolvedDocumentType,
+      styleProfile: resolvedStyleProfile,
+    } = resolveExportStyle(inferredType, styleProfile);
+    console.log(`[Export] caseFolder=${caseFolder}, sourcePath=${sourcePath}, documentType=${resolvedDocumentType}`);
 
     // Load firm info if firmRoot provided (or try parent of caseFolder)
     const firmInfoRoot = firmRoot || resolveFirmRoot(caseFolder);
@@ -524,19 +581,24 @@ app.post("/export", async (c) => {
     // Build export options
     // Show letterhead by default for demands and letters, or if explicitly requested
     // Don't show for memos (internal documents)
-    const shouldShowLetterhead = showLetterhead ?? (inferredType === "demand" || inferredType === "letter");
+    const shouldShowLetterhead = resolvedStyleProfile === "text_only"
+      ? false
+      : (showLetterhead ?? (resolvedDocumentType === "demand" || resolvedDocumentType === "letter"));
+    const shouldShowPageNumbers = resolvedStyleProfile === "text_only"
+      ? false
+      : (showPageNumbers ?? resolvedDocumentType !== "memo");
     const resolvedCaseName = await resolveCaseName(caseFolder, caseName);
 
     const exportOptions: ExportOptions = {
-      documentType: inferredType,
+      documentType: resolvedDocumentType,
       firmInfo: firmInfo || undefined,
       caseName: resolvedCaseName,
       showLetterhead: shouldShowLetterhead,
-      showPageNumbers: showPageNumbers ?? inferredType !== "memo",
+      showPageNumbers: shouldShowPageNumbers,
       templateStyles,
       styleProfile: resolvedStyleProfile,
     };
-    console.log(`[Export] exportOptions: showLetterhead=${exportOptions.showLetterhead}, documentType=${inferredType}, hasFirmInfo=${!!exportOptions.firmInfo}`);
+    console.log(`[Export] exportOptions: showLetterhead=${exportOptions.showLetterhead}, documentType=${resolvedDocumentType}, hasFirmInfo=${!!exportOptions.firmInfo}`);
 
     // Template-aware DOCX export path: if a templateId points to a DOCX template,
     // inject the agent's content into the template variables and convert via LibreOffice
@@ -584,16 +646,22 @@ app.post("/export", async (c) => {
 
     if (!usedDocxTemplate) {
       if (format === "docx") {
-        const html = markdownToHtml(content, exportOptions);
-        const docxBuffer = await htmlToDocx(html, nameWithoutExt, {
-          documentType: inferredType,
-          firmInfo: firmInfo || undefined,
-          showLetterhead: shouldShowLetterhead,
-        });
+        const docxBuffer = resolvedStyleProfile === "text_only"
+          ? await markdownToPlainTextDocx(content, nameWithoutExt)
+          : resolvedDocumentType === "hearing_decision"
+            ? await markdownToHearingDecisionDocx(content, nameWithoutExt, exportOptions)
+            : await htmlToDocx(markdownToHtml(content, exportOptions), nameWithoutExt, {
+              documentType: resolvedDocumentType,
+              firmInfo: firmInfo || undefined,
+              showLetterhead: shouldShowLetterhead,
+            });
         await writeFile(fullOutputPath, docxBuffer);
       } else {
-        const pdfBuffer = inferredType === "hearing_decision"
-          ? await markdownToHearingDecisionPdf(content, nameWithoutExt, exportOptions)
+        const pdfBuffer = resolvedDocumentType === "hearing_decision"
+          ? await renderDocxWithLibreOfficeWithRetry(
+            await markdownToHearingDecisionDocx(content, nameWithoutExt, exportOptions),
+            { attempts: 4, initialDelayMs: 120 }
+          )
           : await htmlToPdf(markdownToHtml(content, exportOptions), nameWithoutExt, exportOptions);
         await writeFile(fullOutputPath, pdfBuffer);
       }
@@ -673,8 +741,11 @@ app.get("/download", async (c) => {
     const nameWithoutExt = rawFilename.replace(/\.[^/.]+$/, "");
 
     // Infer document type and load firm info
-    const documentType = inferTypeFromPath(docPath);
-    const resolvedStyleProfile = resolveStyleProfile(documentType, styleProfile);
+    const inferredDocumentType = inferTypeFromPath(docPath);
+    const {
+      documentType,
+      styleProfile: resolvedStyleProfile,
+    } = resolveExportStyle(inferredDocumentType, styleProfile);
     const firmInfoRoot = firmRoot || resolveFirmRoot(caseFolder);
     const firmInfo = await loadFirmInfo(firmInfoRoot);
 
@@ -682,7 +753,12 @@ app.get("/download", async (c) => {
     const templateStyles = await loadTemplateStyles(firmInfoRoot, resolvedStyleProfile);
 
     // Show letterhead for demands and letters by default
-    const shouldShowLetterhead = showLetterhead && (documentType === "demand" || documentType === "letter");
+    const shouldShowLetterhead = resolvedStyleProfile === "text_only"
+      ? false
+      : (showLetterhead && (documentType === "demand" || documentType === "letter"));
+    const shouldShowPageNumbers = resolvedStyleProfile === "text_only"
+      ? false
+      : (showPageNumbers && documentType !== "memo");
     const resolvedCaseName = await resolveCaseName(caseFolder, caseName || undefined);
 
     const exportOptions: ExportOptions = {
@@ -690,19 +766,22 @@ app.get("/download", async (c) => {
       firmInfo: firmInfo || undefined,
       caseName: resolvedCaseName,
       showLetterhead: shouldShowLetterhead,
-      showPageNumbers: showPageNumbers && documentType !== "memo",
+      showPageNumbers: shouldShowPageNumbers,
       templateStyles,
       styleProfile: resolvedStyleProfile,
     };
 
     switch (format) {
       case "docx": {
-        const html = markdownToHtml(content, exportOptions);
-        const docxBuffer = await htmlToDocx(html, nameWithoutExt, {
-          documentType,
-          firmInfo: firmInfo || undefined,
-          showLetterhead: shouldShowLetterhead,
-        });
+        const docxBuffer = resolvedStyleProfile === "text_only"
+          ? await markdownToPlainTextDocx(content, nameWithoutExt)
+          : documentType === "hearing_decision"
+            ? await markdownToHearingDecisionDocx(content, nameWithoutExt, exportOptions)
+            : await htmlToDocx(markdownToHtml(content, exportOptions), nameWithoutExt, {
+              documentType,
+              firmInfo: firmInfo || undefined,
+              showLetterhead: shouldShowLetterhead,
+            });
         c.header(
           "Content-Type",
           "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -715,7 +794,10 @@ app.get("/download", async (c) => {
       }
       case "pdf": {
         const pdfBuffer = documentType === "hearing_decision"
-          ? await markdownToHearingDecisionPdf(content, nameWithoutExt, exportOptions)
+          ? await renderDocxWithLibreOfficeWithRetry(
+            await markdownToHearingDecisionDocx(content, nameWithoutExt, exportOptions),
+            { attempts: 4, initialDelayMs: 120 }
+          )
           : await htmlToPdf(markdownToHtml(content, exportOptions), nameWithoutExt, exportOptions);
         c.header("Content-Type", "application/pdf");
         c.header(
@@ -723,6 +805,15 @@ app.get("/download", async (c) => {
           `inline; filename="${nameWithoutExt}.pdf"`
         );
         return c.body(pdfBuffer);
+      }
+      case "txt": {
+        const plainText = markdownToPlainText(content);
+        c.header("Content-Type", "text/plain; charset=utf-8");
+        c.header(
+          "Content-Disposition",
+          `attachment; filename="${nameWithoutExt}.txt"`
+        );
+        return c.body(plainText);
       }
       default: {
         // Return markdown as-is
@@ -765,17 +856,57 @@ app.get("/drafts", async (c) => {
     }
 
     const entries = await readdir(draftsPath);
+    const resolveExistingCasePath = async (
+      candidate: unknown,
+      requiredExt?: ".docx" | ".pdf"
+    ): Promise<string | undefined> => {
+      if (typeof candidate !== "string") return undefined;
+      const normalizedCandidate = normalizeRelativePath(candidate);
+      if (!normalizedCandidate) return undefined;
+      if (requiredExt && !normalizedCandidate.toLowerCase().endsWith(requiredExt)) return undefined;
+      try {
+        const fullCandidatePath = resolveCasePath(caseFolder, normalizedCandidate);
+        await stat(fullCandidatePath);
+        return normalizedCandidate;
+      } catch {
+        return undefined;
+      }
+    };
+
     for (const entry of entries) {
-      if (entry.endsWith(".md")) {
+      if (/\.(md|txt)$/i.test(entry)) {
         const filePath = join(draftsPath, entry);
         const fileStat = await stat(filePath);
-        const id = entry.replace(/\.md$/, "");
+        const id = entry.replace(/\.(md|txt)$/i, "");
 
         // Get metadata from manifest or infer from filename
         const meta = manifest[id] || {};
         const type = meta.type || inferTypeFromFilename(id);
         const targetPath = meta.targetPath || inferTargetPath(id, type);
         const name = meta.name || formatDraftName(id);
+        const defaultWorkingDocxPath = `${WORKING_DOCS_REL_DIR}/${id}.docx`;
+        const defaultPreviewPdfPath = `${WORKING_DOCS_REL_DIR}/${id}.preview.pdf`;
+
+        const workingDocxPath =
+          await resolveExistingCasePath(meta.workingDocxPath, ".docx")
+          || await resolveExistingCasePath(defaultWorkingDocxPath, ".docx");
+        const previewPdfPath =
+          await resolveExistingCasePath(meta.previewPdfPath, ".pdf")
+          || await resolveExistingCasePath(defaultPreviewPdfPath, ".pdf");
+
+        let workingDocxMtimeMs: number | undefined;
+        if (workingDocxPath) {
+          if (typeof meta.workingDocxMtimeMs === "number") {
+            workingDocxMtimeMs = meta.workingDocxMtimeMs;
+          } else {
+            try {
+              const workingDocxStat = await stat(resolveCasePath(caseFolder, workingDocxPath));
+              workingDocxMtimeMs = workingDocxStat.mtimeMs;
+            } catch {
+              // Ignore missing mtime fallback.
+            }
+          }
+        }
 
         drafts.push({
           id,
@@ -784,6 +915,9 @@ app.get("/drafts", async (c) => {
           type,
           createdAt: meta.createdAt || fileStat.mtime.toISOString(),
           targetPath,
+          workingDocxPath,
+          workingDocxMtimeMs,
+          previewPdfPath,
         });
       } else if (entry.endsWith(".json") && entry.startsWith("packet-")) {
         // Packet creation mode drafts
@@ -904,12 +1038,15 @@ app.post("/approve", async (c) => {
 
     // 2. Determine output path
     const outputPath =
-      targetPath || draftPath.replace(/\.md$/, `.${format}`).replace(".ai_tool/drafts/", "");
+      targetPath || draftPath.replace(/\.(md|txt)$/i, `.${format}`).replace(".ai_tool/drafts/", "");
     const fullOutputPath = join(caseFolder, outputPath);
 
     // 3. Infer document type and load firm info
-    const documentType = inferTypeFromPath(draftPath);
-    const resolvedStyleProfile = resolveStyleProfile(documentType, styleProfile);
+    const inferredDocumentType = inferTypeFromPath(draftPath);
+    const {
+      documentType,
+      styleProfile: resolvedStyleProfile,
+    } = resolveExportStyle(inferredDocumentType, styleProfile);
     const firmInfoRoot = firmRoot || resolveFirmRoot(caseFolder);
     const firmInfo = await loadFirmInfo(firmInfoRoot);
 
@@ -920,13 +1057,18 @@ app.post("/approve", async (c) => {
 
     // Build export options
     // Show letterhead for demands and letters by default
-    const shouldShowLetterhead = showLetterhead ?? (documentType === "demand" || documentType === "letter");
+    const shouldShowLetterhead = resolvedStyleProfile === "text_only"
+      ? false
+      : (showLetterhead ?? (documentType === "demand" || documentType === "letter"));
+    const shouldShowPageNumbers = resolvedStyleProfile === "text_only"
+      ? false
+      : (showPageNumbers ?? documentType !== "memo");
     const exportOptions: ExportOptions = {
       documentType,
       firmInfo: firmInfo || undefined,
       caseName: clientName,
       showLetterhead: shouldShowLetterhead,
-      showPageNumbers: showPageNumbers ?? documentType !== "memo",
+      showPageNumbers: shouldShowPageNumbers,
       templateStyles,
       styleProfile: resolvedStyleProfile,
     };
@@ -936,18 +1078,24 @@ app.post("/approve", async (c) => {
 
     // 6. Convert and save
     if (format === "docx") {
-      const html = markdownToHtml(content, exportOptions);
       const nameWithoutExt = basename(outputPath).replace(/\.[^/.]+$/, "");
-      const docxBuffer = await htmlToDocx(html, nameWithoutExt, {
-        documentType,
-        firmInfo: firmInfo || undefined,
-        showLetterhead: shouldShowLetterhead,
-      });
+      const docxBuffer = resolvedStyleProfile === "text_only"
+        ? await markdownToPlainTextDocx(content, nameWithoutExt)
+        : documentType === "hearing_decision"
+          ? await markdownToHearingDecisionDocx(content, nameWithoutExt, exportOptions)
+          : await htmlToDocx(markdownToHtml(content, exportOptions), nameWithoutExt, {
+            documentType,
+            firmInfo: firmInfo || undefined,
+            showLetterhead: shouldShowLetterhead,
+          });
       await writeFile(fullOutputPath, docxBuffer);
     } else {
       const nameWithoutExt = basename(outputPath).replace(/\.[^/.]+$/, "");
       const pdfBuffer = documentType === "hearing_decision"
-        ? await markdownToHearingDecisionPdf(content, nameWithoutExt, exportOptions)
+        ? await renderDocxWithLibreOfficeWithRetry(
+          await markdownToHearingDecisionDocx(content, nameWithoutExt, exportOptions),
+          { attempts: 4, initialDelayMs: 120 }
+        )
         : await htmlToPdf(markdownToHtml(content, exportOptions), nameWithoutExt, exportOptions);
       await writeFile(fullOutputPath, pdfBuffer);
     }
@@ -960,7 +1108,7 @@ app.post("/approve", async (c) => {
     try {
       const manifestContent = await readFile(manifestPath, "utf-8");
       const manifest = JSON.parse(manifestContent);
-      const draftId = basename(draftPath).replace(/\.md$/, "");
+      const draftId = basename(draftPath).replace(/\.(md|txt)$/i, "");
       if (manifest[draftId]) {
         manifest[draftId].status = "approved";
         manifest[draftId].approvedAt = new Date().toISOString();
@@ -1671,6 +1819,164 @@ app.post("/preview-front-matter-from-docx", async (c) => {
   } catch (err) {
     console.error("preview-front-matter-from-docx error:", err);
     return c.json({ error: `Preview refresh failed: ${err}` }, 500);
+  }
+});
+
+// Re-render a generated draft preview PDF from an existing working DOCX
+// or rebuild draft DOCX+preview from markdown using a selected style profile.
+app.post("/preview-draft-from-docx", async (c) => {
+  const { caseFolder, docxPath, previewPath, draftPath, styleProfile } = await c.req.json();
+
+  if (!caseFolder || (!docxPath && !draftPath)) {
+    return c.json({ error: "caseFolder and either docxPath or draftPath required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  const normalizeOptionalPath = (value: unknown): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const normalized = normalizeRelativePath(value);
+    return normalized || undefined;
+  };
+
+  const normalizedDraftPath = normalizeOptionalPath(draftPath);
+  const hasDraftPath = Boolean(normalizedDraftPath);
+  let resolvedDocxPath = normalizeOptionalPath(docxPath);
+  let resolvedPreviewPath = normalizeOptionalPath(previewPath);
+
+  if (resolvedDocxPath && !resolvedDocxPath.toLowerCase().endsWith(".docx")) {
+    return c.json({ error: "docxPath must be a .docx file" }, 400);
+  }
+  if (resolvedPreviewPath && !resolvedPreviewPath.toLowerCase().endsWith(".pdf")) {
+    return c.json({ error: "previewPath must be a .pdf file" }, 400);
+  }
+
+  try {
+    if (hasDraftPath) {
+      if (!normalizedDraftPath || !/\.(md|txt)$/i.test(normalizedDraftPath)) {
+        return c.json({ error: "draftPath must point to a .md or .txt draft file" }, 400);
+      }
+
+      const draftId = basename(normalizedDraftPath).replace(/\.(md|txt)$/i, "");
+      if (!draftId) {
+        return c.json({ error: "Could not resolve draft id from draftPath" }, 400);
+      }
+
+      resolvedDocxPath = resolvedDocxPath || `${WORKING_DOCS_REL_DIR}/${draftId}.docx`;
+      resolvedPreviewPath = resolvedPreviewPath || `${WORKING_DOCS_REL_DIR}/${draftId}.preview.pdf`;
+
+      const fullDraftPath = resolveCasePath(caseFolder, normalizedDraftPath);
+      const fullDocxPath = resolveCasePath(caseFolder, resolvedDocxPath);
+      const fullPreviewPath = resolveCasePath(caseFolder, resolvedPreviewPath);
+      const content = await readFile(fullDraftPath, "utf-8");
+
+      const inferredDocumentType = inferTypeFromPath(normalizedDraftPath);
+      const {
+        documentType,
+        styleProfile: resolvedStyleProfile,
+      } = resolveExportStyle(inferredDocumentType, styleProfile);
+      const firmInfoRoot = resolveFirmRoot(caseFolder);
+      const firmInfo = await loadFirmInfo(firmInfoRoot);
+      const templateStyles = await loadTemplateStyles(firmInfoRoot, resolvedStyleProfile);
+      const resolvedCaseName = await resolveCaseName(caseFolder);
+      const shouldShowLetterhead = resolvedStyleProfile === "text_only"
+        ? false
+        : (documentType === "demand" || documentType === "letter");
+      const shouldShowPageNumbers = resolvedStyleProfile === "text_only"
+        ? false
+        : (documentType !== "memo");
+
+      const exportOptions: ExportOptions = {
+        documentType,
+        firmInfo: firmInfo || undefined,
+        caseName: resolvedCaseName,
+        showLetterhead: shouldShowLetterhead,
+        showPageNumbers: shouldShowPageNumbers,
+        templateStyles,
+        styleProfile: resolvedStyleProfile,
+      };
+
+      const docxName = basename(resolvedDocxPath).replace(/\.docx$/i, "");
+      const docxBuffer = resolvedStyleProfile === "text_only"
+        ? await markdownToPlainTextDocx(content, docxName)
+        : documentType === "hearing_decision"
+          ? await markdownToHearingDecisionDocx(content, docxName, exportOptions)
+          : await htmlToDocx(markdownToHtml(content, exportOptions), docxName, {
+            documentType,
+            firmInfo: firmInfo || undefined,
+            showLetterhead: shouldShowLetterhead,
+          });
+
+      await mkdir(dirname(fullDocxPath), { recursive: true });
+      await writeFile(fullDocxPath, docxBuffer);
+
+      const pdfBytes = await renderDocxFileToPdfWithRetry(fullDocxPath, {
+        attempts: 5,
+        initialDelayMs: 120,
+      });
+      await mkdir(dirname(fullPreviewPath), { recursive: true });
+      await writeFile(fullPreviewPath, pdfBytes);
+
+      const docxStat = await stat(fullDocxPath);
+
+      // Keep manifest artifact pointers in sync with regenerated draft previews.
+      try {
+        const manifestPath = join(caseFolder, ".ai_tool", "drafts", "manifest.json");
+        const manifest = JSON.parse(await readFile(manifestPath, "utf-8")) as Record<string, any>;
+        if (manifest[draftId]) {
+          manifest[draftId].workingDocxPath = resolvedDocxPath;
+          manifest[draftId].previewPdfPath = resolvedPreviewPath;
+          manifest[draftId].workingDocxMtimeMs = docxStat.mtimeMs;
+          await writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+        }
+      } catch {
+        // No manifest yet; safe to ignore.
+      }
+
+      const viewUrl = `/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(resolvedPreviewPath)}#view=FitH`;
+      return c.json({
+        url: viewUrl,
+        draftPath: normalizedDraftPath,
+        docxPath: resolvedDocxPath,
+        previewPath: resolvedPreviewPath,
+        docxMtimeMs: docxStat.mtimeMs,
+        styleProfile: resolvedStyleProfile,
+      });
+    }
+
+    if (!resolvedDocxPath) {
+      return c.json({ error: "docxPath required when draftPath is not provided" }, 400);
+    }
+    resolvedPreviewPath = resolvedPreviewPath || resolvedDocxPath.replace(/\.docx$/i, ".preview.pdf");
+    if (!resolvedPreviewPath.toLowerCase().endsWith(".pdf")) {
+      return c.json({ error: "previewPath must be a .pdf file" }, 400);
+    }
+
+    const fullDocxPath = resolveCasePath(caseFolder, resolvedDocxPath);
+    const fullPreviewPath = resolveCasePath(caseFolder, resolvedPreviewPath);
+    const pdfBytes = await renderDocxFileToPdfWithRetry(fullDocxPath, {
+      attempts: 5,
+      initialDelayMs: 120,
+    });
+
+    await mkdir(dirname(fullPreviewPath), { recursive: true });
+    await writeFile(fullPreviewPath, pdfBytes);
+
+    const docxStat = await stat(fullDocxPath);
+    const viewUrl = `/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(resolvedPreviewPath)}#view=FitH`;
+
+    return c.json({
+      url: viewUrl,
+      docxPath: resolvedDocxPath,
+      previewPath: resolvedPreviewPath,
+      docxMtimeMs: docxStat.mtimeMs,
+    });
+  } catch (err) {
+    console.error("preview-draft-from-docx error:", err);
+    return c.json({ error: `Draft preview refresh failed: ${err}` }, 500);
   }
 });
 
