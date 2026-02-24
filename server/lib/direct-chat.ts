@@ -2812,6 +2812,7 @@ export async function* directChat(
         let previewPath: string | undefined;
         let docxPath: string | undefined;
         let generationError: string | undefined;
+        let generationNote: string | undefined;
         for await (const event of generateDocument(caseFolder, docType, instructions)) {
           if (event.type === "status") {
             yield { type: "status", content: event.content };
@@ -2826,6 +2827,9 @@ export async function* directChat(
             filePath = event.filePath;
             previewPath = event.previewPath;
             docxPath = event.docxPath;
+            if (event.content) {
+              generationNote = event.content;
+            }
             if (!filePath && event.content) {
               generationError = event.content;
             }
@@ -2841,7 +2845,7 @@ export async function* directChat(
           content: filePath
             ? `Document successfully generated and saved to ${filePath}${
                 previewPath ? ` (preview: ${previewPath})` : ""
-              }`
+              }${generationNote ? `\n${generationNote}` : ""}`
             : `Document generation failed: ${
                 generationError || "No draft was saved by the document agent."
               }`

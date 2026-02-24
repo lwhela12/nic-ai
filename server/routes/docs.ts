@@ -16,7 +16,7 @@ import {
   loadFirmInfo,
 } from "../lib/export";
 import type { ExportOptions, ExportStyleProfile } from "../lib/export";
-import type { DocxStyles } from "../lib/extract";
+import { injectVariablesIntoDocx, type DocxStyles } from "../lib/extract";
 import { requireCaseAccess } from "../lib/team-access";
 import {
   scanPdfForSensitiveData,
@@ -264,6 +264,120 @@ function normalizeRelativePath(path: string): string {
     .replace(/^\/+/, "")
     .replace(/\/+/g, "/")
     .trim();
+}
+
+function normalizeFrontMatterString(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.replace(/\r\n/g, "\n");
+}
+
+function setFrontMatterTextValue(target: Record<string, string>, key: string, value: unknown): void {
+  const normalized = normalizeFrontMatterString(value);
+  if (!normalized) return;
+  target[key] = normalized;
+}
+
+function collectFrontMatterObjectValues(target: Record<string, string>, prefix: string, value: unknown): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  for (const [rawKey, rawValue] of Object.entries(value as Record<string, unknown>)) {
+    const key = String(rawKey || "").trim();
+    if (!key) continue;
+    setFrontMatterTextValue(target, `${prefix}.${key}`, rawValue);
+  }
+}
+
+function buildFrontMatterTextValueMap(frontMatter: unknown): Record<string, string> {
+  if (!frontMatter || typeof frontMatter !== "object" || Array.isArray(frontMatter)) {
+    return {};
+  }
+
+  const source = frontMatter as Record<string, unknown>;
+  const values: Record<string, string> = {};
+
+  const simpleKeys = [
+    "claimantName",
+    "claimNumber",
+    "hearingNumber",
+    "hearingDateTime",
+    "appearance",
+    "introductoryCounselLine",
+    "serviceDate",
+    "serviceMethod",
+    "templateId",
+    "signerName",
+    "issueOnAppeal",
+  ];
+  for (const key of simpleKeys) {
+    setFrontMatterTextValue(values, key, source[key]);
+  }
+
+  const recipients = Array.isArray(source.recipients)
+    ? source.recipients
+      .map((item) => normalizeFrontMatterString(item))
+      .filter((item) => item.length > 0)
+    : [];
+  recipients.forEach((recipient, index) => {
+    values[`recipients.${index}`] = recipient;
+  });
+  if (recipients.length > 0) {
+    values.serviceRecipientsText = recipients.join("\n");
+  }
+
+  const firmBlockLines = Array.isArray(source.firmBlockLines)
+    ? source.firmBlockLines
+      .map((item) => normalizeFrontMatterString(item))
+      .filter((item) => item.length > 0)
+    : [];
+  firmBlockLines.forEach((line, index) => {
+    values[`firmBlockLines.${index}`] = line;
+  });
+  if (firmBlockLines.length > 0) {
+    values.firmBlockText = firmBlockLines.join("\n");
+    values.attorneyNames = firmBlockLines.join("\n");
+  }
+
+  collectFrontMatterObjectValues(values, "captionValues", source.captionValues);
+  collectFrontMatterObjectValues(values, "extraSectionValues", source.extraSectionValues);
+
+  const serviceMethodPlain = normalizeFrontMatterString(source.serviceMethod)
+    .replace(/^\[[xX]\]\s*/, "")
+    .trim();
+  if (serviceMethodPlain) {
+    values.serviceMethodPlain = serviceMethodPlain;
+  }
+
+  const serviceDateRaw = normalizeFrontMatterString(source.serviceDate);
+  const parsedServiceDate = serviceDateRaw ? new Date(serviceDateRaw) : null;
+  if (parsedServiceDate && !Number.isNaN(parsedServiceDate.getTime())) {
+    values.serviceMonth = parsedServiceDate.toLocaleString("en-US", { month: "long" });
+    values.serviceYear = String(parsedServiceDate.getFullYear());
+    values.serviceDay = String(parsedServiceDate.getDate());
+    values.datedLine = `Dated this ${parsedServiceDate.getDate()} day of ${parsedServiceDate.toLocaleString("en-US", { month: "long" })}, ${parsedServiceDate.getFullYear()}.`;
+  }
+
+  return values;
+}
+
+function buildFrontMatterLiteralReplacementMap(previousFrontMatter: unknown, nextFrontMatter: unknown): Record<string, string> {
+  const previousValues = buildFrontMatterTextValueMap(previousFrontMatter);
+  const nextValues = buildFrontMatterTextValueMap(nextFrontMatter);
+  const replacements = new Map<string, string>();
+  const keys = new Set([...Object.keys(previousValues), ...Object.keys(nextValues)]);
+
+  for (const key of keys) {
+    const beforeValue = previousValues[key] || "";
+    const afterValue = nextValues[key] || "";
+    if (!beforeValue || beforeValue === afterValue) continue;
+    // Avoid broad accidental replacements for tiny tokens.
+    if (beforeValue.trim().length < 2) continue;
+    const existing = replacements.get(beforeValue);
+    if (typeof existing === "string" && existing !== afterValue) {
+      continue;
+    }
+    replacements.set(beforeValue, afterValue);
+  }
+
+  return Object.fromEntries(replacements);
 }
 
 function resolveTemplateAssetPath(firmRoot: string, relativePath: string): string {
@@ -1958,7 +2072,16 @@ app.post("/document-page-counts", async (c) => {
 
 // Preview front matter PDF
 app.post("/preview-front-matter", async (c) => {
-  const { caseFolder, frontMatter, documents, documentCount, firmRoot, templateId } = await c.req.json();
+  const {
+    caseFolder,
+    frontMatter,
+    documents,
+    documentCount,
+    firmRoot,
+    templateId,
+    workingDocxPath,
+    previousFrontMatter,
+  } = await c.req.json();
 
   if (!caseFolder || !frontMatter) {
     return c.json({ error: "caseFolder and frontMatter required" }, 400);
@@ -1970,6 +2093,46 @@ app.post("/preview-front-matter", async (c) => {
   }
 
   try {
+    const normalizedWorkingDocxPath = typeof workingDocxPath === "string" ? normalizeRelativePath(workingDocxPath) : "";
+    const canMergeIntoWorkingDocx = normalizedWorkingDocxPath.toLowerCase().endsWith(".docx")
+      && previousFrontMatter
+      && typeof previousFrontMatter === "object";
+    if (canMergeIntoWorkingDocx) {
+      try {
+        const fullWorkingDocxPath = resolveCasePath(caseFolder, normalizedWorkingDocxPath);
+        const literalReplacementMap = buildFrontMatterLiteralReplacementMap(previousFrontMatter, frontMatter);
+        if (Object.keys(literalReplacementMap).length > 0) {
+          const mergedDocxBytes = await injectVariablesIntoDocx(
+            fullWorkingDocxPath,
+            literalReplacementMap,
+            {
+              replaceDocumentIndexBlock: false,
+              allowPlainReplacements: true,
+            }
+          );
+          await writeFile(fullWorkingDocxPath, mergedDocxBytes);
+        }
+
+        const pdfBytes = await renderDocxFileToPdfWithRetry(fullWorkingDocxPath, {
+          attempts: 5,
+          initialDelayMs: 120,
+        });
+        const workingDocsDir = await ensureWorkingDocsDir(caseFolder);
+        const previewPath = join(workingDocsDir, "front-matter-preview.pdf");
+        await writeFile(previewPath, pdfBytes);
+
+        const docxStat = await stat(fullWorkingDocxPath);
+        const viewUrl = `/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(FRONT_MATTER_PREVIEW_REL_PATH)}#view=FitH`;
+        return c.json({
+          url: viewUrl,
+          docxPath: normalizedWorkingDocxPath,
+          docxMtimeMs: docxStat.mtimeMs,
+        });
+      } catch (mergeErr) {
+        console.warn("preview-front-matter merge warning:", mergeErr);
+      }
+    }
+
     let maps = { byPath: new Map<string, string>(), byBasename: new Map<string, string>(), ambiguousBasenames: new Set<string>() };
     try {
       const indexPath = join(caseFolder, ".ai_tool", "document_index.json");

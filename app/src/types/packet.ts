@@ -57,6 +57,8 @@ export interface PacketRedactionBox {
 export interface PacketState {
   documents: PacketDocument[]
   frontMatter: PacketFrontMatter
+  frontMatterPreviewBaseline: PacketFrontMatter | null
+  frontMatterPreviewDocumentsSignature: string | null
   piiResults: PacketPiiResult[]
   piiScanned: boolean
   generatedAt: string | null

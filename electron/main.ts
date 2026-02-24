@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, dialog } from "electron";
+import { app, BrowserWindow, shell, dialog, Menu, type MenuItemConstructorOptions } from "electron";
 import { join } from "path";
 import { appendFileSync, mkdirSync, existsSync } from "fs";
 import { homedir } from "os";
@@ -206,6 +206,28 @@ function createWindow(): void {
     if (url.startsWith(`http://127.0.0.1:${serverPort}`)) return { action: "allow" };
     shell.openExternal(url);
     return { action: "deny" };
+  });
+
+  mainWindow.webContents.on("context-menu", (_event, params) => {
+    const template: MenuItemConstructorOptions[] = [];
+    const hasSelection = params.selectionText.trim().length > 0;
+
+    if (params.isEditable) {
+      template.push(
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "selectAll" }
+      );
+    } else if (hasSelection) {
+      template.push({ role: "copy" }, { type: "separator" }, { role: "selectAll" });
+    }
+
+    if (template.length === 0 || !mainWindow) return;
+    Menu.buildFromTemplate(template).popup({ window: mainWindow });
   });
 
   mainWindow.webContents.on("will-navigate", (event, url) => {

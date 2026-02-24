@@ -539,6 +539,14 @@ function App() {
             pageSelection: normalizePacketPageSelection((doc as PacketDocument).pageSelection),
           }))
           : [],
+        frontMatterPreviewBaseline:
+          parsed.frontMatterPreviewBaseline && typeof parsed.frontMatterPreviewBaseline === 'object'
+            ? parsed.frontMatterPreviewBaseline
+            : null,
+        frontMatterPreviewDocumentsSignature:
+          typeof parsed.frontMatterPreviewDocumentsSignature === 'string'
+            ? parsed.frontMatterPreviewDocumentsSignature
+            : null,
         frontMatterDocxPath: typeof parsed.frontMatterDocxPath === 'string' ? parsed.frontMatterDocxPath : null,
         frontMatterWorkingDocxPath: typeof parsed.frontMatterWorkingDocxPath === 'string' ? parsed.frontMatterWorkingDocxPath : null,
         frontMatterWorkingDocxMtime: typeof parsed.frontMatterWorkingDocxMtime === 'number' ? parsed.frontMatterWorkingDocxMtime : null,
@@ -749,6 +757,8 @@ function App() {
     setPacketState({
       documents: [],
       frontMatter: fm,
+      frontMatterPreviewBaseline: null,
+      frontMatterPreviewDocumentsSignature: null,
       piiResults: [],
       piiScanned: false,
       generatedAt: null,
@@ -884,6 +894,8 @@ function App() {
     setPacketState({
       documents,
       frontMatter: { ...defaultFm, ...cleaned },
+      frontMatterPreviewBaseline: null,
+      frontMatterPreviewDocumentsSignature: null,
       piiResults: [],
       piiScanned: false,
       generatedAt: null,
@@ -924,6 +936,14 @@ function App() {
           ...draft,
           documents: canonicalDocs,
           draftId,
+          frontMatterPreviewBaseline:
+            draft.frontMatterPreviewBaseline && typeof draft.frontMatterPreviewBaseline === 'object'
+              ? draft.frontMatterPreviewBaseline
+              : null,
+          frontMatterPreviewDocumentsSignature:
+            typeof draft.frontMatterPreviewDocumentsSignature === 'string'
+              ? draft.frontMatterPreviewDocumentsSignature
+              : null,
           frontMatterDocxPath: typeof draft.frontMatterDocxPath === 'string' ? draft.frontMatterDocxPath : null,
           frontMatterWorkingDocxPath: typeof draft.frontMatterWorkingDocxPath === 'string' ? draft.frontMatterWorkingDocxPath : null,
           frontMatterWorkingDocxMtime: typeof draft.frontMatterWorkingDocxMtime === 'number' ? draft.frontMatterWorkingDocxMtime : null,

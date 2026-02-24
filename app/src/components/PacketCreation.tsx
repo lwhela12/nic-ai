@@ -114,6 +114,30 @@ function parsePageRangesInput(rangeInput: string): string | null {
   return null
 }
 
+function buildFrontMatterPreviewDocumentSignature(documents: PacketDocument[]): string {
+  return JSON.stringify(
+    documents.map((doc) => ({
+      path: doc.path,
+      title: doc.title,
+      date: doc.date,
+      pageSelection: {
+        allPages: doc.pageSelection?.allPages !== false,
+        pageRanges: doc.pageSelection?.pageRanges || '',
+      },
+    }))
+  )
+}
+
+function cloneFrontMatter(frontMatter: PacketFrontMatter): PacketFrontMatter {
+  return {
+    ...frontMatter,
+    recipients: [...frontMatter.recipients],
+    firmBlockLines: [...frontMatter.firmBlockLines],
+    extraSectionValues: frontMatter.extraSectionValues ? { ...frontMatter.extraSectionValues } : {},
+    captionValues: frontMatter.captionValues ? { ...frontMatter.captionValues } : {},
+  }
+}
+
 // Icons
 const GripIcon = () => (
   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -509,18 +533,35 @@ export default function PacketCreation({
       setFrontMatterError(pageSelectionError)
       return
     }
+    const frontMatterSnapshot = cloneFrontMatter(frontMatter)
+    const currentDocumentSignature = buildFrontMatterPreviewDocumentSignature(documents)
+    const previousBaseline = packetState.frontMatterPreviewBaseline
+    const previousDocumentSignature = packetState.frontMatterPreviewDocumentsSignature
+    const sameTemplateSelection = (previousBaseline?.templateId || '') === (frontMatterSnapshot.templateId || '')
+    const canMergeIntoWorkingDocx = Boolean(
+      packetState.frontMatterWorkingDocxPath &&
+      previousBaseline &&
+      previousDocumentSignature &&
+      previousDocumentSignature === currentDocumentSignature &&
+      sameTemplateSelection
+    )
     setIsPreviewing(true)
     try {
+      const requestBody: Record<string, unknown> = {
+        caseFolder,
+        frontMatter: frontMatterSnapshot,
+        documents: documents.map(d => ({ title: d.title, date: d.date, path: d.path, pageSelection: d.pageSelection })),
+        firmRoot: firmRoot || undefined,
+        templateId: frontMatterSnapshot.templateId || undefined,
+      }
+      if (canMergeIntoWorkingDocx) {
+        requestBody.workingDocxPath = packetState.frontMatterWorkingDocxPath
+        requestBody.previousFrontMatter = previousBaseline
+      }
       const res = await fetch(`${apiUrl}/api/docs/preview-front-matter`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseFolder,
-          frontMatter,
-          documents: documents.map(d => ({ title: d.title, date: d.date, path: d.path, pageSelection: d.pageSelection })),
-          firmRoot: firmRoot || undefined,
-          templateId: frontMatter.templateId || undefined,
-        }),
+        body: JSON.stringify(requestBody),
       })
       if (res.ok) {
         const data = await res.json()
@@ -530,6 +571,8 @@ export default function PacketCreation({
           ...prev,
           frontMatterWorkingDocxPath: workingDocxPath,
           frontMatterWorkingDocxMtime: workingDocxMtime,
+          frontMatterPreviewBaseline: frontMatterSnapshot,
+          frontMatterPreviewDocumentsSignature: currentDocumentSignature,
         }))
         onPreviewReady(`${apiUrl}${data.url}${data.url.includes('?') ? '&' : '?'}t=${Date.now()}`)
       } else {

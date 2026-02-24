@@ -66,6 +66,15 @@ app.use("/*", async (c, next) => {
 const agentPath = process.env.AGENT_PROMPT_PATH || join(import.meta.dir, "../../agent");
 const templatesDir = join(agentPath, "templates");
 
+function makeSafeSectionId(title: string): string {
+  return title
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-+/g, "-");
+}
+
 // ============================================================================
 // TEMPLATE ENDPOINTS
 // ============================================================================
@@ -314,9 +323,10 @@ app.put("/section/:id", async (c) => {
 
 // Create new section
 app.post("/section", async (c) => {
-  const { root, id, title, content } = await c.req.json();
-  if (!root || !id || !title) {
-    return c.json({ error: "root, id, and title required" }, 400);
+  const { root, title, content } = await c.req.json();
+  const sectionTitle = typeof title === "string" ? title.trim() : "";
+  if (!root || !sectionTitle) {
+    return c.json({ error: "root and title required" }, 400);
   }
 
   try {
@@ -324,27 +334,30 @@ app.post("/section", async (c) => {
     const manifestPath = join(knowledgeDir, "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
 
-    // Check for duplicate id
-    if (manifest.sections.find((s: any) => s.id === id)) {
-      return c.json({ error: "Section with this ID already exists" }, 409);
+    const existingIds = new Set((manifest.sections || []).map((s: any) => String(s.id || "")));
+    const baseId = makeSafeSectionId(sectionTitle) || "section";
+    let id = baseId;
+    let duplicateCounter = 2;
+    while (existingIds.has(id)) {
+      id = `${baseId}-${duplicateCounter++}`;
     }
 
     const order = manifest.sections.length + 1;
     const filename = `${String(order).padStart(2, "0")}-${id}.md`;
 
-    manifest.sections.push({ id, title, filename, order });
+    manifest.sections.push({ id, title: sectionTitle, filename, order });
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
-    const sectionContent = content || `## ${title}\n\n`;
+    const sectionContent = typeof content === "string" ? content : `## ${sectionTitle}\n\n`;
     await writeFile(join(knowledgeDir, filename), sectionContent);
 
     clearKnowledgeCache(root);
 
     // Generate semantic tags for the new section (non-blocking)
-    generateSectionTags(title, sectionContent)
+    generateSectionTags(sectionTitle, sectionContent)
       .then((tags) => updateMetaIndexSectionTags(root, filename, tags))
       .catch((err) => console.warn("[knowledge] Failed to tag new section:", err instanceof Error ? err.message : err));
 
-    return c.json({ success: true, filename });
+    return c.json({ success: true, filename, id });
   } catch (error) {
     return c.json({ error: "Failed to create section" }, 500);
   }

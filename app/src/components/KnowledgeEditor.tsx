@@ -30,7 +30,6 @@ export default function KnowledgeEditor({ apiUrl, firmRoot, canEditKnowledge }: 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [showNewSection, setShowNewSection] = useState(false)
-  const [newSectionId, setNewSectionId] = useState('')
   const [newSectionTitle, setNewSectionTitle] = useState('')
   const [mode, setMode] = useState<'preview' | 'edit'>('preview')
 
@@ -121,7 +120,8 @@ export default function KnowledgeEditor({ apiUrl, firmRoot, canEditKnowledge }: 
   }
 
   const createSection = async () => {
-    if (!newSectionId || !newSectionTitle) return
+    const title = newSectionTitle.trim()
+    if (!title) return
     if (!canEditKnowledge) {
       setError('Only attorneys can edit firm knowledge.')
       return
@@ -130,17 +130,19 @@ export default function KnowledgeEditor({ apiUrl, firmRoot, canEditKnowledge }: 
       const res = await fetch(`${apiUrl}/api/knowledge/section`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ root: firmRoot, id: newSectionId, title: newSectionTitle }),
+        body: JSON.stringify({ root: firmRoot, title }),
       })
       if (!res.ok) {
         const data = await res.json()
         throw new Error(data.error || 'Failed to create')
       }
+      const data = await res.json()
       setShowNewSection(false)
-      setNewSectionId('')
-      setNewSectionTitle('')
       await loadManifest()
-      setSelectedSection(newSectionId)
+      if (typeof data.id === 'string') {
+        setSelectedSection(data.id)
+      }
+      setNewSectionTitle('')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create section')
     }
@@ -295,15 +297,6 @@ export default function KnowledgeEditor({ apiUrl, firmRoot, canEditKnowledge }: 
             <h3 className="text-lg font-semibold text-brand-900 mb-4">New Section</h3>
             <div className="space-y-3">
               <div>
-                <label className="text-xs font-medium text-brand-600 mb-1 block">Section ID</label>
-                <input
-                  value={newSectionId}
-                  onChange={(e) => setNewSectionId(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'))}
-                  placeholder="e.g. discovery-process"
-                  className="w-full border border-surface-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent-500"
-                />
-              </div>
-              <div>
                 <label className="text-xs font-medium text-brand-600 mb-1 block">Title</label>
                 <input
                   value={newSectionTitle}
@@ -315,14 +308,14 @@ export default function KnowledgeEditor({ apiUrl, firmRoot, canEditKnowledge }: 
             </div>
             <div className="flex justify-end gap-2 mt-5">
               <button
-                onClick={() => { setShowNewSection(false); setNewSectionId(''); setNewSectionTitle('') }}
+                onClick={() => { setShowNewSection(false); setNewSectionTitle('') }}
                 className="px-4 py-2 text-sm text-brand-600 hover:bg-surface-100 rounded-lg transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={createSection}
-                disabled={!newSectionId || !newSectionTitle}
+                disabled={!newSectionTitle.trim()}
                 className="px-4 py-2 text-sm bg-brand-900 text-white rounded-lg hover:bg-brand-800
                            disabled:opacity-50 transition-colors"
               >

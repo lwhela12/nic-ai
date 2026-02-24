@@ -1102,17 +1102,28 @@ function replaceDocumentIndexBlock(xml: string): string {
  */
 export async function injectVariablesIntoDocx(
   filePath: string,
-  replacementMap: Record<string, string>
+  replacementMap: Record<string, string>,
+  options: {
+    replaceDocumentIndexBlock?: boolean;
+    allowPlainReplacements?: boolean;
+  } = {}
 ): Promise<Uint8Array> {
   const fs = await import("fs/promises");
   const PizZip = (await import("pizzip")).default;
 
   const docBytes = await fs.readFile(filePath);
   const zip = new PizZip(docBytes);
+  const allowPlainReplacements = options.allowPlainReplacements === true;
+  const shouldReplaceDocumentIndexBlock = options.replaceDocumentIndexBlock !== false;
 
   // Sort replacements longest-first to prevent partial matches
   const sortedReplacements = Object.keys(replacementMap)
-    .filter((key) => replacementMap[key].startsWith("{{"))
+    .filter((key) => {
+      const replacement = replacementMap[key];
+      if (typeof replacement !== "string") return false;
+      if (allowPlainReplacements) return true;
+      return replacement.startsWith("{{");
+    })
     .sort((a, b) => b.length - a.length)
     .map((literal) => ({ literal, replacement: replacementMap[literal] }));
 
@@ -1135,7 +1146,7 @@ export async function injectVariablesIntoDocx(
     xmlText = processDocxXmlForInjection(xmlText, sortedReplacements);
 
     // Replace the document index block with {{documentIndexText}} placeholder
-    if (xmlPath === "word/document.xml") {
+    if (xmlPath === "word/document.xml" && shouldReplaceDocumentIndexBlock) {
       xmlText = replaceDocumentIndexBlock(xmlText);
     }
 
