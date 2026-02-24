@@ -23,6 +23,11 @@ export interface PdfPageImage {
   sizeBytes: number;
 }
 
+export interface PdfToImagesOptions {
+  cropBox?: boolean;
+  hideAnnotations?: boolean;
+}
+
 function resolvePdftoppmCommand(): string {
   return resolvePoppler("pdftoppm");
 }
@@ -60,21 +65,25 @@ export async function pdfToImages(
   pdfPath: string,
   firstPage: number,
   lastPage: number,
-  dpi: number = 200
+  dpi: number = 200,
+  options: PdfToImagesOptions = {}
 ): Promise<PdfPageImage[]> {
   const prefix = join(tmpdir(), `groq-pi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
 
   try {
+    const commandArgs = [
+      "-jpeg",
+      "-r", String(dpi),
+      "-f", String(firstPage),
+      "-l", String(lastPage),
+      ...(options.cropBox ? ["-cropbox"] : []),
+      ...(options.hideAnnotations ? ["-hide-annotations"] : []),
+      pdfPath,
+      prefix,
+    ];
     await execFileAsync(
       resolvePdftoppmCommand(),
-      [
-        "-jpeg",
-        "-r", String(dpi),
-        "-f", String(firstPage),
-        "-l", String(lastPage),
-        pdfPath,
-        prefix,
-      ],
+      commandArgs,
       {
         timeout: 60000,
         maxBuffer: 5 * 1024 * 1024,

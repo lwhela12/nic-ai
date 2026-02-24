@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdtemp, rm, mkdir, stat } from "fs/promises";
 import { resolve, sep, join } from "path";
 import { PDFDocument, PDFFont, PDFPage, StandardFonts, degrees, rgb } from "pdf-lib";
 import { runPdftotext } from "./pdftotext";
+import { getPdfPageCount as getPdfImagePageCount, pdfToImages } from "./pdftoppm";
 import { renderHtmlFrontMatter, buildFrontMatterHtml } from "./evidence-packet-html";
 import { htmlToDocx } from "./export";
 import { injectVariablesIntoDocx } from "./extract";
@@ -973,6 +974,89 @@ export interface EvidencePacketDocumentInput {
   date?: string;
   docType?: string;
   include?: boolean;
+  pageSelection?: {
+    allPages?: boolean;
+    pageRanges?: string;
+  };
+}
+
+export interface ResolvedPacketPageSelection {
+  selectedPages: number[];
+  warnings: string[];
+}
+
+export function resolvePacketPageSelection(
+  pageSelection: EvidencePacketDocumentInput["pageSelection"] | undefined,
+  pageCount: number
+): ResolvedPacketPageSelection {
+  if (!Number.isFinite(pageCount) || pageCount <= 0) {
+    return { selectedPages: [], warnings: ["No pages are available in the source document."] };
+  }
+
+  if (!pageSelection || pageSelection.allPages !== false) {
+    return {
+      selectedPages: Array.from({ length: pageCount }, (_, i) => i),
+      warnings: [],
+    };
+  }
+
+  const raw = typeof pageSelection.pageRanges === "string" ? pageSelection.pageRanges : "";
+  const tokens = raw.split(",").map((token) => token.trim()).filter((token) => token.length > 0);
+  if (tokens.length === 0) {
+    return { selectedPages: [], warnings: ["No page ranges were provided."] };
+  }
+
+  const selected = new Set<number>();
+  const warnings: string[] = [];
+
+  for (const token of tokens) {
+    if (token.includes("-")) {
+      const parts = token.split("-").map((part) => part.trim());
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        warnings.push(`Invalid range "${token}". Use start-end, for example "2-6".`);
+        continue;
+      }
+      const startPage = Number(parts[0]);
+      const endPage = Number(parts[1]);
+      if (!Number.isInteger(startPage) || !Number.isInteger(endPage) || startPage < 1 || endPage < 1) {
+        warnings.push(`Invalid range "${token}".`);
+        continue;
+      }
+      const start = Math.min(startPage, endPage);
+      const end = Math.max(startPage, endPage);
+      if (start > pageCount) {
+        warnings.push(`Range "${token}" is out of bounds for a ${pageCount}-page document.`);
+        continue;
+      }
+      for (let page = start; page <= end; page += 1) {
+        if (page > pageCount) {
+          if (start <= pageCount) {
+            warnings.push(`Some pages in range "${token}" are out of bounds for a ${pageCount}-page document.`);
+          }
+          break;
+        }
+        selected.add(page - 1);
+      }
+      continue;
+    }
+
+    const page = Number(token);
+    if (!Number.isInteger(page) || page < 1) {
+      warnings.push(`Invalid page "${token}".`);
+      continue;
+    }
+    if (page > pageCount) {
+      warnings.push(`Page "${token}" is out of bounds for a ${pageCount}-page document.`);
+      continue;
+    }
+    selected.add(page - 1);
+  }
+
+  const selectedPages = [...selected].sort((a, b) => a - b);
+  if (selectedPages.length === 0) {
+    warnings.push("No valid pages were selected.");
+  }
+  return { selectedPages, warnings };
 }
 
 export interface EvidencePacketOrderRule {
@@ -1035,6 +1119,8 @@ export interface BuildEvidencePacketOptions {
   extraSectionValues?: Record<string, string>;
   /** Firm name for bold display in signature block (separate from firmBlockLines). */
   firmName?: string;
+  /** User-approved redaction boxes keyed by canonical document path. */
+  manualRedactionsByPath?: Record<string, EvidencePacketManualRedactionBox[]>;
 }
 
 export interface EvidencePacketTocEntry {
@@ -1124,6 +1210,7 @@ interface ProcessedDocument {
   absolutePath: string;
   pdfBytes: Uint8Array;
   pageCount: number;
+  selectedPages: number[];
 }
 
 type SupportedPacketFileKind = "pdf" | "jpg" | "png";
@@ -1148,9 +1235,16 @@ interface SensitiveBox {
 
 const SSN_REGEX = /\b\d{3}-\d{2}-\d{4}\b/;
 const SSN_NO_DASH_REGEX = /^\d{9}$/;
-const DATE_REGEX = /^\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}$/;
-const DOB_CONTEXT_REGEX = /\b(dob|d\.?o\.?b|date of birth|birth date)\b/i;
-const SSN_CONTEXT_REGEX = /\b(ssn|social security|social)\b/i;
+const SSN_LOOSE_COMPACT_REGEX = /^[0-9?*]{9}$/;
+const DASH_VARIANT_REGEX = /[\u2010-\u2015\u2212]/g;
+const SSN_MIN_CONFIDENT_DIGITS = 7;
+const DATE_MATCH_REGEX = /\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}/;
+const DATE_REGEX = /^\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}$/;
+const DOB_CONTEXT_REGEX = /\b(dob|d\s*o\s*b|date of birth|birth date|birthdate)\b/i;
+const SSN_CONTEXT_REGEX = /\b(ssn|s\s*s\s*n|social security(?: number)?|soc(?:ial)?\s*sec(?:urity)?)\b/i;
+const DETECTION_MAX_WINDOW_TOKENS = 3;
+const CONTEXT_BEFORE_TOKENS = 8;
+const CONTEXT_AFTER_TOKENS = 4;
 
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -1193,12 +1287,29 @@ export async function buildEvidencePacket(
       throw err;
     }
     let pdfBytes: Uint8Array;
+    const manualRedactionBoxes = options.manualRedactionsByPath?.[doc.path];
+    const hasManualRedactionBoxes = Boolean(manualRedactionBoxes && manualRedactionBoxes.length > 0);
+    const shouldRedactDoc = Boolean(options.redaction?.enabled) || hasManualRedactionBoxes;
     if (fileKind === "pdf") {
       pdfBytes = originalBytes;
+      const formFlattenResult = await flattenPdfFormFields(pdfBytes, doc.path);
+      pdfBytes = formFlattenResult.pdfBytes;
+      warnings.push(...formFlattenResult.warnings);
+      const shouldRasterizeForRedaction =
+        hasManualRedactionBoxes
+        || (Boolean(options.redaction?.enabled) && (
+          formFlattenResult.hadFormFields || formFlattenResult.hasUnflattenedFormOverlays
+        ));
+      if (shouldRedactDoc && shouldRasterizeForRedaction) {
+        warnings.push(`Rasterized PDF before redaction to prevent overlay repaint: ${doc.path}`);
+        const rasterizedResult = await rasterizePdfForRedaction(pdfBytes, doc.path);
+        pdfBytes = rasterizedResult.pdfBytes;
+        warnings.push(...rasterizedResult.warnings);
+      }
       if (options.redaction?.enabled) {
         const redactResult = await redactPdfIfRequested(
           absolutePath,
-          originalBytes,
+          pdfBytes,
           doc.path,
           options.redaction
         );
@@ -1217,12 +1328,24 @@ export async function buildEvidencePacket(
       }
     }
 
+    if (manualRedactionBoxes && manualRedactionBoxes.length > 0) {
+      pdfBytes = await applyManualRedactionBoxes(pdfBytes, manualRedactionBoxes);
+    }
+
     const pageCount = await getPdfPageCount(pdfBytes, doc.path);
+    const resolvedPages = resolvePacketPageSelection(doc.pageSelection, pageCount);
+    warnings.push(...resolvedPages.warnings.map((warning) => `${doc.path}: ${warning}`));
+    if (resolvedPages.selectedPages.length === 0) {
+      warnings.push(`Skipped ${doc.path}: no pages selected.`);
+      continue;
+    }
+
     processedDocs.push({
       document: doc,
       absolutePath,
       pdfBytes,
       pageCount,
+      selectedPages: resolvedPages.selectedPages,
     });
   }
 
@@ -1244,7 +1367,7 @@ export async function buildEvidencePacket(
   let runningExhibitPage = pageStampStart;
   for (const processed of processedDocs) {
     const startPage = runningExhibitPage;
-    const endPage = runningExhibitPage + processed.pageCount - 1;
+    const endPage = runningExhibitPage + processed.selectedPages.length - 1;
     tocEntries.push({
       title: processed.document.title,
       path: processed.document.path,
@@ -1357,17 +1480,11 @@ export async function buildEvidencePacket(
   let exhibitPageNumber = pageStampStart;
   for (const processed of processedDocs) {
     const sourcePdf = await PDFDocument.load(processed.pdfBytes);
-    const embeddedPages = await pdf.embedPdf(sourcePdf, sourcePdf.getPageIndices());
-    for (let i = 0; i < embeddedPages.length; i++) {
-      const sourcePage = sourcePdf.getPage(i);
-      const { width, height } = sourcePage.getSize();
-      const sourceRotation = sourcePage.getRotation().angle;
-      const newPage = pdf.addPage([width, height]);
-      newPage.drawPage(embeddedPages[i], { x: 0, y: 0, width, height });
-      if (sourceRotation !== 0) {
-        newPage.setRotation(degrees(sourceRotation));
-      }
-      stampExhibitPageNumber(newPage, regularFont, `${pageStampPrefix}${exhibitPageNumber}`, sourceRotation);
+    const copiedPages = await pdf.copyPages(sourcePdf, processed.selectedPages);
+    for (const copiedPage of copiedPages) {
+      pdf.addPage(copiedPage);
+      const sourceRotation = copiedPage.getRotation().angle;
+      stampExhibitPageNumber(copiedPage, regularFont, `${pageStampPrefix}${exhibitPageNumber}`, sourceRotation);
       exhibitPageNumber += 1;
     }
   }
@@ -1676,6 +1793,133 @@ async function getPdfPageCount(pdfBytes: Uint8Array, pathLabel: string): Promise
   }
 }
 
+async function flattenPdfFormFields(
+  pdfBytes: Uint8Array,
+  pathLabel: string
+): Promise<{
+  pdfBytes: Uint8Array;
+  warnings: string[];
+  hasUnflattenedFormOverlays: boolean;
+  hadFormFields: boolean;
+}> {
+  const warnings: string[] = [];
+  const hadPotentialOverlays = hasPotentialFormOverlays(pdfBytes);
+  const pdf = await PDFDocument.load(pdfBytes);
+  const form = pdf.getForm();
+  const fields = form.getFields();
+  const hadFormFields = fields.length > 0;
+  if (fields.length === 0) {
+    return {
+      pdfBytes,
+      warnings,
+      hasUnflattenedFormOverlays: hadPotentialOverlays,
+      hadFormFields,
+    };
+  }
+
+  try {
+    // Ensure field appearances are materialized before flattening so filled values remain visible.
+    form.updateFieldAppearances();
+  } catch (error) {
+    warnings.push(
+      `Could not refresh form field appearances for ${pathLabel}: ${formatError(error)}. Using existing appearance streams.`
+    );
+  }
+
+  try {
+    form.flatten();
+    const flattenedBytes = await pdf.save();
+    return {
+      pdfBytes: flattenedBytes,
+      warnings,
+      hasUnflattenedFormOverlays: hasPotentialFormOverlays(flattenedBytes),
+      hadFormFields,
+    };
+  } catch (error) {
+    warnings.push(
+      `Could not flatten form fields for ${pathLabel}: ${formatError(error)}. Continuing without flattening.`
+    );
+    return {
+      pdfBytes,
+      warnings,
+      hasUnflattenedFormOverlays: hadPotentialOverlays,
+      hadFormFields,
+    };
+  }
+}
+
+function hasPotentialFormOverlays(pdfBytes: Uint8Array): boolean {
+  const raw = Buffer.from(pdfBytes).toString("latin1");
+  return (
+    raw.includes("/AcroForm") ||
+    raw.includes("/Subtype/Widget") ||
+    raw.includes("/Subtype /Widget") ||
+    raw.includes("/XFA")
+  );
+}
+
+async function rasterizePdfForRedaction(
+  pdfBytes: Uint8Array,
+  pathLabel: string
+): Promise<{ pdfBytes: Uint8Array; warnings: string[] }> {
+  const warnings: string[] = [];
+  const tempDir = await mkdtemp(join(os.tmpdir(), "packet-rasterize-"));
+  const tempInputPath = join(tempDir, "input.pdf");
+
+  try {
+    await writeFile(tempInputPath, pdfBytes);
+    const pageCount = await getPdfImagePageCount(tempInputPath);
+    if (pageCount <= 0) {
+      warnings.push(`Could not rasterize ${pathLabel}: source PDF has no pages.`);
+      return { pdfBytes, warnings };
+    }
+
+    const pageImages = await pdfToImages(tempInputPath, 1, pageCount, 200, { cropBox: true });
+    if (pageImages.length === 0) {
+      warnings.push(`Could not rasterize ${pathLabel}: no page images were produced.`);
+      return { pdfBytes, warnings };
+    }
+
+    const sourcePdf = await PDFDocument.load(pdfBytes);
+    const imageByPage = new Map<number, string>();
+    for (const image of pageImages) {
+      imageByPage.set(image.page, image.base64);
+    }
+
+    const rasterPdf = await PDFDocument.create();
+    for (let pageNumber = 1; pageNumber <= sourcePdf.getPageCount(); pageNumber += 1) {
+      const sourcePage = sourcePdf.getPage(pageNumber - 1);
+      const cropBox = sourcePage.getCropBox();
+      const sourceRotation = normalizePageRotation(sourcePage.getRotation().angle);
+      const rotated = sourceRotation === 90 || sourceRotation === 270;
+      const pageWidth = rotated ? cropBox.height : cropBox.width;
+      const pageHeight = rotated ? cropBox.width : cropBox.height;
+      const page = rasterPdf.addPage([pageWidth, pageHeight]);
+      const base64 = imageByPage.get(pageNumber);
+      if (!base64) {
+        warnings.push(`Rasterization missed page ${pageNumber} for ${pathLabel}; page was left blank.`);
+        continue;
+      }
+      const imageBytes = Buffer.from(base64, "base64");
+      const embedded = await rasterPdf.embedJpg(imageBytes);
+      page.drawImage(embedded, { x: 0, y: 0, width: pageWidth, height: pageHeight });
+    }
+
+    return { pdfBytes: await rasterPdf.save(), warnings };
+  } catch (error) {
+    warnings.push(
+      `Could not rasterize form-backed PDF for ${pathLabel}: ${formatError(error)}. Continuing without rasterization.`
+    );
+    return { pdfBytes, warnings };
+  } finally {
+    try {
+      await rm(tempDir, { recursive: true, force: true });
+    } catch {
+      // Ignore temp cleanup failures.
+    }
+  }
+}
+
 async function redactPdfIfRequested(
   absolutePath: string,
   pdfBytes: Uint8Array,
@@ -1722,6 +1966,7 @@ export async function scanPdfForSensitiveData(
   findings: EvidencePacketRedactionFinding[];
   warnings: string[];
   boxes: EvidencePacketSensitiveDetectionBox[];
+  scanned: boolean;
 }> {
   const warnings: string[] = [];
 
@@ -1732,7 +1977,7 @@ export async function scanPdfForSensitiveData(
       throw new Error(message);
     }
     warnings.push(message);
-    return { findings: [], warnings, boxes: [] };
+    return { findings: [], warnings, boxes: [], scanned: false };
   }
 
   const sensitiveBoxes = detectSensitiveBoxes(bboxHtml, relativePath);
@@ -1754,7 +1999,7 @@ export async function scanPdfForSensitiveData(
     preview: item.preview,
   }));
 
-  return { findings, warnings, boxes };
+  return { findings, warnings, boxes, scanned: true };
 }
 
 async function extractBboxLayout(pdfPath: string): Promise<string | null> {
@@ -1780,7 +2025,7 @@ function decodeXmlEntity(text: string): string {
     .replace(/&#([0-9]+);/g, (_, num: string) => String.fromCharCode(parseInt(num, 10)));
 }
 
-function detectSensitiveBoxes(
+export function detectSensitiveBoxes(
   bboxHtml: string,
   relativePath: string
 ): Array<{ page: number; kind: "dob" | "ssn"; box: WordBox; preview: string }> {
@@ -1792,52 +2037,46 @@ function detectSensitiveBoxes(
   while ((pageMatch = pageRegex.exec(bboxHtml)) !== null) {
     pageNumber += 1;
     const pageContent = pageMatch[1];
-    const wordRegex = /<word\b[^>]*xMin="([\d.]+)"\s+yMin="([\d.]+)"\s+xMax="([\d.]+)"\s+yMax="([\d.]+)"[^>]*>([\s\S]*?)<\/word>/g;
-    const words: WordBox[] = [];
-
-    let wordMatch: RegExpExecArray | null;
-    while ((wordMatch = wordRegex.exec(pageContent)) !== null) {
-      words.push({
-        xMin: parseFloat(wordMatch[1]),
-        yMin: parseFloat(wordMatch[2]),
-        xMax: parseFloat(wordMatch[3]),
-        yMax: parseFloat(wordMatch[4]),
-        text: decodeXmlEntity(wordMatch[5]).trim(),
-      });
-    }
+    const words = parseWordBoxes(pageContent);
 
     if (words.length === 0) continue;
 
     const seen = new Set<string>();
     for (let i = 0; i < words.length; i += 1) {
-      const current = words[i];
-      if (!current.text) continue;
+      let matched = false;
+      const maxWindow = Math.min(DETECTION_MAX_WINDOW_TOKENS, words.length - i);
+      for (let windowSize = 1; windowSize <= maxWindow; windowSize += 1) {
+        const end = i + windowSize;
+        const windowWords = words.slice(i, end);
+        const windowStartsWithDigit = /\d/.test(cleanToken(windowWords[0]?.text || ""));
+        if (!windowStartsWithDigit) continue;
+        const candidate = buildWindowCandidate(windowWords);
+        if (!candidate) continue;
 
-      const cleaned = cleanToken(current.text);
-      const contextBefore = words
-        .slice(Math.max(0, i - 5), i)
-        .map((word) => cleanPhrase(word.text))
-        .join(" ");
-
-      if (SSN_REGEX.test(cleaned) || (SSN_NO_DASH_REGEX.test(cleaned) && SSN_CONTEXT_REGEX.test(contextBefore))) {
-        const preview = maskSensitive(cleaned);
-        const dedupeKey = `${pageNumber}:${current.xMin}:${current.yMin}:${current.xMax}:${current.yMax}:ssn`;
-        if (!seen.has(dedupeKey)) {
-          findings.push({ page: pageNumber, kind: "ssn", box: current, preview });
-          seen.add(dedupeKey);
+        const context = buildDetectionContext(words, i, end);
+        const hasSsnContext = SSN_CONTEXT_REGEX.test(context);
+        const ssnMatch = candidate.compactText.match(SSN_REGEX);
+        const looseSsnMatch = hasSsnContext ? formatLooseSsn(candidate.compactText) : null;
+        if (ssnMatch || (SSN_NO_DASH_REGEX.test(candidate.digitsOnly) && hasSsnContext) || looseSsnMatch) {
+          const canonicalSsn = ssnMatch?.[0] || formatSsn(candidate.digitsOnly) || looseSsnMatch || candidate.compactText;
+          const preview = maskSensitive(canonicalSsn);
+          if (pushUniqueSensitiveFinding(findings, seen, pageNumber, "ssn", candidate.box, preview)) {
+            matched = true;
+            break;
+          }
         }
-        continue;
+
+        const dateMatch = candidate.compactText.match(DATE_MATCH_REGEX);
+        if (dateMatch && DATE_REGEX.test(dateMatch[0]) && DOB_CONTEXT_REGEX.test(context)) {
+          const preview = maskSensitive(dateMatch[0]);
+          if (pushUniqueSensitiveFinding(findings, seen, pageNumber, "dob", candidate.box, preview)) {
+            matched = true;
+            break;
+          }
+        }
       }
 
-      const dateMatch = cleaned.match(/\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}/);
-      if (dateMatch && DATE_REGEX.test(dateMatch[0]) && DOB_CONTEXT_REGEX.test(contextBefore)) {
-        const preview = maskSensitive(dateMatch[0]);
-        const dedupeKey = `${pageNumber}:${current.xMin}:${current.yMin}:${current.xMax}:${current.yMax}:dob`;
-        if (!seen.has(dedupeKey)) {
-          findings.push({ page: pageNumber, kind: "dob", box: current, preview });
-          seen.add(dedupeKey);
-        }
-      }
+      if (matched) continue;
     }
   }
 
@@ -1847,6 +2086,128 @@ function detectSensitiveBoxes(
   }
 
   return findings;
+}
+
+function parseWordBoxes(pageContent: string): WordBox[] {
+  const wordRegex = /<word\b([^>]*)>([\s\S]*?)<\/word>/g;
+  const words: WordBox[] = [];
+  let wordMatch: RegExpExecArray | null;
+  while ((wordMatch = wordRegex.exec(pageContent)) !== null) {
+    const attrs = wordMatch[1];
+    const xMin = parseWordAttr(attrs, "xMin");
+    const yMin = parseWordAttr(attrs, "yMin");
+    const xMax = parseWordAttr(attrs, "xMax");
+    const yMax = parseWordAttr(attrs, "yMax");
+    if (xMin === null || yMin === null || xMax === null || yMax === null) continue;
+    words.push({
+      xMin,
+      yMin,
+      xMax,
+      yMax,
+      text: decodeXmlEntity(wordMatch[2]).trim(),
+    });
+  }
+  return words;
+}
+
+function parseWordAttr(attrs: string, name: "xMin" | "yMin" | "xMax" | "yMax"): number | null {
+  const match = attrs.match(new RegExp(`${name}="([-\\d.]+)"`));
+  if (!match) return null;
+  const parsed = Number.parseFloat(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeDashLikeChars(value: string): string {
+  return value.replace(DASH_VARIANT_REGEX, "-");
+}
+
+function buildDetectionContext(words: WordBox[], start: number, endExclusive: number): string {
+  const contextStart = Math.max(0, start - CONTEXT_BEFORE_TOKENS);
+  const contextEnd = Math.min(words.length, endExclusive + CONTEXT_AFTER_TOKENS);
+  return words
+    .slice(contextStart, contextEnd)
+    .map((word) => normalizeContext(word.text))
+    .filter(Boolean)
+    .join(" ");
+}
+
+function buildWindowCandidate(words: WordBox[]): { compactText: string; digitsOnly: string; box: WordBox } | null {
+  if (words.length === 0) return null;
+  const compactText = cleanToken(words.map((word) => word.text).join(""));
+  if (!compactText) return null;
+  const digitsOnly = compactText.replace(/\D/g, "");
+  return {
+    compactText,
+    digitsOnly,
+    box: mergeWordBoxes(words),
+  };
+}
+
+function formatLooseSsn(value: string): string | null {
+  const normalized = normalizeDashLikeChars(value).replace(/\s+/g, "");
+  if (!normalized) return null;
+
+  const token = normalized.replace(/[^0-9?*\-]/g, "");
+  if (!token) return null;
+
+  const compact = token.replace(/-/g, "");
+  if (!SSN_LOOSE_COMPACT_REGEX.test(compact)) return null;
+
+  const digitCount = (compact.match(/\d/g) || []).length;
+  if (digitCount < SSN_MIN_CONFIDENT_DIGITS) return null;
+
+  if (token.includes("-")) {
+    const groups = token.split("-").filter((part) => part.length > 0);
+    if (groups.length === 3 && groups[0].length === 3 && groups[1].length === 2 && groups[2].length === 4) {
+      return `${groups[0]}-${groups[1]}-${groups[2]}`;
+    }
+  }
+
+  return `${compact.slice(0, 3)}-${compact.slice(3, 5)}-${compact.slice(5)}`;
+}
+
+function mergeWordBoxes(words: WordBox[]): WordBox {
+  let xMin = words[0].xMin;
+  let yMin = words[0].yMin;
+  let xMax = words[0].xMax;
+  let yMax = words[0].yMax;
+  for (let i = 1; i < words.length; i += 1) {
+    const word = words[i];
+    xMin = Math.min(xMin, word.xMin);
+    yMin = Math.min(yMin, word.yMin);
+    xMax = Math.max(xMax, word.xMax);
+    yMax = Math.max(yMax, word.yMax);
+  }
+  return {
+    text: words.map((word) => word.text).join(" "),
+    xMin,
+    yMin,
+    xMax,
+    yMax,
+  };
+}
+
+function pushUniqueSensitiveFinding(
+  findings: Array<{ page: number; kind: "dob" | "ssn"; box: WordBox; preview: string }>,
+  seen: Set<string>,
+  pageNumber: number,
+  kind: "dob" | "ssn",
+  box: WordBox,
+  preview: string
+): boolean {
+  const dedupeKey = [
+    pageNumber,
+    kind,
+    box.xMin.toFixed(2),
+    box.yMin.toFixed(2),
+    box.xMax.toFixed(2),
+    box.yMax.toFixed(2),
+    preview,
+  ].join(":");
+  if (seen.has(dedupeKey)) return false;
+  findings.push({ page: pageNumber, kind, box, preview });
+  seen.add(dedupeKey);
+  return true;
 }
 
 async function applyRedactionBoxes(
@@ -1917,20 +2278,29 @@ export async function applyManualRedactionBoxes(
 }
 
 function cleanToken(value: string): string {
-  return value.replace(/[^\w\/-]/g, "").toLowerCase();
+  return normalizeDashLikeChars(value).replace(/[^a-zA-Z0-9_\/.\-?*]/g, "").toLowerCase();
 }
 
-function cleanPhrase(value: string): string {
-  return value.replace(/[^a-zA-Z0-9\s]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+function normalizeContext(value: string): string {
+  return value.replace(/[^a-zA-Z0-9]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function formatSsn(value: string): string | null {
+  if (!SSN_NO_DASH_REGEX.test(value)) return null;
+  return `${value.slice(0, 3)}-${value.slice(3, 5)}-${value.slice(5)}`;
 }
 
 function maskSensitive(value: string): string {
-  if (SSN_REGEX.test(value)) {
-    const last4 = value.slice(-4);
+  const normalizedValue = normalizeDashLikeChars(value);
+  const normalizedSsn = SSN_REGEX.test(normalizedValue)
+    ? normalizedValue
+    : (formatSsn(value) || formatLooseSsn(value));
+  if (normalizedSsn) {
+    const last4 = normalizedSsn.slice(-4).replace(/[?*]/g, "*");
     return `***-**-${last4}`;
   }
 
-  if (DATE_REGEX.test(value)) {
+  if (DATE_REGEX.test(value) || DATE_MATCH_REGEX.test(value)) {
     return "**/**/****";
   }
 
@@ -2752,6 +3122,12 @@ function formatTocDocumentLabel(entry: EvidencePacketTocEntry): string {
   if (!date) return title;
   if (title.toLowerCase().includes(date.toLowerCase())) return title;
   return `${title} - ${date}`;
+}
+
+function normalizePageRotation(rotation: number): 0 | 90 | 180 | 270 {
+  const normalized = ((rotation % 360) + 360) % 360;
+  if (normalized === 90 || normalized === 180 || normalized === 270) return normalized;
+  return 0;
 }
 
 function stampExhibitPageNumber(page: PDFPage, font: PDFFont, label: string, pageRotation = 0): void {

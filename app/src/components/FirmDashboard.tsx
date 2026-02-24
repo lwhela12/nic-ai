@@ -863,9 +863,6 @@ export default function FirmDashboard({
     }
   }
 
-  // Filter out containers when counting unindexed cases (containers are never indexed themselves)
-  const unindexedCases = firmData?.cases.filter(c => !c.indexed && !c.isContainer) || []
-
   const formatCurrency = (amount?: number) => {
     if (amount === undefined) return '—'
     return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(amount)

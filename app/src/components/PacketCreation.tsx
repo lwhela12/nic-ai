@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import type { PacketDocument, PacketFrontMatter, PacketPiiResult, PacketState } from '../types/packet'
+import type { PacketDocument, PacketFrontMatter, PacketPiiResult, PacketRedactionBox, PacketState } from '../types/packet'
 
 interface Props {
   packetState: PacketState
@@ -8,6 +8,8 @@ interface Props {
   apiUrl: string
   firmRoot?: string
   onShowFile: (filePath: string) => void
+  onShowPiiFile: (filePath: string) => void
+  onPiiTabActiveChange?: (active: boolean) => void
   onExit: () => void
   onGenerated: (outputPath: string) => void
   onPreviewReady: (blobUrl: string) => void
@@ -38,6 +40,78 @@ function packetDisplayTitle(title: string | undefined, fallback: string): string
     return fallback
   }
   return normalized
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  if (value < 0) return 0
+  if (value > 1) return 1
+  return value
+}
+
+function normalizeDocumentPath(path: string): string {
+  return String(path || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\/+/, '')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/')
+}
+
+function packetBoxKey(box: {
+  page: number
+  xPct: number
+  yPct: number
+  widthPct: number
+  heightPct: number
+}): string {
+  return [
+    Number.isFinite(box.page) ? Math.floor(box.page) : 0,
+    box.xPct.toFixed(5),
+    box.yPct.toFixed(5),
+    box.widthPct.toFixed(5),
+    box.heightPct.toFixed(5),
+  ].join(':')
+}
+
+function piiCandidateCount(result: PacketPiiResult): number {
+  const findingCount = Array.isArray(result.findings) ? result.findings.length : 0
+  const boxCount = Array.isArray(result.boxes) ? result.boxes.length : 0
+  return Math.max(findingCount, boxCount)
+}
+
+function parsePageRangesInput(rangeInput: string): string | null {
+  const value = rangeInput.trim()
+  if (!value) {
+    return 'Enter at least one page number or range'
+  }
+
+  const tokens = value.split(',').map((token) => token.trim()).filter((token) => token.length > 0)
+  if (tokens.length === 0) {
+    return 'Enter at least one page number or range'
+  }
+
+  for (const token of tokens) {
+    if (token.includes('-')) {
+      const parts = token.split('-').map((part) => part.trim())
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        return `Invalid range: ${token}`
+      }
+      const start = Number(parts[0])
+      const end = Number(parts[1])
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < 1) {
+        return `Invalid range: ${token}`
+      }
+      continue
+    }
+
+    const page = Number(token)
+    if (!Number.isInteger(page) || page < 1) {
+      return `Invalid page: ${token}`
+    }
+  }
+
+  return null
 }
 
 // Icons
@@ -92,6 +166,8 @@ export default function PacketCreation({
   apiUrl,
   firmRoot,
   onShowFile,
+  onShowPiiFile,
+  onPiiTabActiveChange,
   onExit,
   onGenerated,
   onPreviewReady,
@@ -106,13 +182,25 @@ export default function PacketCreation({
   const [isWatchingWordEdits, setIsWatchingWordEdits] = useState(false)
   const [generateError, setGenerateError] = useState<string | null>(null)
   const [frontMatterError, setFrontMatterError] = useState<string | null>(null)
+  const [documentPageCounts, setDocumentPageCounts] = useState<Record<string, number | null>>({})
 
   // Drag state
   const dragIndexRef = useRef<number | null>(null)
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
   const previewRefreshTimeoutRef = useRef<number | null>(null)
+  const pageCountAbortRef = useRef<AbortController | null>(null)
 
   const { documents, frontMatter, piiResults = [], piiScanned } = packetState
+
+  useEffect(() => {
+    onPiiTabActiveChange?.(activeTab === 'pii')
+  }, [activeTab, onPiiTabActiveChange])
+
+  useEffect(() => {
+    return () => {
+      onPiiTabActiveChange?.(false)
+    }
+  }, [onPiiTabActiveChange])
 
   // Backfill firm block lines from firm config if still empty on mount
   const firmBlockCheckedRef = useRef(false)
@@ -152,6 +240,63 @@ export default function PacketCreation({
       } catch { /* ignore */ }
     })()
   }, [apiUrl, firmRoot, frontMatter.firmBlockLines, onUpdateState])
+
+  useEffect(() => {
+    if (!caseFolder || documents.length === 0) {
+      pageCountAbortRef.current?.abort()
+      pageCountAbortRef.current = null
+      setDocumentPageCounts({})
+      return
+    }
+
+    const documentPaths = Array.from(new Set(
+      documents.map(doc => normalizeDocumentPath(doc.path)).filter((path) => Boolean(path))
+    ))
+    if (documentPaths.length === 0) {
+      setDocumentPageCounts({})
+      return
+    }
+
+    setDocumentPageCounts(prev => {
+      const next: Record<string, number | null> = {}
+      for (const path of documentPaths) {
+        next[path] = Object.prototype.hasOwnProperty.call(prev, path) ? prev[path] : null
+      }
+      return next
+    })
+
+    pageCountAbortRef.current?.abort()
+    const abortController = new AbortController()
+    pageCountAbortRef.current = abortController
+
+    const loadPageCounts = async () => {
+      try {
+        const res = await fetch(`${apiUrl}/api/docs/document-page-counts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: abortController.signal,
+          body: JSON.stringify({ caseFolder, paths: documentPaths }),
+        })
+        if (!res.ok || abortController.signal.aborted) return
+        const data = await res.json()
+        const rawCounts = data?.counts
+        if (!rawCounts || typeof rawCounts !== 'object' || Array.isArray(rawCounts)) return
+        const nextCounts: Record<string, number | null> = {}
+        for (const path of documentPaths) {
+          const value = rawCounts[path]
+          nextCounts[path] = typeof value === 'number' && Number.isFinite(value) ? value : null
+        }
+        setDocumentPageCounts(nextCounts)
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return
+      }
+    }
+    void loadPageCounts()
+
+    return () => {
+      abortController.abort()
+    }
+  }, [apiUrl, caseFolder, documents])
 
   // --- Documents Tab ---
   const handleDragStart = (index: number) => {
@@ -228,6 +373,55 @@ export default function PacketCreation({
       }
       return { ...prev, documents: result.map((d, i) => ({ ...d, order: i })) }
     })
+  }
+
+  const getDocumentPageSelectionError = (doc: PacketDocument): string | null => {
+    if (doc.pageSelection?.allPages) return null
+    return parsePageRangesInput(doc.pageSelection?.pageRanges || '')
+  }
+
+  const validatePageSelections = (): string | null => {
+    const invalidDoc = documents.find(doc => {
+      const error = getDocumentPageSelectionError(doc)
+      return Boolean(error)
+    })
+    if (!invalidDoc) return null
+    const error = getDocumentPageSelectionError(invalidDoc)
+    return `${packetDisplayTitle(invalidDoc.title, invalidDoc.fileName)}: ${error}`
+  }
+
+  const handleToggleAllPages = (index: number, allPages: boolean) => {
+    onUpdateState(prev => ({
+      ...prev,
+      documents: prev.documents.map((doc, i) => {
+        if (i !== index) return doc
+        return {
+          ...doc,
+          pageSelection: {
+            ...doc.pageSelection,
+            allPages,
+            pageRanges: allPages ? '' : doc.pageSelection?.pageRanges || '',
+          },
+        }
+      }),
+    }))
+  }
+
+  const handlePageRangeChange = (index: number, pageRanges: string) => {
+    onUpdateState(prev => ({
+      ...prev,
+      documents: prev.documents.map((doc, i) => {
+        if (i !== index) return doc
+        return {
+          ...doc,
+          pageSelection: {
+            ...doc.pageSelection,
+            allPages: false,
+            pageRanges,
+          },
+        }
+      }),
+    }))
   }
 
   // --- Front Matter ---
@@ -310,6 +504,11 @@ export default function PacketCreation({
   const handlePreviewFrontMatter = async () => {
     setFrontMatterError(null)
     setIsWatchingWordEdits(false)
+    const pageSelectionError = validatePageSelections()
+    if (pageSelectionError) {
+      setFrontMatterError(pageSelectionError)
+      return
+    }
     setIsPreviewing(true)
     try {
       const res = await fetch(`${apiUrl}/api/docs/preview-front-matter`, {
@@ -318,7 +517,7 @@ export default function PacketCreation({
         body: JSON.stringify({
           caseFolder,
           frontMatter,
-          documents: documents.map(d => ({ title: d.title, date: d.date })),
+          documents: documents.map(d => ({ title: d.title, date: d.date, path: d.path, pageSelection: d.pageSelection })),
           firmRoot: firmRoot || undefined,
           templateId: frontMatter.templateId || undefined,
         }),
@@ -451,10 +650,68 @@ export default function PacketCreation({
       })
       if (res.ok) {
         const data = await res.json()
-        const results: PacketPiiResult[] = (data.results || []).map((r: PacketPiiResult) => ({
-          ...r,
-          approved: r.findings.length === 0, // Auto-approve clean docs
-        }))
+        const results: PacketPiiResult[] = Array.isArray(data.results)
+          ? data.results
+            .map((raw: any) => {
+              const findings = Array.isArray(raw?.findings)
+                ? raw.findings
+                  .map((finding: any) => ({
+                    page: Number(finding?.page),
+                    kind: finding?.kind === 'ssn' ? 'ssn' as const : 'dob' as const,
+                    preview: typeof finding?.preview === 'string' ? finding.preview : '',
+                  }))
+                  .filter((finding: { page: number; kind: 'dob' | 'ssn'; preview: string }) => (
+                    Number.isFinite(finding.page) && finding.page >= 1
+                  ))
+                : []
+
+              const warnings = Array.isArray(raw?.warnings)
+                ? raw.warnings.filter((warning: unknown): warning is string => typeof warning === 'string' && warning.trim().length > 0)
+                : []
+
+              const scanned = typeof raw?.scanned === 'boolean'
+                ? raw.scanned
+                : warnings.length === 0
+
+              const boxes: PacketRedactionBox[] = Array.isArray(raw?.boxes)
+                ? raw.boxes
+                  .map((box: any) => {
+                    const page = Number(box?.page)
+                    const xPct = clamp01(Number(box?.xPct))
+                    const yPct = clamp01(Number(box?.yPct))
+                    const widthPct = clamp01(Number(box?.widthPct))
+                    const heightPct = clamp01(Number(box?.heightPct))
+                    if (!Number.isFinite(page) || page < 1 || widthPct <= 0 || heightPct <= 0) return null
+                    const normalized = { page, xPct, yPct, widthPct, heightPct }
+                    const kind = box?.kind === 'ssn' ? 'ssn' as const : box?.kind === 'dob' ? 'dob' as const : undefined
+                    const preview = typeof box?.preview === 'string' ? box.preview : ''
+                    return {
+                      id: `detected:${packetBoxKey(normalized)}:${kind || 'pii'}`,
+                      ...normalized,
+                      selected: true,
+                      source: 'detected' as const,
+                      kind,
+                      preview,
+                    }
+                  })
+                  .filter((box: PacketRedactionBox | null): box is PacketRedactionBox => Boolean(box))
+                : []
+
+              const path = typeof raw?.path === 'string' ? raw.path : ''
+              if (!path) return null
+              const candidateCount = Math.max(findings.length, boxes.length)
+
+              return {
+                path,
+                findings,
+                boxes,
+                warnings,
+                scanned,
+                approved: candidateCount === 0 && scanned && warnings.length === 0,
+              }
+            })
+            .filter((result: PacketPiiResult | null): result is PacketPiiResult => Boolean(result))
+          : []
         onUpdateState(prev => ({ ...prev, piiResults: results, piiScanned: true }))
       }
     } catch { /* ignore */ }
@@ -521,8 +778,28 @@ export default function PacketCreation({
       setGenerateError(error)
       return
     }
+    const pageSelectionError = validatePageSelections()
+    if (pageSelectionError) {
+      setGenerateError(pageSelectionError)
+      return
+    }
     setGenerateError(null)
     setIsGenerating(true)
+    const selectedManualRedactions = piiResults
+      .map((result) => ({
+        path: result.path,
+        boxes: (result.boxes || [])
+          .filter((box) => box.selected)
+          .map((box) => ({
+            page: Number(box.page),
+            xPct: clamp01(Number(box.xPct)),
+            yPct: clamp01(Number(box.yPct)),
+            widthPct: clamp01(Number(box.widthPct)),
+            heightPct: clamp01(Number(box.heightPct)),
+          }))
+          .filter((box) => Number.isFinite(box.page) && box.page >= 1 && box.widthPct > 0 && box.heightPct > 0),
+      }))
+      .filter((entry) => entry.boxes.length > 0)
     try {
       const res = await fetch(`${apiUrl}/api/docs/generate-packet`, {
         method: 'POST',
@@ -535,9 +812,11 @@ export default function PacketCreation({
             date: d.date,
             docType: d.type,
             include: true,
+            pageSelection: d.pageSelection,
           })),
           frontMatter,
-          redactionMode: 'best_effort',
+          redactionMode: piiScanned ? undefined : 'best_effort',
+          manualRedactions: selectedManualRedactions.length > 0 ? selectedManualRedactions : undefined,
           firmRoot: firmRoot || undefined,
           templateId: frontMatter.templateId || undefined,
         }),
@@ -553,6 +832,34 @@ export default function PacketCreation({
         if (data.outputPath) {
           onGenerated(data.outputPath)
         }
+
+        // NOTE: Temporarily disabled per product decision.
+        // We are not auto-prompting or saving `[REDACTED]` source copies after generation.
+        // Uncomment this block if the client confirms they want this behavior restored.
+        //
+        // if (selectedManualRedactions.length > 0) {
+        //   const shouldSaveRedactedCopies = window.confirm(
+        //     `Save redacted source copies for ${selectedManualRedactions.length} document${selectedManualRedactions.length === 1 ? '' : 's'} as filename[REDACTED].pdf?`
+        //   )
+        //   if (shouldSaveRedactedCopies) {
+        //     try {
+        //       const saveRes = await fetch(`${apiUrl}/api/docs/save-redacted-copies`, {
+        //         method: 'POST',
+        //         headers: { 'Content-Type': 'application/json' },
+        //         body: JSON.stringify({
+        //           caseFolder,
+        //           redactions: selectedManualRedactions,
+        //         }),
+        //       })
+        //       const saveData = await saveRes.json().catch(() => ({}))
+        //       if (!saveRes.ok) {
+        //         throw new Error(typeof saveData?.error === 'string' ? saveData.error : 'Failed to save redacted copies')
+        //       }
+        //     } catch (saveErr) {
+        //       window.alert(saveErr instanceof Error ? saveErr.message : 'Failed to save redacted copies')
+        //     }
+        //   }
+        // }
       } else {
         const data = await res.json().catch(() => ({ error: 'Generation failed' }))
         const invalidPaths = Array.isArray(data?.invalidPaths)
@@ -575,7 +882,7 @@ export default function PacketCreation({
   const tabs: Array<{ id: Tab; label: string; count?: number }> = [
     { id: 'documents', label: 'Documents', count: documents.length },
     { id: 'frontmatter', label: 'Front Matter' },
-    { id: 'pii', label: 'PII Scan', count: piiResults.reduce((sum, r) => sum + r.findings.length, 0) || undefined },
+    { id: 'pii', label: 'PII Scan', count: piiResults.reduce((sum, r) => sum + piiCandidateCount(r), 0) || undefined },
   ]
 
   return (
@@ -609,6 +916,7 @@ export default function PacketCreation({
         {activeTab === 'documents' && (
           <DocumentsTab
             documents={documents}
+            documentPageCounts={documentPageCounts}
             onDragStart={handleDragStart}
             onDragOver={handleDragOver}
             onDrop={handleDrop}
@@ -618,6 +926,8 @@ export default function PacketCreation({
             onRemove={handleRemoveDoc}
             onSortUnpinned={handleSortUnpinned}
             onShowFile={onShowFile}
+            onToggleAllPages={handleToggleAllPages}
+            onUpdatePageRanges={handlePageRangeChange}
           />
         )}
         {activeTab === 'frontmatter' && (
@@ -650,7 +960,7 @@ export default function PacketCreation({
             onRunScan={handleRunPiiScan}
             onApproveDoc={handleApprovePiiDoc}
             onApproveAll={handleApproveAllPii}
-            onShowFile={onShowFile}
+            onShowFile={onShowPiiFile}
           />
         )}
       </div>
@@ -713,6 +1023,7 @@ export default function PacketCreation({
 // --- Documents Tab ---
 function DocumentsTab({
   documents,
+  documentPageCounts,
   onDragStart,
   onDragOver,
   onDrop,
@@ -722,8 +1033,11 @@ function DocumentsTab({
   onRemove,
   onSortUnpinned,
   onShowFile,
+  onToggleAllPages,
+  onUpdatePageRanges,
 }: {
   documents: PacketDocument[]
+  documentPageCounts: Record<string, number | null>
   onDragStart: (index: number) => void
   onDragOver: (e: React.DragEvent, index: number) => void
   onDrop: (index: number) => void
@@ -733,6 +1047,8 @@ function DocumentsTab({
   onRemove: (index: number) => void
   onSortUnpinned: () => void
   onShowFile: (path: string) => void
+  onToggleAllPages: (index: number, allPages: boolean) => void
+  onUpdatePageRanges: (index: number, pageRanges: string) => void
 }) {
   if (documents.length === 0) {
     return (
@@ -760,56 +1076,95 @@ function DocumentsTab({
         </button>
       </div>
       <div className="space-y-1">
-        {documents.map((doc, index) => (
-          <div
-            key={doc.path}
-            draggable
-            onDragStart={() => onDragStart(index)}
-            onDragOver={(e) => onDragOver(e, index)}
-            onDrop={() => onDrop(index)}
-            onDragEnd={onDragEnd}
-            className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors cursor-move ${
-              dragOverIndex === index
-                ? 'border-accent-400 bg-accent-50'
-                : doc.hasWarning
-                  ? 'border-amber-200 bg-amber-50'
-                  : 'border-surface-200 bg-white hover:bg-surface-50'
-            }`}
-          >
-            <span className="text-brand-300 cursor-grab"><GripIcon /></span>
-            <button
-              onClick={() => onShowFile(doc.path)}
-              className="flex-1 text-left min-w-0"
+        {documents.map((doc, index) => {
+          const normalizedPath = normalizeDocumentPath(doc.path)
+          const pageCount = documentPageCounts[normalizedPath]
+          return (
+            <div
+              key={doc.path}
+              draggable
+              onDragStart={() => onDragStart(index)}
+              onDragOver={(e) => onDragOver(e, index)}
+              onDrop={() => onDrop(index)}
+              onDragEnd={onDragEnd}
+              className={`flex items-start gap-2 px-3 py-2 rounded-lg border transition-colors cursor-move ${
+                dragOverIndex === index
+                  ? 'border-accent-400 bg-accent-50'
+                  : doc.hasWarning
+                    ? 'border-amber-200 bg-amber-50'
+                    : 'border-surface-200 bg-white hover:bg-surface-50'
+              }`}
             >
-              <p className="text-sm text-brand-800 truncate">{packetDisplayTitle(doc.title, doc.fileName)}</p>
-              <div className="flex items-center gap-2 mt-0.5">
-                {doc.date ? (
-                  <span className="text-[11px] text-brand-500">{doc.date}</span>
-                ) : (
-                  <span className="text-[11px] text-amber-600 font-medium">No Date</span>
+              <span className="text-brand-300 cursor-grab"><GripIcon /></span>
+              <button
+                onClick={() => onShowFile(doc.path)}
+                className="flex-1 text-left min-w-0"
+              >
+                <p className="text-sm text-brand-800 truncate">{packetDisplayTitle(doc.title, doc.fileName)}</p>
+                <div className="flex items-center gap-2 mt-0.5">
+                  {doc.date ? (
+                    <span className="text-[11px] text-brand-500">{doc.date}</span>
+                  ) : (
+                    <span className="text-[11px] text-amber-600 font-medium">No Date</span>
+                  )}
+                  {doc.type && (
+                    <span className="text-[11px] text-brand-400">{doc.type}</span>
+                  )}
+                  {doc.hasWarning && <WarningBadge reason={doc.warningReason} />}
+                </div>
+              </button>
+              <div className="flex flex-col gap-2 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <label className="text-xs text-brand-700 flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={doc.pageSelection?.allPages ?? true}
+                      onChange={(e) => onToggleAllPages(index, e.target.checked)}
+                      className="h-3.5 w-3.5"
+                    />
+                    All Pages
+                  </label>
+                  {typeof pageCount === 'number' && (
+                    <span className="inline-flex items-center rounded bg-surface-100 px-1.5 py-0.5 text-[10px] font-semibold text-brand-700">
+                      {pageCount} page{pageCount === 1 ? '' : 's'}
+                    </span>
+                  )}
+                </div>
+                {!doc.pageSelection?.allPages && (
+                  <>
+                    <input
+                      value={doc.pageSelection?.pageRanges || ''}
+                      onChange={(e) => onUpdatePageRanges(index, e.target.value)}
+                      placeholder="e.g. 2-6, 1, 8"
+                      className="w-48 max-w-full text-xs border border-surface-200 rounded px-2 py-1 bg-white text-brand-700 focus:outline-none focus:ring-1 focus:ring-accent-500"
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    />
+                    {parsePageRangesInput(doc.pageSelection?.pageRanges || '') ? (
+                      <p className="text-[11px] text-red-600">
+                        {parsePageRangesInput(doc.pageSelection?.pageRanges || '')}
+                      </p>
+                    ) : null}
+                  </>
                 )}
-                {doc.type && (
-                  <span className="text-[11px] text-brand-400">{doc.type}</span>
-                )}
-                {doc.hasWarning && <WarningBadge reason={doc.warningReason} />}
               </div>
-            </button>
-            <button
-              onClick={() => onTogglePin(index)}
-              className="p-1 rounded hover:bg-surface-100 transition-colors"
-              title={doc.pinned ? 'Unpin' : 'Pin (keeps position during sort)'}
-            >
-              <PinIcon active={doc.pinned} />
-            </button>
-            <button
-              onClick={() => onRemove(index)}
-              className="p-1 rounded text-brand-400 hover:text-red-500 hover:bg-red-50 transition-colors"
-              title="Remove"
-            >
-              <XIcon />
-            </button>
-          </div>
-        ))}
+              <button
+                onClick={() => onTogglePin(index)}
+                className="p-1 rounded hover:bg-surface-100 transition-colors"
+                title={doc.pinned ? 'Unpin' : 'Pin (keeps position during sort)'}
+              >
+                <PinIcon active={doc.pinned} />
+              </button>
+              <button
+                onClick={() => onRemove(index)}
+                className="p-1 rounded text-brand-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                title="Remove"
+              >
+                <XIcon />
+              </button>
+            </div>
+          )
+        })}
       </div>
     </div>
   )
@@ -1256,9 +1611,12 @@ function PiiScanTab({
   onApproveAll: () => void
   onShowFile: (path: string) => void
 }) {
-  const totalFindings = piiResults.reduce((sum, r) => sum + r.findings.length, 0)
+  const totalFindings = piiResults.reduce((sum, r) => sum + piiCandidateCount(r), 0)
   const ssnCount = piiResults.reduce((sum, r) => sum + r.findings.filter(f => f.kind === 'ssn').length, 0)
   const dobCount = piiResults.reduce((sum, r) => sum + r.findings.filter(f => f.kind === 'dob').length, 0)
+  const unscannedCount = piiResults.reduce((sum, r) => (
+    sum + ((r.scanned === false || (r.warnings?.length || 0) > 0) ? 1 : 0)
+  ), 0)
   const allApproved = piiResults.length > 0 && piiResults.every(r => r.approved)
 
   return (
@@ -1305,7 +1663,7 @@ function PiiScanTab({
                 <p className={`text-lg font-semibold ${totalFindings > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>
                   {totalFindings}
                 </p>
-                <p className="text-[10px] text-brand-500 uppercase">Findings</p>
+                <p className="text-[10px] text-brand-500 uppercase">Potential</p>
               </div>
               {totalFindings > 0 && (
                 <>
@@ -1318,6 +1676,12 @@ function PiiScanTab({
                     <p className="text-[10px] text-brand-500 uppercase">DOB</p>
                   </div>
                 </>
+              )}
+              {unscannedCount > 0 && (
+                <div className="text-center">
+                  <p className="text-lg font-semibold text-amber-700">{unscannedCount}</p>
+                  <p className="text-[10px] text-brand-500 uppercase">Needs Scan</p>
+                </div>
               )}
               <div className="flex-1" />
               {totalFindings > 0 && !allApproved && (
@@ -1341,11 +1705,14 @@ function PiiScanTab({
           <div className="space-y-1">
             {piiResults.map(result => {
               const doc = documents.find(d => d.path === result.path)
+              const warnings = result.warnings || []
+              const hasWarnings = result.scanned === false || warnings.length > 0
+              const candidateCount = piiCandidateCount(result)
               return (
                 <div
                   key={result.path}
                   className={`flex items-center gap-3 px-3 py-2 rounded-lg border ${
-                    result.findings.length > 0 && !result.approved
+                    (candidateCount > 0 && !result.approved) || hasWarnings
                       ? 'border-amber-200 bg-amber-50'
                       : 'border-surface-200 bg-white'
                   }`}
@@ -1356,12 +1723,16 @@ function PiiScanTab({
                   >
                     <p className="text-sm text-brand-700 truncate">{packetDisplayTitle(doc?.title, result.path.split('/').pop() || result.path)}</p>
                     <div className="flex items-center gap-2 mt-0.5">
-                      {result.findings.length === 0 ? (
+                      {hasWarnings ? (
+                        <span className="text-[11px] text-amber-700">
+                          {warnings[0] || 'PII scan did not complete for this file.'}
+                        </span>
+                      ) : candidateCount === 0 ? (
                         <span className="text-[11px] text-emerald-600">No PII detected</span>
                       ) : (
                         <>
                           <span className="text-[11px] text-amber-600 font-medium">
-                            {result.findings.length} finding{result.findings.length !== 1 ? 's' : ''}
+                            {candidateCount} potential redaction{candidateCount !== 1 ? 's' : ''}
                           </span>
                           {result.findings.filter(f => f.kind === 'ssn').length > 0 && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700">

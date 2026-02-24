@@ -27,6 +27,7 @@ import {
   ensureBuiltInPacketDocxTemplate,
   BUILT_IN_TEMPLATES,
   type PacketTemplate,
+  resolvePacketPageSelection,
   type EvidencePacketManualRedactionBox,
   type EvidencePacketCaption,
   type EvidencePacketServiceInfo,
@@ -382,6 +383,121 @@ function clamp01(value: number): number {
   if (value < 0) return 0;
   if (value > 1) return 1;
   return value;
+}
+
+interface PiiScanBox {
+  page: number;
+  xPct: number;
+  yPct: number;
+  widthPct: number;
+  heightPct: number;
+  kind?: "dob" | "ssn";
+  preview?: string;
+}
+
+interface PiiScanHintsFile {
+  version: 1;
+  updatedAt: string;
+  byPath: Record<string, PiiScanBox[]>;
+}
+
+const PII_SCAN_HINTS_RELATIVE_PATH = join(".ai_tool", "pii-scan-hints.json");
+const MAX_PII_HINT_BOXES_PER_PATH = 400;
+
+function piiScanBoxKey(box: Pick<PiiScanBox, "page" | "xPct" | "yPct" | "widthPct" | "heightPct">): string {
+  return [
+    Math.floor(box.page),
+    clamp01(box.xPct).toFixed(5),
+    clamp01(box.yPct).toFixed(5),
+    clamp01(box.widthPct).toFixed(5),
+    clamp01(box.heightPct).toFixed(5),
+  ].join(":");
+}
+
+function normalizePiiScanBox(raw: any): PiiScanBox | null {
+  const page = typeof raw?.page === "number" ? raw.page : Number(raw?.page);
+  const xPct = clamp01(typeof raw?.xPct === "number" ? raw.xPct : Number(raw?.xPct));
+  const yPct = clamp01(typeof raw?.yPct === "number" ? raw.yPct : Number(raw?.yPct));
+  const widthPct = clamp01(typeof raw?.widthPct === "number" ? raw.widthPct : Number(raw?.widthPct));
+  const heightPct = clamp01(typeof raw?.heightPct === "number" ? raw.heightPct : Number(raw?.heightPct));
+  if (!Number.isFinite(page) || page < 1 || widthPct <= 0 || heightPct <= 0) return null;
+  const kind = raw?.kind === "ssn" ? "ssn" : raw?.kind === "dob" ? "dob" : undefined;
+  const preview = typeof raw?.preview === "string" ? raw.preview : "";
+  return { page, xPct, yPct, widthPct, heightPct, kind, preview };
+}
+
+function mergePiiScanBoxes(primary: PiiScanBox[], secondary: PiiScanBox[]): PiiScanBox[] {
+  const merged = new Map<string, PiiScanBox>();
+  const push = (box: PiiScanBox) => {
+    const key = piiScanBoxKey(box);
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, box);
+      return;
+    }
+    merged.set(key, {
+      ...existing,
+      kind: existing.kind || box.kind,
+      preview: existing.preview || box.preview,
+    });
+  };
+
+  primary.forEach(push);
+  secondary.forEach(push);
+  return Array.from(merged.values());
+}
+
+async function loadPiiScanHints(caseFolder: string): Promise<Record<string, PiiScanBox[]>> {
+  const hintsPath = join(caseFolder, PII_SCAN_HINTS_RELATIVE_PATH);
+  try {
+    const content = await readFile(hintsPath, "utf-8");
+    const parsed = JSON.parse(content) as Partial<PiiScanHintsFile>;
+    const byPath = parsed?.byPath && typeof parsed.byPath === "object" ? parsed.byPath : {};
+    const normalized: Record<string, PiiScanBox[]> = {};
+    for (const [rawPath, rawBoxes] of Object.entries(byPath)) {
+      const pathKey = normalizeRelativePath(rawPath);
+      if (!pathKey || !Array.isArray(rawBoxes)) continue;
+      const boxes = rawBoxes
+        .map((item) => normalizePiiScanBox(item))
+        .filter((item): item is PiiScanBox => Boolean(item));
+      if (boxes.length === 0) continue;
+      normalized[pathKey] = mergePiiScanBoxes([], boxes);
+    }
+    return normalized;
+  } catch {
+    return {};
+  }
+}
+
+async function savePiiScanHints(caseFolder: string, byPath: Record<string, PiiScanBox[]>): Promise<void> {
+  const hintsPath = join(caseFolder, PII_SCAN_HINTS_RELATIVE_PATH);
+  const payload: PiiScanHintsFile = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    byPath,
+  };
+  await mkdir(dirname(hintsPath), { recursive: true });
+  await writeFile(hintsPath, JSON.stringify(payload, null, 2), "utf-8");
+}
+
+async function appendPiiScanHints(
+  caseFolder: string,
+  documentPath: string,
+  boxes: Array<Pick<PiiScanBox, "page" | "xPct" | "yPct" | "widthPct" | "heightPct"> & Partial<Pick<PiiScanBox, "kind" | "preview">>>
+): Promise<void> {
+  const normalizedPath = normalizeRelativePath(documentPath);
+  if (!normalizedPath || boxes.length === 0) return;
+
+  const normalizedIncoming = boxes
+    .map((box) => normalizePiiScanBox(box))
+    .filter((box): box is PiiScanBox => Boolean(box));
+  if (normalizedIncoming.length === 0) return;
+
+  const hints = await loadPiiScanHints(caseFolder);
+  const existing = hints[normalizedPath] || [];
+  const merged = mergePiiScanBoxes(normalizedIncoming, existing).slice(0, MAX_PII_HINT_BOXES_PER_PATH);
+  hints[normalizedPath] = merged;
+  await savePiiScanHints(caseFolder, hints);
 }
 
 const app = new Hono();
@@ -1164,10 +1280,12 @@ app.post("/scan-pii", async (c) => {
     const resolvePath = await buildDocPathResolver(caseFolder);
     const fullPath = resolvePath(relativePath);
     const scan = await scanPdfForSensitiveData(fullPath, relativePath);
+    const piiHintsByPath = await loadPiiScanHints(caseFolder);
+    const hintedBoxes = piiHintsByPath[relativePath] || [];
 
     const pdfBytes = await readFile(fullPath);
     const pdf = await PDFDocument.load(pdfBytes);
-    const boxes = scan.boxes
+    const detectedBoxes: PiiScanBox[] = scan.boxes
       .map((item) => {
         const page = pdf.getPage(item.page - 1);
         if (!page) return null;
@@ -1185,22 +1303,37 @@ app.post("/scan-pii", async (c) => {
       })
       .filter((box): box is {
         page: number;
-        kind: "dob" | "ssn";
+        kind?: "dob" | "ssn";
         preview: string;
         xPct: number;
         yPct: number;
         widthPct: number;
         heightPct: number;
       } => Boolean(box));
+    const boxes = mergePiiScanBoxes(detectedBoxes, hintedBoxes);
+
+    const findingMap = new Map<string, { page: number; kind: "dob" | "ssn"; preview: string }>();
+    for (const finding of scan.findings) {
+      const key = `${finding.page}:${finding.kind}:${finding.preview || ""}`;
+      findingMap.set(key, { page: finding.page, kind: finding.kind, preview: finding.preview });
+    }
+    for (const hint of hintedBoxes) {
+      if (!hint.kind) continue;
+      const key = `${hint.page}:${hint.kind}:${hint.preview || ""}`;
+      if (findingMap.has(key)) continue;
+      findingMap.set(key, { page: hint.page, kind: hint.kind, preview: hint.preview || "" });
+    }
+    const findings = Array.from(findingMap.values()).sort((a, b) => a.page - b.page);
 
     return c.json({
       success: true,
       path: relativePath,
-      findings: scan.findings,
+      scanned: scan.scanned,
+      findings,
       warnings: scan.warnings,
       boxes,
-      pages: Array.from(new Set(scan.findings.map((finding) => finding.page))).sort((a, b) => a - b),
-      totalFindings: scan.findings.length,
+      pages: Array.from(new Set(findings.map((finding) => finding.page))).sort((a, b) => a - b),
+      totalFindings: findings.length,
     });
   } catch (err) {
     console.error("scan-pii error:", err);
@@ -1278,6 +1411,12 @@ app.post("/redact-pdf-manual", async (c) => {
     await mkdir(dirname(fullOutputPath), { recursive: true });
     await writeFile(fullOutputPath, redactedBytes);
 
+    try {
+      await appendPiiScanHints(caseFolder, relativePath, normalizedBoxes);
+    } catch (hintErr) {
+      console.warn("redact-pdf-manual hint save warning:", hintErr);
+    }
+
     return c.json({
       success: true,
       sourcePath: relativePath,
@@ -1288,6 +1427,108 @@ app.post("/redact-pdf-manual", async (c) => {
   } catch (err) {
     console.error("redact-pdf-manual error:", err);
     return c.json({ error: `Manual redaction failed: ${err}` }, 500);
+  }
+});
+
+// Save redacted copies for multiple source PDFs using user-selected boxes.
+app.post("/save-redacted-copies", async (c) => {
+  const { caseFolder, redactions } = await c.req.json();
+
+  if (!caseFolder || !Array.isArray(redactions) || redactions.length === 0) {
+    return c.json({ error: "caseFolder and redactions[] are required" }, 400);
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  try {
+    const resolveDocPath = await buildDocPathResolver(caseFolder);
+
+    let maps = { byPath: new Map<string, string>(), byBasename: new Map<string, string>(), ambiguousBasenames: new Set<string>() };
+    try {
+      const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+      const indexContent = await readFile(indexPath, "utf-8");
+      maps = buildIndexedPathMaps(JSON.parse(indexContent));
+    } catch {
+      // If index is unavailable, fall back to provided relative paths.
+    }
+
+    const resolvePath = await buildDocPathResolver(caseFolder);
+    const saved: Array<{ sourcePath: string; outputPath: string; boxesApplied: number }> = [];
+    const warnings: string[] = [];
+
+    for (const entry of redactions as any[]) {
+      const requestedPath = typeof entry?.path === "string" ? normalizeRelativePath(entry.path) : "";
+      if (!requestedPath) {
+        warnings.push("Skipped redaction entry with missing path.");
+        continue;
+      }
+      const normalizedPath = canonicalizeDocumentPath(requestedPath, maps) || requestedPath;
+      if (!normalizedPath.toLowerCase().endsWith(".pdf")) {
+        warnings.push(`Skipped non-PDF file: ${normalizedPath}`);
+        continue;
+      }
+
+      const normalizedBoxes: EvidencePacketManualRedactionBox[] = (Array.isArray(entry?.boxes) ? entry.boxes : [])
+        .map((item: any) => ({
+          page: typeof item?.page === "number" ? item.page : Number(item?.page),
+          xPct: typeof item?.xPct === "number" ? item.xPct : Number(item?.xPct),
+          yPct: typeof item?.yPct === "number" ? item.yPct : Number(item?.yPct),
+          widthPct: typeof item?.widthPct === "number" ? item.widthPct : Number(item?.widthPct),
+          heightPct: typeof item?.heightPct === "number" ? item.heightPct : Number(item?.heightPct),
+        }))
+        .filter((item) =>
+          Number.isFinite(item.page) &&
+          Number.isFinite(item.xPct) &&
+          Number.isFinite(item.yPct) &&
+          Number.isFinite(item.widthPct) &&
+          Number.isFinite(item.heightPct) &&
+          item.page >= 1 &&
+          item.widthPct > 0 &&
+          item.heightPct > 0
+        );
+      if (normalizedBoxes.length === 0) {
+        warnings.push(`Skipped ${normalizedPath}: no valid redaction boxes.`);
+        continue;
+      }
+
+      try {
+        const fullInputPath = resolvePath(normalizedPath);
+        const inputBytes = await readFile(fullInputPath);
+        const redactedBytes = await applyManualRedactionBoxes(inputBytes, normalizedBoxes);
+
+        const name = basename(normalizedPath, ".pdf");
+        const outputPath = normalizeRelativePath(join(dirname(normalizedPath), `${name}[REDACTED].pdf`));
+        const fullOutputPath = resolvePath(outputPath);
+        await mkdir(dirname(fullOutputPath), { recursive: true });
+        await writeFile(fullOutputPath, redactedBytes);
+
+        try {
+          await appendPiiScanHints(caseFolder, normalizedPath, normalizedBoxes);
+        } catch (hintErr) {
+          warnings.push(`Saved redacted copy for ${normalizedPath}, but could not save scan hints: ${hintErr}`);
+        }
+
+        saved.push({
+          sourcePath: normalizedPath,
+          outputPath,
+          boxesApplied: normalizedBoxes.length,
+        });
+      } catch (error) {
+        warnings.push(`Failed to save redacted copy for ${normalizedPath}: ${error}`);
+      }
+    }
+
+    return c.json({
+      success: true,
+      saved,
+      warnings,
+    });
+  } catch (err) {
+    console.error("save-redacted-copies error:", err);
+    return c.json({ error: `Save redacted copies failed: ${err}` }, 500);
   }
 });
 
@@ -1646,6 +1887,75 @@ app.delete("/packet-draft/:id", async (c) => {
   }
 });
 
+// Get document page counts for packet documents
+app.post("/document-page-counts", async (c) => {
+  const { caseFolder, paths } = await c.req.json();
+
+  if (!caseFolder || !Array.isArray(paths)) {
+    return c.json({ error: "caseFolder and paths[] are required" }, 400);
+  }
+
+  const normalizedRequestedPaths = paths
+    .map((value) => (typeof value === "string" ? normalizeRelativePath(value) : ""))
+    .filter((value) => value.length > 0);
+  if (normalizedRequestedPaths.length === 0) {
+    return c.json({ counts: {} });
+  }
+
+  const access = await requireCaseAccess(c, caseFolder);
+  if (!access.ok) {
+    return access.response;
+  }
+
+  try {
+    const resolveDocPath = await buildDocPathResolver(caseFolder);
+    let maps = { byPath: new Map<string, string>(), byBasename: new Map<string, string>(), ambiguousBasenames: new Set<string>() };
+    try {
+      const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+      const indexContent = await readFile(indexPath, "utf-8");
+      maps = buildIndexedPathMaps(JSON.parse(indexContent));
+    } catch {
+      // If the index is unavailable, continue with best-effort path matching.
+    }
+
+    const uniquePaths = Array.from(new Set(normalizedRequestedPaths));
+    const counts: Record<string, number | null> = {};
+
+    await Promise.all(uniquePaths.map(async (requestedPath) => {
+      const canonicalPath = canonicalizeDocumentPath(requestedPath, maps) || requestedPath;
+      if (!canonicalPath) {
+        counts[requestedPath] = null;
+        return;
+      }
+
+      const lowerPath = canonicalPath.toLowerCase();
+      if (lowerPath.endsWith(".jpg") || lowerPath.endsWith(".jpeg") || lowerPath.endsWith(".png")) {
+        counts[requestedPath] = 1;
+        return;
+      }
+
+      if (!lowerPath.endsWith(".pdf")) {
+        counts[requestedPath] = null;
+        return;
+      }
+
+      try {
+        const pdfBytes = await readFile(resolveDocPath(canonicalPath));
+        const sourcePdf = await PDFDocument.load(pdfBytes);
+        const pageCount = sourcePdf.getPageCount();
+        counts[requestedPath] = Number.isFinite(pageCount) && pageCount > 0 ? pageCount : 1;
+      } catch {
+        counts[requestedPath] = null;
+      }
+    }));
+
+    return c.json({ counts });
+  } catch (err) {
+    console.error("document-page-counts error:", err);
+    return c.json({ error: `Failed to compute page counts: ${err}` }, 500);
+  }
+});
+
 // Preview front matter PDF
 app.post("/preview-front-matter", async (c) => {
   const { caseFolder, frontMatter, documents, documentCount, firmRoot, templateId } = await c.req.json();
@@ -1660,18 +1970,89 @@ app.post("/preview-front-matter", async (c) => {
   }
 
   try {
-    // Build TOC entries from actual document data when available, else placeholders
-    const docList: Array<{ title?: string; date?: string }> = Array.isArray(documents) ? documents : [];
-    const entryCount = docList.length > 0 ? docList.length : (documentCount || 5);
+    let maps = { byPath: new Map<string, string>(), byBasename: new Map<string, string>(), ambiguousBasenames: new Set<string>() };
+    try {
+      const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+      const indexContent = await readFile(indexPath, "utf-8");
+      maps = buildIndexedPathMaps(JSON.parse(indexContent));
+    } catch {
+      // If the document index is unavailable, continue with best-effort path matching.
+    }
+
+    const docInputs: Array<{ title?: string; date?: string; path?: string; pageSelection?: { allPages?: unknown; pageRanges?: unknown } }> = Array.isArray(documents)
+      ? documents
+      : [];
+    const entryCount = docInputs.length > 0 ? docInputs.length : (documentCount || 5);
     const placeholderEntries = [];
-    for (let i = 0; i < entryCount; i++) {
-      const d = docList[i];
+    let nextStartPage = 1;
+
+    const addPlaceholderEntry = (entryTitle: string, entryDate: string | undefined, pageCount: number) => {
+      const startPage = nextStartPage;
+      const endPage = nextStartPage + Math.max(1, pageCount) - 1;
       placeholderEntries.push({
-        title: d?.title || `Document ${i + 1}`,
-        date: d?.date || undefined,
-        startPage: i * 3 + 1,
-        endPage: (i + 1) * 3,
+        title: entryTitle,
+        date: entryDate,
+        startPage,
+        endPage,
       });
+      nextStartPage = endPage + 1;
+    };
+
+    for (let i = 0; i < docInputs.length; i++) {
+      const input = docInputs[i] as {
+        title?: string;
+        date?: string;
+        path?: string;
+        pageSelection?: { allPages?: boolean; pageRanges?: string };
+      };
+      const entryTitle = (typeof input?.title === "string" && input.title.trim()) || `Document ${i + 1}`;
+      const entryDate = typeof input?.date === "string" ? input.date : undefined;
+      const inputPath = typeof input?.path === "string" ? normalizeRelativePath(input.path) : "";
+      const canonicalPath = inputPath ? (canonicalizeDocumentPath(inputPath, maps) || inputPath) : "";
+      if (!canonicalPath) {
+        addPlaceholderEntry(entryTitle, entryDate, 3);
+        continue;
+      }
+
+      let pageCount = 1;
+      const lowerPath = canonicalPath.toLowerCase();
+      if (lowerPath.endsWith(".pdf")) {
+        try {
+          const pdfBytes = await readFile(resolveCasePath(caseFolder, canonicalPath));
+          const sourcePdf = await PDFDocument.load(pdfBytes);
+          pageCount = sourcePdf.getPageCount();
+        } catch {
+          addPlaceholderEntry(entryTitle, entryDate, 3);
+          continue;
+        }
+      } else if (!lowerPath.endsWith(".jpg") && !lowerPath.endsWith(".jpeg") && !lowerPath.endsWith(".png")) {
+        addPlaceholderEntry(entryTitle, entryDate, 1);
+        continue;
+      }
+
+      const hasPageSelection = input.pageSelection && typeof input.pageSelection === "object";
+      const normalizedSelection = hasPageSelection
+        ? {
+            allPages: input.pageSelection!.allPages !== false,
+            pageRanges: typeof input.pageSelection?.pageRanges === "string"
+              ? input.pageSelection.pageRanges
+              : "",
+          }
+        : { allPages: true, pageRanges: "" };
+      const selectionResult = resolvePacketPageSelection(
+        normalizedSelection,
+        pageCount
+      );
+      if (selectionResult.selectedPages.length === 0) {
+        continue;
+      }
+      addPlaceholderEntry(entryTitle, entryDate, selectionResult.selectedPages.length);
+    }
+
+    if (docInputs.length === 0) {
+      for (let i = 0; i < entryCount; i++) {
+        addPlaceholderEntry(`Document ${i + 1}`, undefined, 3);
+      }
     }
 
     // If firmBlockLines are empty, try to build from firm config
@@ -2050,7 +2431,7 @@ app.get("/file-mtime", async (c) => {
 
 // Generate final evidence packet
 app.post("/generate-packet", async (c) => {
-  const { caseFolder, documents, frontMatter, redactionMode, firmRoot, templateId } = await c.req.json();
+  const { caseFolder, documents, frontMatter, redactionMode, manualRedactions, firmRoot, templateId } = await c.req.json();
 
   if (!caseFolder || !documents || !frontMatter) {
     return c.json({ error: "caseFolder, documents, and frontMatter required" }, 400);
@@ -2085,6 +2466,10 @@ app.post("/generate-packet", async (c) => {
           date: d?.date || undefined,
           docType: d?.docType || d?.type || undefined,
           include: d?.include !== false,
+          pageSelection: typeof d?.pageSelection === "object" ? {
+            allPages: d.pageSelection?.allPages !== false,
+            pageRanges: typeof d.pageSelection?.pageRanges === "string" ? d.pageSelection.pageRanges : "",
+          } : undefined,
         };
       })
       .filter((d): d is { path: string; title: string; date?: string; docType?: string; include: boolean } => Boolean(d));
@@ -2099,6 +2484,40 @@ app.post("/generate-packet", async (c) => {
     if (canonicalDocuments.length === 0) {
       return c.json({ error: "None of the selected documents matched indexed files" }, 400);
     }
+
+    const manualRedactionsByPath: Record<string, EvidencePacketManualRedactionBox[]> = {};
+    if (Array.isArray(manualRedactions)) {
+      for (const entry of manualRedactions) {
+        if (!entry || typeof entry !== "object") continue;
+        const requestedPath = typeof (entry as any).path === "string" ? (entry as any).path : "";
+        const canonicalPath = canonicalizeDocumentPath(requestedPath, maps);
+        if (!canonicalPath) continue;
+
+        const candidateBoxes = Array.isArray((entry as any).boxes) ? (entry as any).boxes : [];
+        const normalizedBoxes: EvidencePacketManualRedactionBox[] = candidateBoxes
+          .map((item: any) => ({
+            page: typeof item?.page === "number" ? item.page : Number(item?.page),
+            xPct: typeof item?.xPct === "number" ? item.xPct : Number(item?.xPct),
+            yPct: typeof item?.yPct === "number" ? item.yPct : Number(item?.yPct),
+            widthPct: typeof item?.widthPct === "number" ? item.widthPct : Number(item?.widthPct),
+            heightPct: typeof item?.heightPct === "number" ? item.heightPct : Number(item?.heightPct),
+          }))
+          .filter((item) =>
+            Number.isFinite(item.page) &&
+            Number.isFinite(item.xPct) &&
+            Number.isFinite(item.yPct) &&
+            Number.isFinite(item.widthPct) &&
+            Number.isFinite(item.heightPct) &&
+            item.page >= 1 &&
+            item.widthPct > 0 &&
+            item.heightPct > 0
+          );
+
+        if (normalizedBoxes.length === 0) continue;
+        manualRedactionsByPath[canonicalPath] = normalizedBoxes;
+      }
+    }
+    const hasManualRedactions = Object.keys(manualRedactionsByPath).length > 0;
 
     // Extract firmName from config for interpolation and signature block
     const configRoot = firmRoot || resolveFirmRoot(caseFolder);
@@ -2149,9 +2568,10 @@ app.post("/generate-packet", async (c) => {
       caseFolder,
       documents: canonicalDocuments,
       caption,
-      redaction: redactionMode
+      redaction: hasManualRedactions ? undefined : redactionMode
         ? { enabled: true, mode: redactionMode }
         : undefined,
+      manualRedactionsByPath: hasManualRedactions ? manualRedactionsByPath : undefined,
       service,
       includeAffirmationPage: true,
       firmBlockLines: frontMatter.firmBlockLines,
@@ -2177,6 +2597,16 @@ app.post("/generate-packet", async (c) => {
       const docxRelPath = `Front Matter - ${timestampToken}.docx`;
       await writeFile(join(caseFolder, docxRelPath), result.frontMatterDocxBytes);
       frontMatterDocxPath = docxRelPath;
+    }
+
+    if (hasManualRedactions) {
+      for (const [manualPath, manualBoxes] of Object.entries(manualRedactionsByPath)) {
+        try {
+          await appendPiiScanHints(caseFolder, manualPath, manualBoxes);
+        } catch (hintErr) {
+          console.warn(`generate-packet hint save warning for ${manualPath}:`, hintErr);
+        }
+      }
     }
 
     // Auto-save state as a draft for future reference
@@ -2229,28 +2659,90 @@ app.post("/batch-scan-pii", async (c) => {
     const indexData = JSON.parse(indexContent);
     const maps = buildIndexedPathMaps(indexData);
     const resolvePath = await buildDocPathResolver(caseFolder);
+    const piiHintsByPath = await loadPiiScanHints(caseFolder);
 
     const results = await Promise.all(
       paths.map(async (relativePath: string) => {
         const requestedPath = normalizeRelativePath(relativePath);
         const normalized = canonicalizeDocumentPath(requestedPath, maps) || requestedPath;
+        const hintedBoxes = piiHintsByPath[normalized] || [];
         if (!normalized.toLowerCase().endsWith(".pdf")) {
-          return { path: normalized, findings: [], approved: true };
+          return {
+            path: normalized,
+            findings: [],
+            boxes: hintedBoxes,
+            warnings: ["PII scan skipped: only PDF files are supported."],
+            scanned: false,
+          };
         }
         try {
           const fullPath = resolvePath(normalized);
           const scan = await scanPdfForSensitiveData(fullPath, normalized);
+          const pdfBytes = await readFile(fullPath);
+          const pdf = await PDFDocument.load(pdfBytes);
+          const detectedBoxes: PiiScanBox[] = scan.boxes
+            .map((item) => {
+              const page = pdf.getPage(item.page - 1);
+              if (!page) return null;
+              const { width, height } = page.getSize();
+              if (width <= 0 || height <= 0) return null;
+              return {
+                page: item.page,
+                kind: item.kind,
+                preview: item.preview,
+                xPct: clamp01(item.xMin / width),
+                yPct: clamp01(item.yMin / height),
+                widthPct: clamp01((item.xMax - item.xMin) / width),
+                heightPct: clamp01((item.yMax - item.yMin) / height),
+              };
+            })
+            .filter((box): box is {
+              page: number;
+              kind?: "dob" | "ssn";
+              preview: string;
+              xPct: number;
+              yPct: number;
+              widthPct: number;
+              heightPct: number;
+            } => Boolean(box));
+          const boxes = mergePiiScanBoxes(detectedBoxes, hintedBoxes);
+
+          const findingMap = new Map<string, { page: number; kind: "dob" | "ssn"; preview: string }>();
+          for (const finding of scan.findings) {
+            const key = `${finding.page}:${finding.kind}:${finding.preview || ""}`;
+            findingMap.set(key, {
+              page: finding.page,
+              kind: finding.kind,
+              preview: finding.preview,
+            });
+          }
+          for (const hint of hintedBoxes) {
+            if (!hint.kind) continue;
+            const key = `${hint.page}:${hint.kind}:${hint.preview || ""}`;
+            if (findingMap.has(key)) continue;
+            findingMap.set(key, {
+              page: hint.page,
+              kind: hint.kind,
+              preview: hint.preview || "",
+            });
+          }
+          const findings = Array.from(findingMap.values()).sort((a, b) => a.page - b.page);
           return {
             path: normalized,
-            findings: scan.findings.map(f => ({
-              page: f.page,
-              kind: f.kind,
-              preview: f.preview,
-            })),
-            approved: false,
+            findings,
+            boxes,
+            warnings: scan.warnings,
+            scanned: scan.scanned,
           };
-        } catch {
-          return { path: normalized, findings: [], approved: true };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return {
+            path: normalized,
+            findings: [],
+            boxes: hintedBoxes,
+            warnings: [`PII scan failed: ${message}`],
+            scanned: false,
+          };
         }
       })
     );

@@ -1,4 +1,8 @@
 export interface PacketDocument {
+  pageSelection: {
+    allPages: boolean
+    pageRanges: string
+  }
   path: string
   title: string
   date: string | null
@@ -31,7 +35,23 @@ export interface PacketFrontMatter {
 export interface PacketPiiResult {
   path: string
   findings: Array<{ page: number; kind: 'dob' | 'ssn'; preview: string }>
+  boxes?: PacketRedactionBox[]
+  warnings?: string[]
+  scanned?: boolean
   approved: boolean
+}
+
+export interface PacketRedactionBox {
+  id: string
+  page: number
+  xPct: number
+  yPct: number
+  widthPct: number
+  heightPct: number
+  selected: boolean
+  source: 'detected' | 'text' | 'draw'
+  kind?: 'dob' | 'ssn'
+  preview?: string
 }
 
 export interface PacketState {

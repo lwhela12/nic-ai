@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback, useMemo, useRef, type MouseEvent } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 import type { DocumentIndex, ErrataItem, NeedsReviewItem } from '../App'
+import type { PacketPiiResult, PacketRedactionBox } from '../types/packet'
 import { formatDateMMDDYYYY } from '../utils/dateFormat'
 
 // Set up PDF.js worker (using local copy since CDN may not have latest version)
@@ -32,6 +33,9 @@ const EXPORT_STYLE_OPTIONS: Array<{ value: ExportStyleProfile; label: string }> 
   { value: 'letter', label: 'Letter' },
   { value: 'text_only', label: 'Text Only' },
 ]
+
+const IMAGE_PDF_AUTO_DETECT_WARNING = "I can't auto-detect on images or image based PDFs. Sorry!"
+const DASH_LIKE_CHARS = /[-\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/
 
 const inferStyleProfileFromHint = (hint: string): ExportStyleProfile => {
   const normalized = hint.toLowerCase()
@@ -86,6 +90,9 @@ interface Props {
   evidencePacketVersion?: number
   onOpenFilePath?: (path: string) => void
   onOpenPacketDraft?: (draftId: string) => void
+  packetPiiActive?: boolean
+  packetPiiResult?: PacketPiiResult | null
+  onPacketPiiResultUpdate?: (path: string, updater: (prev: PacketPiiResult) => PacketPiiResult) => void
 }
 
 interface PiiFinding {
@@ -446,6 +453,348 @@ const clamp01 = (value: number): number => {
   return value
 }
 
+const packetBoxKey = (box: {
+  page: number
+  xPct: number
+  yPct: number
+  widthPct: number
+  heightPct: number
+}): string => {
+  const page = Number.isFinite(box.page) ? Math.floor(box.page) : 0
+  return [
+    page,
+    box.xPct.toFixed(5),
+    box.yPct.toFixed(5),
+    box.widthPct.toFixed(5),
+    box.heightPct.toFixed(5),
+  ].join(':')
+}
+
+const inferPiiKindFromText = (value: string): 'dob' | 'ssn' | undefined => {
+  const normalized = value.trim()
+  if (!normalized) return undefined
+  if (/^\d{3}[-\u2010-\u2015\u2212]\d{2}[-\u2010-\u2015\u2212]\d{4}$/.test(normalized)) return 'ssn'
+  if (/^\d{9}$/.test(normalized)) return 'ssn'
+  if (/^\d{1,2}[\/.\-\u2010-\u2015\u2212]\d{1,2}[\/.\-\u2010-\u2015\u2212]\d{2,4}$/.test(normalized)) return 'dob'
+  return undefined
+}
+
+interface TextLayerSpanSegment {
+  node: HTMLElement
+  text: string
+  left: number
+  right: number
+  top: number
+  bottom: number
+  centerY: number
+  width: number
+  height: number
+}
+
+interface TextLayerSpanRange {
+  segment: TextLayerSpanSegment
+  start: number
+  end: number
+}
+
+interface AutoDetectedTextBox {
+  left: number
+  top: number
+  width: number
+  height: number
+  text: string
+  kind?: 'dob' | 'ssn'
+}
+
+const isTokenCharacter = (char: string): boolean => (
+  /[0-9A-Za-z/._?*]/.test(char) ||
+  DASH_LIKE_CHARS.test(char)
+)
+
+const normalizeDashCharacters = (value: string): string => (
+  value.replace(/[\u2010-\u2015\u2212]/g, '-')
+)
+
+const normalizeCompactTokenText = (value: string): string => (
+  normalizeDashCharacters(value).replace(/\s+/g, '')
+)
+
+const isLooseSsnToken = (value: string): boolean => {
+  const compact = normalizeCompactTokenText(value)
+  if (!compact) return false
+  if (/[^0-9?*\-]/.test(compact)) return false
+
+  const digitsOrPlaceholders = compact.replace(/-/g, '')
+  if (digitsOrPlaceholders.length !== 9) return false
+
+  if (compact.includes('-')) {
+    return /^[0-9?*]{3}-[0-9?*]{2}-[0-9?*]{4}$/.test(compact)
+  }
+  return /^[0-9?*]{9}$/.test(compact)
+}
+
+const isLooseDobToken = (value: string): boolean => {
+  const compact = normalizeCompactTokenText(value)
+  if (!compact) return false
+  if (/[^0-9?*\/.\-]/.test(compact)) return false
+  return /^[0-9?*]{1,2}[\/.\-][0-9?*]{1,2}[\/.\-][0-9?*]{2,4}$/.test(compact)
+}
+
+const segmentCharWidth = (segment: TextLayerSpanSegment): number => {
+  const nonSpaceChars = Math.max(1, segment.text.replace(/\s+/g, '').length)
+  return segment.width / nonSpaceChars
+}
+
+const segmentGapWithinTokenTolerance = (left: TextLayerSpanSegment, right: TextLayerSpanSegment): boolean => {
+  const gap = right.left - left.right
+  if (gap <= 0) return true
+  const avgCharWidth = (segmentCharWidth(left) + segmentCharWidth(right)) / 2
+  return gap <= Math.max(16, avgCharWidth * 4.5)
+}
+
+interface PiiWindowMatch {
+  startIndex: number
+  endIndex: number
+  kind: 'dob' | 'ssn'
+  text: string
+}
+
+const findLoosePiiWindowMatch = (
+  lineSegments: TextLayerSpanSegment[],
+  clickedIndex: number,
+): PiiWindowMatch | null => {
+  if (clickedIndex < 0 || clickedIndex >= lineSegments.length) return null
+
+  const searchRadius = 5
+  const minStart = Math.max(0, clickedIndex - searchRadius)
+  const maxEnd = Math.min(lineSegments.length - 1, clickedIndex + searchRadius)
+  let best: PiiWindowMatch | null = null
+
+  for (let start = minStart; start <= clickedIndex; start += 1) {
+    for (let end = clickedIndex; end <= maxEnd; end += 1) {
+      if (end - start + 1 > 10) continue
+
+      let contiguous = true
+      for (let i = start; i < end; i += 1) {
+        if (!segmentGapWithinTokenTolerance(lineSegments[i], lineSegments[i + 1])) {
+          contiguous = false
+          break
+        }
+      }
+      if (!contiguous) continue
+
+      const candidateText = lineSegments
+        .slice(start, end + 1)
+        .map((segment) => segment.text)
+        .join('')
+      const compact = normalizeCompactTokenText(candidateText)
+      const kind: 'dob' | 'ssn' | null = isLooseSsnToken(compact)
+        ? 'ssn'
+        : (isLooseDobToken(compact) ? 'dob' : null)
+      if (!kind) continue
+
+      const normalizedText = candidateText.replace(/\s+/g, ' ').trim()
+      const score = normalizedText.length + (kind === 'ssn' ? 50 : 10)
+      const bestScore = best ? (best.text.length + (best.kind === 'ssn' ? 50 : 10)) : -1
+      if (!best || score > bestScore) {
+        best = {
+          startIndex: start,
+          endIndex: end,
+          kind,
+          text: normalizedText,
+        }
+      }
+    }
+  }
+
+  return best
+}
+
+const buildBoxFromSegmentSet = (
+  matchedSegments: TextLayerSpanSegment[],
+  pageRect: DOMRect,
+  text: string,
+  kind?: 'dob' | 'ssn',
+): AutoDetectedTextBox | null => {
+  if (matchedSegments.length === 0) return null
+  const padding = 2
+  const minLeft = Math.min(...matchedSegments.map((segment) => segment.left))
+  const maxRight = Math.max(...matchedSegments.map((segment) => segment.right))
+  const minTop = Math.min(...matchedSegments.map((segment) => segment.top))
+  const maxBottom = Math.max(...matchedSegments.map((segment) => segment.bottom))
+
+  const left = Math.max(0, minLeft - pageRect.left - padding)
+  const top = Math.max(0, minTop - pageRect.top - padding)
+  const right = Math.min(pageRect.width, maxRight - pageRect.left + padding)
+  const bottom = Math.min(pageRect.height, maxBottom - pageRect.top + padding)
+  const width = right - left
+  const height = bottom - top
+  if (width < 1 || height < 1) return null
+
+  return {
+    left,
+    top,
+    width,
+    height,
+    text,
+    kind,
+  }
+}
+
+const selectLineTokenRange = (
+  lineText: string,
+  clickIndex: number,
+): { start: number; end: number } | null => {
+  if (!lineText.length || clickIndex < 0 || clickIndex >= lineText.length) return null
+  if (!isTokenCharacter(lineText[clickIndex])) return null
+
+  let start = clickIndex
+  while (start > 0 && isTokenCharacter(lineText[start - 1])) {
+    start -= 1
+  }
+
+  let end = clickIndex + 1
+  while (end < lineText.length && isTokenCharacter(lineText[end])) {
+    end += 1
+  }
+
+  if (start >= end) return null
+  return { start, end }
+}
+
+const selectRegexTokenRange = (
+  lineText: string,
+  clickIndex: number,
+): { start: number; end: number } | null => {
+  const pattern = /\b(?:\d{3}[-\u2010-\u2015\u2212]\d{2}[-\u2010-\u2015\u2212]\d{4}|\d{9}|\d{1,2}[\/.\-\u2010-\u2015\u2212]\d{1,2}[\/.\-\u2010-\u2015\u2212]\d{2,4})\b/g
+  let match: RegExpExecArray | null
+  let nearest: { start: number; end: number; distance: number } | null = null
+
+  while ((match = pattern.exec(lineText)) !== null) {
+    const start = match.index
+    const end = start + match[0].length
+    if (clickIndex >= start && clickIndex < end) {
+      return { start, end }
+    }
+
+    const distance = clickIndex < start
+      ? start - clickIndex
+      : clickIndex - (end - 1)
+    if (!nearest || distance < nearest.distance) {
+      nearest = { start, end, distance }
+    }
+  }
+
+  if (nearest && nearest.distance <= 2) {
+    return { start: nearest.start, end: nearest.end }
+  }
+  return null
+}
+
+const buildAutoDetectedTextBox = (
+  target: HTMLElement,
+  clickClientX: number,
+  pageRect: DOMRect,
+): AutoDetectedTextBox | null => {
+  const clickedSpan = target.closest('.react-pdf__Page__textContent span') as HTMLElement | null
+  if (!clickedSpan) return null
+  const textLayer = clickedSpan.closest('.react-pdf__Page__textContent') as HTMLElement | null
+  if (!textLayer) return null
+
+  const segments: TextLayerSpanSegment[] = Array.from(textLayer.querySelectorAll('span'))
+    .map((node) => {
+      const text = (node.textContent || '').replace(/\u00A0/g, ' ')
+      const rect = node.getBoundingClientRect()
+      return {
+        node,
+        text,
+        left: rect.left,
+        right: rect.right,
+        top: rect.top,
+        bottom: rect.bottom,
+        centerY: rect.top + (rect.height / 2),
+        width: rect.width,
+        height: rect.height,
+      }
+    })
+    .filter((segment) => segment.text.length > 0 && segment.width > 0 && segment.height > 0)
+
+  if (segments.length === 0) return null
+
+  const clickedSegment = segments.find((segment) => segment.node === clickedSpan)
+  if (!clickedSegment) return null
+
+  const lineTolerance = Math.max(2, Math.min(6, clickedSegment.height * 0.45))
+  const lineSegments = segments
+    .filter((segment) => Math.abs(segment.centerY - clickedSegment.centerY) <= lineTolerance)
+    .sort((a, b) => a.left - b.left)
+
+  if (lineSegments.length === 0) return null
+  const clickedLineIndex = lineSegments.findIndex((segment) => segment.node === clickedSpan)
+  if (clickedLineIndex < 0) return null
+
+  const loosePiiWindow = findLoosePiiWindowMatch(lineSegments, clickedLineIndex)
+  if (loosePiiWindow) {
+    return buildBoxFromSegmentSet(
+      lineSegments.slice(loosePiiWindow.startIndex, loosePiiWindow.endIndex + 1),
+      pageRect,
+      loosePiiWindow.text,
+      loosePiiWindow.kind,
+    )
+  }
+
+  const ranges: TextLayerSpanRange[] = []
+  let lineText = ''
+  for (let i = 0; i < lineSegments.length; i += 1) {
+    const segment = lineSegments[i]
+    if (i > 0) {
+      const prev = lineSegments[i - 1]
+      const gap = segment.left - prev.right
+      const prevChars = Math.max(1, prev.text.replace(/\s+/g, '').length)
+      const currChars = Math.max(1, segment.text.replace(/\s+/g, '').length)
+      const avgCharWidth = ((prev.width / prevChars) + (segment.width / currChars)) / 2
+      const syntheticSpaceGap = Math.max(2, avgCharWidth * 0.9)
+      if (gap > syntheticSpaceGap) {
+        lineText += ' '
+      }
+    }
+    const start = lineText.length
+    lineText += segment.text
+    const end = lineText.length
+    ranges.push({ segment, start, end })
+  }
+
+  if (!lineText.trim().length) return null
+
+  const clickedRange = ranges[clickedLineIndex]
+  if (!clickedRange) return null
+
+  const clickedLength = Math.max(1, clickedRange.end - clickedRange.start)
+  const clickRatio = clickedSegment.width > 0
+    ? clamp01((clickClientX - clickedSegment.left) / clickedSegment.width)
+    : 0.5
+  const clickIndex = Math.min(
+    lineText.length - 1,
+    clickedRange.start + Math.floor(clickRatio * clickedLength),
+  )
+
+  const preferredRange =
+    selectRegexTokenRange(lineText, clickIndex) ||
+    selectLineTokenRange(lineText, clickIndex) ||
+    { start: clickedRange.start, end: clickedRange.end }
+
+  const matchedRanges = ranges.filter((range) => (
+    range.end > preferredRange.start && range.start < preferredRange.end
+  ))
+  const text = lineText.slice(preferredRange.start, preferredRange.end).replace(/\s+/g, ' ').trim()
+  return buildBoxFromSegmentSet(
+    matchedRanges.map((range) => range.segment),
+    pageRect,
+    text,
+    inferPiiKindFromText(text),
+  )
+}
+
 // Icons
 const DocumentIcon = () => (
   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -556,6 +905,9 @@ export default function Visualizer({
   evidencePacketVersion,
   onOpenFilePath,
   onOpenPacketDraft,
+  packetPiiActive = false,
+  packetPiiResult = null,
+  onPacketPiiResultUpdate,
 }: Props) {
   const [activeTab, setActiveTab] = useState<'view' | 'review' | 'drafts'>('view')
   const [verifiedItems, setVerifiedItems] = useState<Set<string>>(new Set())
@@ -592,7 +944,10 @@ export default function Visualizer({
   const pdfContainerRef = useRef<HTMLDivElement>(null)
   const [pdfContainerWidth, setPdfContainerWidth] = useState<number | null>(null)
   const pageLayerRef = useRef<HTMLDivElement>(null)
+  const activeDrawPointerIdRef = useRef<number | null>(null)
+  const autoEnabledDrawForFileRef = useRef<string | null>(null)
   const [pageLayerSize, setPageLayerSize] = useState<{ width: number; height: number } | null>(null)
+  const [currentPageHasSelectableText, setCurrentPageHasSelectableText] = useState<boolean | null>(null)
 
   const [piiFindings, setPiiFindings] = useState<PiiFinding[]>([])
   const [piiWarnings, setPiiWarnings] = useState<string[]>([])
@@ -602,6 +957,7 @@ export default function Visualizer({
   const [isScanningPii, setIsScanningPii] = useState(false)
   const [isDrawMode, setIsDrawMode] = useState(false)
   const [draftRedactionBox, setDraftRedactionBox] = useState<DraftRedactionBox | null>(null)
+  const [lastDrawnBoxId, setLastDrawnBoxId] = useState<string | null>(null)
   const [isSavingRedactions, setIsSavingRedactions] = useState(false)
   const [redactionMessage, setRedactionMessage] = useState<string | null>(null)
   const [redactionError, setRedactionError] = useState<string | null>(null)
@@ -613,6 +969,24 @@ export default function Visualizer({
   const [isSavingDocumentSummary, setIsSavingDocumentSummary] = useState(false)
   const [documentSummarySaveError, setDocumentSummarySaveError] = useState<string | null>(null)
   const [documentSummarySaveMessage, setDocumentSummarySaveMessage] = useState<string | null>(null)
+
+  const showImagePdfAutoDetectWarning = useCallback((asPopup = false) => {
+    setRedactionMessage(IMAGE_PDF_AUTO_DETECT_WARNING)
+    setRedactionError(null)
+    if (asPopup) {
+      window.alert(IMAGE_PDF_AUTO_DETECT_WARNING)
+    }
+  }, [])
+
+  const handlePdfTextLayerSuccess = useCallback((textContent: any) => {
+    const items = Array.isArray(textContent?.items) ? textContent.items : []
+    const hasText = items.some((item: any) => typeof item?.str === 'string' && item.str.trim().length > 0)
+    setCurrentPageHasSelectableText(hasText)
+  }, [])
+
+  const handlePdfTextLayerError = useCallback(() => {
+    setCurrentPageHasSelectableText(false)
+  }, [])
 
   const handleExportStyleChange = useCallback((nextStyle: ExportStyleProfile) => {
     setExportStyleProfile(nextStyle)
@@ -640,6 +1014,38 @@ export default function Visualizer({
     ),
   )
   const activeFileUrl = isViewingSelectedDraft && draftPreviewUrl ? draftPreviewUrl : fileUrl
+  const normalizedPacketPiiPath = packetPiiResult?.path
+    ? normalizeRelativePath(packetPiiResult.path).toLowerCase()
+    : ''
+  const isPacketPiiReviewMode = Boolean(
+    packetPiiActive &&
+    packetPiiResult &&
+    normalizedFilePath &&
+    normalizedFilePath === normalizedPacketPiiPath
+  )
+  const packetBoxes: PacketRedactionBox[] = Array.isArray(packetPiiResult?.boxes) ? packetPiiResult.boxes : []
+  const selectedPacketBoxes = packetBoxes.filter((box) => box.selected)
+  const packetPiiWarnings = Array.isArray(packetPiiResult?.warnings) ? packetPiiResult.warnings : []
+  const packetPiiFindings: PiiFinding[] = Array.isArray(packetPiiResult?.findings)
+    ? packetPiiResult.findings
+      .map((item) => {
+        const kind: 'dob' | 'ssn' = item.kind === 'ssn' ? 'ssn' : 'dob'
+        return {
+          path: packetPiiResult.path,
+          page: Number(item.page),
+          kind,
+          preview: typeof item.preview === 'string' ? item.preview : '',
+        }
+      })
+      .filter((item): item is PiiFinding => Number.isFinite(item.page) && item.page >= 1)
+    : []
+  const packetRequiresManualDraw = Boolean(
+    isPacketPiiReviewMode &&
+    (
+      packetPiiResult?.scanned === false ||
+      packetPiiWarnings.some((warning) => warning.toLowerCase().includes('text coordinates'))
+    )
+  )
 
   const clampPdfPageNumber = useCallback((requestedPage: number): number => {
     const maxPage = pdfNumPages ?? 1
@@ -1185,10 +1591,46 @@ export default function Visualizer({
     setShowPiiPanel(false)
     setIsDrawMode(false)
     setDraftRedactionBox(null)
+    setLastDrawnBoxId(null)
     setRedactionMessage(null)
     setRedactionError(null)
     setRedactedOutputPath(null)
+    activeDrawPointerIdRef.current = null
+    autoEnabledDrawForFileRef.current = null
+    setCurrentPageHasSelectableText(null)
   }, [filePath])
+
+  useEffect(() => {
+    if (isDrawMode) return
+    setDraftRedactionBox(null)
+    activeDrawPointerIdRef.current = null
+  }, [isDrawMode])
+
+  useEffect(() => {
+    if (!fileName.toLowerCase().endsWith('.pdf')) return
+    setCurrentPageHasSelectableText(null)
+  }, [filePath, fileName, pdfPageNumber])
+
+  useEffect(() => {
+    if (!isPacketPiiReviewMode || !fileName.toLowerCase().endsWith('.pdf')) return
+    if (!packetRequiresManualDraw) return
+    setIsDrawMode(true)
+    showImagePdfAutoDetectWarning(false)
+  }, [fileName, isPacketPiiReviewMode, packetRequiresManualDraw, normalizedFilePath, showImagePdfAutoDetectWarning])
+
+  useEffect(() => {
+    if (!fileName.toLowerCase().endsWith('.pdf')) return
+    if (currentPageHasSelectableText !== false) return
+    const fileKey = normalizedFilePath || fileName.toLowerCase()
+    if (!fileKey) return
+    if (autoEnabledDrawForFileRef.current === fileKey) return
+    autoEnabledDrawForFileRef.current = fileKey
+    setIsDrawMode((prev) => (prev ? prev : true))
+  }, [
+    currentPageHasSelectableText,
+    fileName,
+    normalizedFilePath,
+  ])
 
   useEffect(() => {
     if (!indexedSummaryTarget) {
@@ -1319,7 +1761,28 @@ export default function Visualizer({
     `${box.page}:${box.xPct.toFixed(5)}:${box.yPct.toFixed(5)}:${box.widthPct.toFixed(5)}:${box.heightPct.toFixed(5)}`
   ), [])
 
-  const getOverlayPoint = (event: MouseEvent<HTMLDivElement>) => {
+  const updatePacketPiiBoxes = useCallback((
+    updater: (boxes: PacketRedactionBox[]) => PacketRedactionBox[]
+  ) => {
+    if (!isPacketPiiReviewMode || !packetPiiResult?.path || !onPacketPiiResultUpdate) return
+    onPacketPiiResultUpdate(packetPiiResult.path, (prev) => ({
+      ...prev,
+      approved: false,
+      boxes: updater(Array.isArray(prev.boxes) ? prev.boxes : []),
+    }))
+  }, [isPacketPiiReviewMode, onPacketPiiResultUpdate, packetPiiResult])
+
+  const handleTogglePacketRedactionBox = useCallback((boxId: string) => {
+    updatePacketPiiBoxes((boxes) => boxes.map((box) => (
+      box.id === boxId ? { ...box, selected: !box.selected } : box
+    )))
+  }, [updatePacketPiiBoxes])
+
+  const getOverlayPoint = (event: {
+    currentTarget: HTMLDivElement
+    clientX: number
+    clientY: number
+  }) => {
     const rect = event.currentTarget.getBoundingClientRect()
     const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left))
     const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top))
@@ -1327,7 +1790,7 @@ export default function Visualizer({
   }
 
   const finalizeDraftRedactionBox = useCallback(() => {
-    if (!draftRedactionBox || !pageLayerSize) return
+    if (!draftRedactionBox) return
 
     const left = Math.min(draftRedactionBox.startX, draftRedactionBox.currentX)
     const top = Math.min(draftRedactionBox.startY, draftRedactionBox.currentY)
@@ -1336,23 +1799,166 @@ export default function Visualizer({
 
     setDraftRedactionBox(null)
 
-    if (width < 6 || height < 6) return
+    if (width < 6 || height < 6) {
+      setRedactionError(null)
+      return
+    }
 
-    setManualBoxes((prev) => [
-      ...prev,
-      {
-        id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        page: pdfPageNumber,
-        xPct: clamp01(left / pageLayerSize.width),
-        yPct: clamp01(top / pageLayerSize.height),
-        widthPct: clamp01(width / pageLayerSize.width),
-        heightPct: clamp01(height / pageLayerSize.height),
-        source: 'manual',
-      },
-    ])
+    const pageRect = pageLayerRef.current?.getBoundingClientRect()
+    const layerWidth = pageRect && pageRect.width > 0
+      ? pageRect.width
+      : (pageLayerSize?.width || 0)
+    const layerHeight = pageRect && pageRect.height > 0
+      ? pageRect.height
+      : (pageLayerSize?.height || 0)
+    if (layerWidth <= 0 || layerHeight <= 0) {
+      setRedactionError('Unable to measure page for drawing. Try zooming or reopening this file.')
+      setRedactionMessage(null)
+      return
+    }
+
+    const normalized = {
+      page: pdfPageNumber,
+      xPct: clamp01(left / layerWidth),
+      yPct: clamp01(top / layerHeight),
+      widthPct: clamp01(width / layerWidth),
+      heightPct: clamp01(height / layerHeight),
+    }
+
+    let committedBoxId: string | null = null
+    if (isPacketPiiReviewMode) {
+      const key = packetBoxKey(normalized)
+      const drawId = `draw:${key}`
+      updatePacketPiiBoxes((boxes) => {
+        const existingIndex = boxes.findIndex((box) => packetBoxKey(box) === key)
+        if (existingIndex >= 0) {
+          committedBoxId = boxes[existingIndex].id
+          return boxes.map((box, index) => (
+            index === existingIndex ? { ...box, selected: true, source: 'draw' } : box
+          ))
+        }
+        committedBoxId = drawId
+        return [
+          ...boxes,
+          {
+            id: drawId,
+            ...normalized,
+            selected: true,
+            source: 'draw',
+          },
+        ]
+      })
+    } else {
+      const manualId = `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      committedBoxId = manualId
+      setManualBoxes((prev) => [
+        ...prev,
+        {
+          id: manualId,
+          ...normalized,
+          source: 'manual',
+        },
+      ])
+    }
+    setLastDrawnBoxId(committedBoxId)
     setRedactionMessage(null)
     setRedactionError(null)
-  }, [draftRedactionBox, pageLayerSize, pdfPageNumber])
+  }, [draftRedactionBox, isPacketPiiReviewMode, pageLayerSize, pdfPageNumber, updatePacketPiiBoxes])
+
+  const handlePacketAutoBoxClick = useCallback((event: MouseEvent<HTMLDivElement>) => {
+    if (!isPacketPiiReviewMode || isDrawMode || !packetPiiResult?.path || !onPacketPiiResultUpdate) return
+
+    if (packetRequiresManualDraw) {
+      showImagePdfAutoDetectWarning(true)
+      return
+    }
+
+    const pageRect = pageLayerRef.current?.getBoundingClientRect()
+    if (!pageRect || pageRect.width <= 0 || pageRect.height <= 0) return
+    const clickXPct = clamp01((event.clientX - pageRect.left) / pageRect.width)
+    const clickYPct = clamp01((event.clientY - pageRect.top) / pageRect.height)
+
+    const clickedBox = selectedPacketBoxes.find((box) => (
+      box.page === pdfPageNumber &&
+      clickXPct >= box.xPct &&
+      clickXPct <= box.xPct + box.widthPct &&
+      clickYPct >= box.yPct &&
+      clickYPct <= box.yPct + box.heightPct
+    ))
+    if (clickedBox) {
+      handleTogglePacketRedactionBox(clickedBox.id)
+      return
+    }
+
+    const target = event.target as HTMLElement | null
+    if (!target) return
+
+    const autoDetectedTextBox = buildAutoDetectedTextBox(target, event.clientX, pageRect)
+    if (!autoDetectedTextBox) return
+    const {
+      left,
+      top,
+      width,
+      height,
+      text,
+      kind: matchedKind,
+    } = autoDetectedTextBox
+    if (!text) return
+
+    const normalized = {
+      page: pdfPageNumber,
+      xPct: clamp01(left / pageRect.width),
+      yPct: clamp01(top / pageRect.height),
+      widthPct: clamp01(width / pageRect.width),
+      heightPct: clamp01(height / pageRect.height),
+    }
+    const key = packetBoxKey(normalized)
+    const inferredKind = matchedKind || inferPiiKindFromText(text)
+    const preview = text.length > 32 ? `${text.slice(0, 29)}...` : text
+
+    onPacketPiiResultUpdate(packetPiiResult.path, (prev) => {
+      const boxes = Array.isArray(prev.boxes) ? prev.boxes : []
+      const existingIndex = boxes.findIndex((box) => packetBoxKey(box) === key)
+      if (existingIndex >= 0) {
+        const existing = boxes[existingIndex]
+        return {
+          ...prev,
+          approved: false,
+          boxes: boxes.map((box, index) => (
+            index === existingIndex ? { ...existing, selected: !existing.selected } : box
+          )),
+        }
+      }
+
+      return {
+        ...prev,
+        approved: false,
+        boxes: [
+          ...boxes,
+          {
+            id: `text:${key}`,
+            ...normalized,
+            selected: true,
+            source: 'text',
+            kind: inferredKind,
+            preview,
+          },
+        ],
+      }
+    })
+    setRedactionMessage(null)
+    setRedactionError(null)
+  }, [
+    handleTogglePacketRedactionBox,
+    isDrawMode,
+    isPacketPiiReviewMode,
+    onPacketPiiResultUpdate,
+    packetPiiResult?.path,
+    packetRequiresManualDraw,
+    pdfPageNumber,
+    selectedPacketBoxes,
+    showImagePdfAutoDetectWarning,
+  ])
 
   const handleScanPii = useCallback(async () => {
     if (!caseFolder || !filePath || !fileName.toLowerCase().endsWith('.pdf')) return
@@ -1416,6 +2022,11 @@ export default function Visualizer({
   }, [apiUrl, caseFolder, fileName, filePath])
 
   const handleUseDetectedBoxes = useCallback(() => {
+    if (isPacketPiiReviewMode) {
+      setRedactionMessage('Detected redactions are already active. Click highlighted boxes to toggle.')
+      setRedactionError(null)
+      return
+    }
     if (detectedBoxes.length === 0) return
 
     setManualBoxes((prev) => {
@@ -1445,9 +2056,23 @@ export default function Visualizer({
 
     setRedactionMessage('Detected boxes copied into manual redactions.')
     setRedactionError(null)
-  }, [detectedBoxes, redactionBoxKey])
+  }, [detectedBoxes, isPacketPiiReviewMode, redactionBoxKey])
 
   const handleUndoManualBox = useCallback(() => {
+    if (isPacketPiiReviewMode) {
+      updatePacketPiiBoxes((boxes) => {
+        const selectedIndexes = boxes
+          .map((box, index) => ({ box, index }))
+          .filter(({ box }) => box.selected && box.page === pdfPageNumber)
+        if (selectedIndexes.length === 0) return boxes
+        const indexToToggle = selectedIndexes[selectedIndexes.length - 1].index
+        return boxes.map((box, index) => (
+          index === indexToToggle ? { ...box, selected: false } : box
+        ))
+      })
+      setLastDrawnBoxId(null)
+      return
+    }
     setManualBoxes((prev) => {
       if (prev.length === 0) return prev
       const lastOnPageIndex = [...prev]
@@ -1457,15 +2082,66 @@ export default function Visualizer({
       if (lastOnPageIndex === undefined) return prev.slice(0, -1)
       return prev.filter((_, index) => index !== lastOnPageIndex)
     })
-  }, [pdfPageNumber])
+    setLastDrawnBoxId(null)
+  }, [isPacketPiiReviewMode, pdfPageNumber, updatePacketPiiBoxes])
+
+  const handleUndoLastDraw = useCallback(() => {
+    if (!lastDrawnBoxId) {
+      handleUndoManualBox()
+      return
+    }
+
+    if (isPacketPiiReviewMode) {
+      const exists = packetBoxes.some((box) => box.id === lastDrawnBoxId && box.selected)
+      if (!exists) {
+        handleUndoManualBox()
+        return
+      }
+      updatePacketPiiBoxes((boxes) => boxes.map((box) => (
+        box.id === lastDrawnBoxId ? { ...box, selected: false } : box
+      )))
+    } else {
+      const exists = manualBoxes.some((box) => box.id === lastDrawnBoxId)
+      if (!exists) {
+        handleUndoManualBox()
+        return
+      }
+      setManualBoxes((prev) => prev.filter((box) => box.id !== lastDrawnBoxId))
+    }
+
+    setLastDrawnBoxId(null)
+    setRedactionMessage(null)
+    setRedactionError(null)
+  }, [
+    handleUndoManualBox,
+    isPacketPiiReviewMode,
+    lastDrawnBoxId,
+    manualBoxes,
+    packetBoxes,
+    updatePacketPiiBoxes,
+  ])
 
   const handleClearCurrentPageBoxes = useCallback(() => {
+    if (isPacketPiiReviewMode) {
+      updatePacketPiiBoxes((boxes) => boxes.map((box) => (
+        box.page === pdfPageNumber ? { ...box, selected: false } : box
+      )))
+      setLastDrawnBoxId(null)
+      return
+    }
     setManualBoxes((prev) => prev.filter((box) => box.page !== pdfPageNumber))
-  }, [pdfPageNumber])
+    setLastDrawnBoxId(null)
+  }, [isPacketPiiReviewMode, pdfPageNumber, updatePacketPiiBoxes])
 
   const handleClearAllBoxes = useCallback(() => {
+    if (isPacketPiiReviewMode) {
+      updatePacketPiiBoxes((boxes) => boxes.map((box) => ({ ...box, selected: false })))
+      setLastDrawnBoxId(null)
+      return
+    }
     setManualBoxes([])
-  }, [])
+    setLastDrawnBoxId(null)
+  }, [isPacketPiiReviewMode, updatePacketPiiBoxes])
 
   const handleSaveRedactedCopy = useCallback(async () => {
     if (!caseFolder || !filePath || manualBoxes.length === 0) return
@@ -1774,10 +2450,53 @@ export default function Visualizer({
   const isMarkdown = content.startsWith('#') || content.includes('\n##') || content.includes('\n- ') || content.includes('\n* ')
   const isPdf = fileName.toLowerCase().endsWith('.pdf')
   const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(fileName)
-  const currentPageDetectedBoxes = detectedBoxes.filter((box) => box.page === pdfPageNumber)
-  const currentPageManualBoxes = manualBoxes.filter((box) => box.page === pdfPageNumber)
+  const effectivePiiFindings = isPacketPiiReviewMode ? packetPiiFindings : piiFindings
+  const effectivePiiWarnings = isPacketPiiReviewMode ? packetPiiWarnings : piiWarnings
+  const selectedPacketBoxesOnPage = selectedPacketBoxes.filter((box) => box.page === pdfPageNumber)
+  const currentPageDetectedBoxes = isPacketPiiReviewMode
+    ? selectedPacketBoxesOnPage
+      .filter((box) => box.source !== 'draw')
+      .map((box) => ({
+        id: box.id,
+        page: box.page,
+        xPct: box.xPct,
+        yPct: box.yPct,
+        widthPct: box.widthPct,
+        heightPct: box.heightPct,
+        source: 'detected' as const,
+        kind: box.kind,
+        preview: box.preview,
+      }))
+    : detectedBoxes.filter((box) => box.page === pdfPageNumber)
+  const currentPageManualBoxes = isPacketPiiReviewMode
+    ? selectedPacketBoxesOnPage
+      .filter((box) => box.source === 'draw')
+      .map((box) => ({
+        id: box.id,
+        page: box.page,
+        xPct: box.xPct,
+        yPct: box.yPct,
+        widthPct: box.widthPct,
+        heightPct: box.heightPct,
+        source: 'manual' as const,
+        kind: box.kind,
+        preview: box.preview,
+      }))
+    : manualBoxes.filter((box) => box.page === pdfPageNumber)
+  const effectiveManualBoxCount = isPacketPiiReviewMode ? selectedPacketBoxes.length : manualBoxes.length
+  const effectiveCurrentPageManualCount = isPacketPiiReviewMode
+    ? selectedPacketBoxesOnPage.length
+    : currentPageManualBoxes.length
+  const hasLastDrawnBox = Boolean(
+    lastDrawnBoxId &&
+    (
+      isPacketPiiReviewMode
+        ? packetBoxes.some((box) => box.id === lastDrawnBoxId && box.selected)
+        : manualBoxes.some((box) => box.id === lastDrawnBoxId)
+    )
+  )
 
-  const draftBoxStyle = draftRedactionBox && pageLayerSize
+  const draftBoxStyle = draftRedactionBox
     ? {
         left: Math.min(draftRedactionBox.startX, draftRedactionBox.currentX),
         top: Math.min(draftRedactionBox.startY, draftRedactionBox.currentY),
@@ -2438,24 +3157,31 @@ export default function Visualizer({
 
                       <div className="w-px h-4 bg-surface-300 mx-1" />
 
-                      <button
-                        onClick={handleScanPii}
-                        disabled={!filePath || isScanningPii}
-                        className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                        title="Detect likely DOB/SSN patterns"
-                      >
-                        {isScanningPii ? 'Scanning...' : 'Scan PII'}
-                      </button>
+                      {!isPacketPiiReviewMode && (
+                        <button
+                          onClick={handleScanPii}
+                          disabled={!filePath || isScanningPii}
+                          className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Detect likely DOB/SSN patterns"
+                        >
+                          {isScanningPii ? 'Scanning...' : 'Scan PII'}
+                        </button>
+                      )}
                       <button
                         onClick={() => setShowPiiPanel((prev) => !prev)}
-                        disabled={piiFindings.length === 0 && piiWarnings.length === 0}
+                        disabled={effectivePiiFindings.length === 0 && effectivePiiWarnings.length === 0}
                         className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
                         title="Show possible PII findings"
                       >
-                        Findings {piiFindings.length > 0 ? `(${piiFindings.length})` : ''}
+                        Findings {effectivePiiFindings.length > 0 ? `(${effectivePiiFindings.length})` : ''}
                       </button>
                       <button
-                        onClick={() => setIsDrawMode((prev) => !prev)}
+                        onClick={() => {
+                          if (!isDrawMode && isPacketPiiReviewMode && packetRequiresManualDraw) {
+                            showImagePdfAutoDetectWarning(true)
+                          }
+                          setIsDrawMode((prev) => !prev)
+                        }}
                         className={`px-2.5 py-1 text-xs rounded border ${
                           isDrawMode
                             ? 'border-red-300 bg-red-50 text-red-700'
@@ -2465,43 +3191,58 @@ export default function Visualizer({
                       >
                         {isDrawMode ? 'Drawing On' : 'Draw Redaction'}
                       </button>
-                      <button
-                        onClick={handleUseDetectedBoxes}
-                        disabled={detectedBoxes.length === 0}
-                        className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                        title="Copy detected boxes to manual redactions"
-                      >
-                        Use Detected
-                      </button>
+                      {!isPacketPiiReviewMode && (
+                        <button
+                          onClick={handleUseDetectedBoxes}
+                          disabled={detectedBoxes.length === 0}
+                          className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Copy detected boxes to manual redactions"
+                        >
+                          Use Detected
+                        </button>
+                      )}
                       <button
                         onClick={handleUndoManualBox}
-                        disabled={manualBoxes.length === 0}
+                        disabled={effectiveManualBoxCount === 0}
                         className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         Undo
                       </button>
                       <button
+                        onClick={handleUndoLastDraw}
+                        disabled={!hasLastDrawnBox}
+                        className={`px-2.5 py-1 text-xs rounded border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                          hasLastDrawnBox
+                            ? 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800'
+                            : 'border-surface-300 bg-white text-brand-700'
+                        }`}
+                      >
+                        Undo Last Draw
+                      </button>
+                      <button
                         onClick={handleClearCurrentPageBoxes}
-                        disabled={currentPageManualBoxes.length === 0}
+                        disabled={effectiveCurrentPageManualCount === 0}
                         className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         Clear Page
                       </button>
                       <button
                         onClick={handleClearAllBoxes}
-                        disabled={manualBoxes.length === 0}
+                        disabled={effectiveManualBoxCount === 0}
                         className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         Clear All
                       </button>
-                      <button
-                        onClick={handleSaveRedactedCopy}
-                        disabled={!filePath || manualBoxes.length === 0 || isSavingRedactions}
-                        className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-brand-900 text-white hover:bg-brand-800 disabled:opacity-50 disabled:cursor-not-allowed"
-                        title="Save a new redacted PDF copy"
-                      >
-                        {isSavingRedactions ? 'Saving...' : 'Save Redacted Copy'}
-                      </button>
+                      {!isPacketPiiReviewMode && (
+                        <button
+                          onClick={handleSaveRedactedCopy}
+                          disabled={!filePath || manualBoxes.length === 0 || isSavingRedactions}
+                          className="px-2.5 py-1 text-xs rounded border border-surface-300 bg-brand-900 text-white hover:bg-brand-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Save a new redacted PDF copy"
+                        >
+                          {isSavingRedactions ? 'Saving...' : 'Save Redacted Copy'}
+                        </button>
+                      )}
                     </div>
 
                     {(redactionMessage || redactionError || redactedOutputPath) && (
@@ -2509,14 +3250,16 @@ export default function Visualizer({
                         <div className={`text-xs ${redactionError ? 'text-red-700' : 'text-brand-700'}`}>
                           {redactionError || redactionMessage}
                         </div>
-                        {redactedOutputPath && (
-                          <button
-                            onClick={handleOpenRedactedCopy}
-                            className="px-2 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700"
-                          >
-                            Open Redacted Copy
-                          </button>
-                        )}
+                        <div className="flex items-center gap-2">
+                          {redactedOutputPath && (
+                            <button
+                              onClick={handleOpenRedactedCopy}
+                              className="px-2 py-1 text-xs rounded border border-surface-300 bg-white hover:bg-surface-100 text-brand-700"
+                            >
+                              Open Redacted Copy
+                            </button>
+                          )}
+                        </div>
                       </div>
                     )}
 
@@ -2527,14 +3270,14 @@ export default function Visualizer({
                             Possible PII Findings
                           </p>
                           <p className="text-xs text-amber-700">
-                            Pages: {Array.from(new Set(piiFindings.map((item) => item.page))).sort((a, b) => a - b).join(', ') || 'none'}
+                            Pages: {Array.from(new Set(effectivePiiFindings.map((item) => item.page))).sort((a, b) => a - b).join(', ') || 'none'}
                           </p>
                         </div>
-                        {piiFindings.length === 0 ? (
+                        {effectivePiiFindings.length === 0 ? (
                           <p className="text-xs text-amber-800">No likely DOB/SSN patterns found.</p>
                         ) : (
                           <div className="max-h-28 overflow-auto space-y-1">
-                            {piiFindings.map((item, index) => (
+                            {effectivePiiFindings.map((item, index) => (
                               <button
                                 key={`${item.page}-${item.kind}-${index}`}
                                 onClick={() => goToPdfPage(item.page)}
@@ -2545,9 +3288,9 @@ export default function Visualizer({
                             ))}
                           </div>
                         )}
-                        {piiWarnings.length > 0 && (
+                        {effectivePiiWarnings.length > 0 && (
                           <div className="mt-2 space-y-1">
-                            {piiWarnings.map((warning, index) => (
+                            {effectivePiiWarnings.map((warning, index) => (
                               <p key={index} className="text-xs text-amber-900">{warning}</p>
                             ))}
                           </div>
@@ -2581,19 +3324,32 @@ export default function Visualizer({
                               </div>
                             }
                           >
-                            <div ref={pageLayerRef} className="relative inline-block">
+                            <div
+                              ref={pageLayerRef}
+                              className="relative inline-block"
+                              onClickCapture={handlePacketAutoBoxClick}
+                            >
                               <Page
                                 pageNumber={pdfPageNumber}
                                 width={pdfContainerWidth ? Math.min(pdfContainerWidth - 32, 800) * pdfScale : undefined}
                                 className="shadow-lg"
                                 renderTextLayer={true}
                                 renderAnnotationLayer={true}
+                                onGetTextSuccess={handlePdfTextLayerSuccess}
+                                onGetTextError={handlePdfTextLayerError}
                               />
                               <div
-                                className={`absolute inset-0 ${isDrawMode ? 'cursor-crosshair' : 'pointer-events-none'}`}
-                                onMouseDown={(event) => {
+                                className={`absolute inset-0 z-20 touch-none select-none ${isDrawMode ? 'cursor-crosshair pointer-events-auto' : 'pointer-events-none'}`}
+                                onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => {
                                   if (!isDrawMode) return
                                   event.preventDefault()
+                                  event.stopPropagation()
+                                  activeDrawPointerIdRef.current = event.pointerId
+                                  try {
+                                    event.currentTarget.setPointerCapture(event.pointerId)
+                                  } catch {
+                                    // Ignore if pointer capture is unsupported.
+                                  }
                                   const point = getOverlayPoint(event)
                                   setDraftRedactionBox({
                                     startX: point.x,
@@ -2604,28 +3360,54 @@ export default function Visualizer({
                                   setRedactionMessage(null)
                                   setRedactionError(null)
                                 }}
-                                onMouseMove={(event) => {
+                                onPointerMove={(event: ReactPointerEvent<HTMLDivElement>) => {
                                   if (!isDrawMode || !draftRedactionBox) return
+                                  if (activeDrawPointerIdRef.current !== null && event.pointerId !== activeDrawPointerIdRef.current) return
                                   event.preventDefault()
                                   const point = getOverlayPoint(event)
-                                  setDraftRedactionBox({
-                                    ...draftRedactionBox,
-                                    currentX: point.x,
-                                    currentY: point.y,
+                                  setDraftRedactionBox((prev) => {
+                                    if (!prev) return prev
+                                    return {
+                                      ...prev,
+                                      currentX: point.x,
+                                      currentY: point.y,
+                                    }
                                   })
                                 }}
-                                onMouseUp={() => {
+                                onPointerUp={(event: ReactPointerEvent<HTMLDivElement>) => {
                                   if (!isDrawMode) return
+                                  if (activeDrawPointerIdRef.current !== null && event.pointerId !== activeDrawPointerIdRef.current) return
+                                  event.preventDefault()
+                                  event.stopPropagation()
+                                  try {
+                                    event.currentTarget.releasePointerCapture(event.pointerId)
+                                  } catch {
+                                    // Ignore if pointer capture is unsupported.
+                                  }
+                                  activeDrawPointerIdRef.current = null
                                   finalizeDraftRedactionBox()
                                 }}
-                                onMouseLeave={() => {
+                                onPointerCancel={(event: ReactPointerEvent<HTMLDivElement>) => {
                                   if (!isDrawMode) return
+                                  if (activeDrawPointerIdRef.current !== null && event.pointerId !== activeDrawPointerIdRef.current) return
+                                  event.preventDefault()
+                                  try {
+                                    event.currentTarget.releasePointerCapture(event.pointerId)
+                                  } catch {
+                                    // Ignore if pointer capture is unsupported.
+                                  }
+                                  activeDrawPointerIdRef.current = null
+                                  finalizeDraftRedactionBox()
+                                }}
+                                onPointerLeave={() => {
+                                  if (!isDrawMode || activeDrawPointerIdRef.current !== null) return
                                   finalizeDraftRedactionBox()
                                 }}
                               >
                                 {currentPageDetectedBoxes.map((box) => (
                                   <div
                                     key={box.id}
+                                    data-redaction-box-id={box.id}
                                     className="absolute border border-amber-500 bg-amber-300/30 pointer-events-none"
                                     style={{
                                       left: `${box.xPct * 100}%`,
@@ -2638,7 +3420,8 @@ export default function Visualizer({
                                 {currentPageManualBoxes.map((box) => (
                                   <div
                                     key={box.id}
-                                    className="absolute border border-black bg-black/60 pointer-events-none"
+                                    data-redaction-box-id={box.id}
+                                    className="absolute border border-amber-500 bg-amber-300/30 pointer-events-none"
                                     style={{
                                       left: `${box.xPct * 100}%`,
                                       top: `${box.yPct * 100}%`,
@@ -2649,7 +3432,7 @@ export default function Visualizer({
                                 ))}
                                 {draftBoxStyle && (
                                   <div
-                                    className="absolute border-2 border-red-600 bg-red-400/25 pointer-events-none"
+                                    className="absolute z-30 border-2 border-emerald-700 bg-emerald-300/35 pointer-events-none"
                                     style={draftBoxStyle}
                                   />
                                 )}

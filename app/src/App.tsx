@@ -11,7 +11,7 @@ import TodoDrawer from './components/TodoDrawer'
 import UserNotes from './components/UserNotes'
 import ContactCard from './components/ContactCard'
 import PacketCreation from './components/PacketCreation'
-import type { PacketDocument, PacketFrontMatter, PacketState } from './types/packet'
+import type { PacketDocument, PacketFrontMatter, PacketPiiResult, PacketState } from './types/packet'
 const API_URL = ''  // Use relative URLs - Vite proxies /api to localhost:3001
 
 interface FirmTodo {
@@ -58,6 +58,25 @@ const normalizePracticeArea = (value: unknown): PracticeArea | null => {
     return 'Personal Injury'
   }
   return null
+}
+
+const getDefaultPacketPageSelection = (): PacketDocument['pageSelection'] => ({
+  allPages: true,
+  pageRanges: '',
+})
+
+const normalizePacketPageSelection = (
+  pageSelection: PacketDocument['pageSelection'] | { allPages?: unknown; pageRanges?: unknown } | undefined
+): PacketDocument['pageSelection'] => {
+  if (pageSelection && typeof pageSelection === 'object') {
+    const allPages = pageSelection.allPages !== false
+    const pageRanges = typeof pageSelection.pageRanges === 'string' ? pageSelection.pageRanges : ''
+    return {
+      allPages,
+      pageRanges: allPages ? '' : pageRanges,
+    }
+  }
+  return getDefaultPacketPageSelection()
 }
 
 // Dev mode - skip auth in Vite dev server
@@ -506,6 +525,7 @@ function App() {
   const [packetMode, setPacketMode] = useState(() => {
     try { return sessionStorage.getItem('pi-packet-mode') === '1' } catch { return false }
   })
+  const [packetPiiTabActive, setPacketPiiTabActive] = useState(false)
   const [packetState, setPacketState] = useState<PacketState | null>(() => {
     try {
       const raw = sessionStorage.getItem('pi-packet-state')
@@ -513,6 +533,12 @@ function App() {
       if (!parsed) return null
       return {
         ...parsed,
+        documents: Array.isArray(parsed.documents)
+          ? parsed.documents.map((doc) => ({
+            ...doc,
+            pageSelection: normalizePacketPageSelection((doc as PacketDocument).pageSelection),
+          }))
+          : [],
         frontMatterDocxPath: typeof parsed.frontMatterDocxPath === 'string' ? parsed.frontMatterDocxPath : null,
         frontMatterWorkingDocxPath: typeof parsed.frontMatterWorkingDocxPath === 'string' ? parsed.frontMatterWorkingDocxPath : null,
         frontMatterWorkingDocxMtime: typeof parsed.frontMatterWorkingDocxMtime === 'number' ? parsed.frontMatterWorkingDocxMtime : null,
@@ -528,6 +554,7 @@ function App() {
       } else {
         sessionStorage.removeItem('pi-packet-mode')
         sessionStorage.removeItem('pi-packet-state')
+        setPacketPiiTabActive(false)
       }
     } catch { /* ignore */ }
   }, [packetMode])
@@ -827,7 +854,18 @@ function App() {
           : extractionIssue
             ? 'Extraction issue'
             : !date ? 'No date' : undefined
-        return { path: resolvedPath, title, date, type, fileName: actualFileName, pinned: false, order: i, hasWarning, warningReason }
+        return {
+          path: resolvedPath,
+          title,
+          date,
+          type,
+          fileName: actualFileName,
+          pageSelection: getDefaultPacketPageSelection(),
+          pinned: false,
+          order: i,
+          hasWarning,
+          warningReason,
+        }
       }
       // Should be unreachable because unresolved docs are filtered above.
       return {
@@ -836,6 +874,7 @@ function App() {
         date: null,
         type: '',
         fileName,
+        pageSelection: getDefaultPacketPageSelection(),
         pinned: false,
         order: i,
         hasWarning: true,
@@ -873,6 +912,7 @@ function App() {
             if (!canonicalPath) return null
             return {
               ...doc,
+              pageSelection: normalizePacketPageSelection((doc as PacketDocument).pageSelection),
               path: canonicalPath,
               title: resolvePacketTitle(doc.title, canonicalPath.split('/').pop() || canonicalPath),
               order: index,
@@ -919,6 +959,7 @@ function App() {
         date: fileData.date || null,
         type: fileData.type || '',
         fileName: fileData.fileName,
+        pageSelection: getDefaultPacketPageSelection(),
         pinned: false,
         order: prev.documents.length,
         hasWarning: fileData.hasWarning,
@@ -937,6 +978,30 @@ function App() {
     if (!packetState) return new Set<string>()
     return new Set(packetState.documents.map(d => d.path))
   }, [packetState])
+
+  const activePacketPiiResult = useMemo<PacketPiiResult | null>(() => {
+    if (!packetMode || !packetState || !selectedFilePath) return null
+    const selected = normalizeDocumentLookupPath(selectedFilePath)
+    return packetState.piiResults.find((result) => normalizeDocumentLookupPath(result.path) === selected) || null
+  }, [packetMode, packetState, selectedFilePath])
+
+  const handleUpdatePacketPiiResult = useCallback(
+    (path: string, updater: (prev: PacketPiiResult) => PacketPiiResult) => {
+      const normalizedPath = normalizeDocumentLookupPath(path)
+      setPacketState((prev) => {
+        if (!prev) return prev
+        let updated = false
+        const piiResults = prev.piiResults.map((result) => {
+          if (normalizeDocumentLookupPath(result.path) !== normalizedPath) return result
+          updated = true
+          return updater(result)
+        })
+        if (!updated) return prev
+        return { ...prev, piiResults }
+      })
+    },
+    []
+  )
 
   // Contact card state
   const [isContactCardOpen, setIsContactCardOpen] = useState(false)
@@ -1658,7 +1723,7 @@ function App() {
 </div>`
   }, [docLookup])
 
-  const handleShowFile = useCallback((filePath: string) => {
+  const handleShowFile = useCallback((filePath: string, mode: 'summary' | 'document' = 'summary') => {
     if (!caseFolder) return
     const normalizedPath = normalizeDocumentLookupPath(filePath)
     const basename = normalizedPath.split('/').pop() || normalizedPath
@@ -1678,14 +1743,17 @@ function App() {
     setSelectedFilePath(resolvedPath)
     const summary = buildDocSummaryContent(resolvedPath)
     setViewContent(summary || '')
-    setVisualizerMode('summary')
+    setVisualizerMode(mode)
   }, [caseFolder, docLookup, buildDocSummaryContent])
+
+  const handleShowPacketFile = useCallback((filePath: string) => {
+    handleShowFile(filePath, 'document')
+  }, [handleShowFile])
 
   const handleEvidencePacketGenerated = useCallback((filePath: string) => {
     const normalizedPath = filePath.trim()
     if (!normalizedPath) return
-    handleShowFile(normalizedPath)
-    setVisualizerMode('document')
+    handleShowFile(normalizedPath, 'document')
     setEvidencePacketTakeover({
       path: normalizedPath,
       version: Date.now(),
@@ -2103,7 +2171,7 @@ function App() {
               } else {
                 setFileViewUrl(null)
               }
-              setVisualizerMode('summary')
+              setVisualizerMode('document')
             }}
             onFileView={(url, filename, filePath) => {
               setFileViewUrl(url)
@@ -2123,7 +2191,7 @@ function App() {
           />
         }
         centerPanel={
-          packetMode && packetState ? (
+              packetMode && packetState ? (
             <PacketCreation
               packetState={packetState}
               onUpdateState={handlePacketUpdateState}
@@ -2131,10 +2199,11 @@ function App() {
               apiUrl={API_URL}
               firmRoot={firmRoot || undefined}
               onShowFile={handleShowFile}
+              onShowPiiFile={handleShowPacketFile}
+              onPiiTabActiveChange={setPacketPiiTabActive}
               onExit={handleExitPacketMode}
               onGenerated={(outputPath) => {
-                handleShowFile(outputPath)
-                setVisualizerMode('document')
+                handleShowPacketFile(outputPath)
                 setEvidencePacketTakeover({ path: outputPath, version: Date.now() })
                 setRefreshDraftsKey(k => k + 1)
               }}
@@ -2217,6 +2286,9 @@ function App() {
             evidencePacketVersion={evidencePacketTakeover?.version || 0}
             onOpenFilePath={handleShowFile}
             onOpenPacketDraft={handleEnterPacketModeFromDraft}
+            packetPiiActive={packetMode && packetPiiTabActive}
+            packetPiiResult={activePacketPiiResult}
+            onPacketPiiResultUpdate={handleUpdatePacketPiiResult}
           />
         }
       />
