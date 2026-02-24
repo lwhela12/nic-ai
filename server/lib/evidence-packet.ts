@@ -2996,7 +2996,9 @@ async function buildDocxFrontMatter(
   try { masterBytes = await readFile(masterPath); } catch (err) {
     throw new Error(`Failed to load master DOCX template at ${masterPath}: ${formatError(err)}`);
   }
-  const sDate = service?.serviceDate ? new Date(service.serviceDate) : new Date();
+  const now = new Date();
+  const parsedServiceDate = service?.serviceDate ? new Date(service.serviceDate) : now;
+  const sDate = Number.isNaN(parsedServiceDate.getTime()) ? now : parsedServiceDate;
 
   // Build document index text for {{documentIndexText}} placeholder
   const documentIndexLines: string[] = [];
@@ -3027,13 +3029,15 @@ async function buildDocxFrontMatter(
     }
   }
   const documentIndexText = documentIndexLines.join("\n");
-  const serviceDate = service?.serviceDate || new Date().toLocaleDateString("en-US");
+  const serviceDate = service?.serviceDate && !Number.isNaN(parsedServiceDate.getTime())
+    ? parsedServiceDate.toLocaleDateString("en-US")
+    : now.toLocaleDateString("en-US");
   const serviceMethodPlain = (service?.serviceMethod || "")
     .replace(/^\[[xX]\]\s*/, "")
     .trim()
     || "Via E-File";
   const serviceRecipientsText = (service?.recipients || []).join("\n");
-  const datedLine = `Dated this ____  day of ${sDate.toLocaleString('default', { month: 'long' })}, ${sDate.getFullYear()}.`;
+  const datedLine = `Dated this ${sDate.getDate()} day of ${sDate.toLocaleString('default', { month: 'long' })}, ${sDate.getFullYear()}.`;
   const hoCaptionLine1 = `Claim No.: ${caption.claimNumber || caption.captionValues?.["claimNumber"] || ""}`.trimEnd();
   const hoCaptionLine2 = `Hearing No.: ${caption.hearingNumber || caption.captionValues?.["hearingNumber"] || ""}`.trimEnd();
   const hoCaptionLine3 = `Date/Time: ${caption.hearingDateTime || caption.captionValues?.["hearingDateTime"] || ""}`.trimEnd();
