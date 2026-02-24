@@ -104,6 +104,12 @@ describe("evidence packet", () => {
       "records/photo.jpg:2-2",
     ]);
     expect(result.totalPages).toBe(3);
+
+    const finalPdf = await PDFDocument.load(result.pdfBytes);
+    const imagePage = finalPdf.getPage(2);
+    const { width, height } = imagePage.getSize();
+    expect(width).toBe(612);
+    expect(height).toBe(792);
   });
 
   it("uses updated HO affirmation text and keeps AO affirmation text unchanged", () => {

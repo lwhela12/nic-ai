@@ -1128,6 +1128,10 @@ interface ProcessedDocument {
 
 type SupportedPacketFileKind = "pdf" | "jpg" | "png";
 
+const LETTER_PAGE_WIDTH = 612; // 8.5in * 72
+const LETTER_PAGE_HEIGHT = 792; // 11in * 72
+const IMAGE_PAGE_MARGIN = 36; // 0.5in
+
 interface WordBox {
   text: string;
   xMin: number;
@@ -1646,10 +1650,17 @@ async function convertImageToPdfBytes(
     const embeddedImage = imageKind === "png"
       ? await pdf.embedPng(imageBytes)
       : await pdf.embedJpg(imageBytes);
-    const width = Math.max(1, embeddedImage.width);
-    const height = Math.max(1, embeddedImage.height);
-    const page = pdf.addPage([width, height]);
-    page.drawImage(embeddedImage, { x: 0, y: 0, width, height });
+    const page = pdf.addPage([LETTER_PAGE_WIDTH, LETTER_PAGE_HEIGHT]);
+    const maxWidth = LETTER_PAGE_WIDTH - IMAGE_PAGE_MARGIN * 2;
+    const maxHeight = LETTER_PAGE_HEIGHT - IMAGE_PAGE_MARGIN * 2;
+    const safeWidth = Math.max(1, embeddedImage.width);
+    const safeHeight = Math.max(1, embeddedImage.height);
+    const scale = Math.min(maxWidth / safeWidth, maxHeight / safeHeight, 1);
+    const width = safeWidth * scale;
+    const height = safeHeight * scale;
+    const x = (LETTER_PAGE_WIDTH - width) / 2;
+    const y = (LETTER_PAGE_HEIGHT - height) / 2;
+    page.drawImage(embeddedImage, { x, y, width, height });
     return pdf.save();
   } catch (error) {
     throw new Error(`Failed to convert image to PDF for ${pathLabel}: ${formatError(error)}`);
@@ -2216,9 +2227,10 @@ async function addStatementPages(
     }
 
     const entry = tocEntries[i];
-    const dateStr = entry.date || "";
+    const dateStr = formatIndexDate(entry.date);
+    const docTitle = stripDocumentExtension(entry.title || "");
     const pgRange = formatPageRange(entry.startPage, entry.endPage);
-    drawTocRow3Col(page, regularFont, dateStr, entry.title, pgRange, idxY);
+    drawTocRow3Col(page, regularFont, dateStr, docTitle, pgRange, idxY);
     idxY -= rowHeight;
   }
 
@@ -2714,9 +2726,31 @@ function formatPageRange(start: number, end: number): string {
   return start === end ? `${start}` : `${start}-${end}`;
 }
 
+function stripDocumentExtension(title: string): string {
+  const value = (title || "").trim();
+  return value.replace(/\.(pdf|docx?|xlsx?|pptx?|txt|rtf|jpe?g|png|tiff?|heic)$/i, "");
+}
+
+function formatIndexDate(value?: string): string {
+  const raw = (value || "").trim();
+  if (!raw) return "";
+
+  const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:\b.*)?$/);
+  if (isoMatch) {
+    const [, year, month, day] = isoMatch;
+    return `${month}-${day}-${year}`;
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return raw;
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${month}-${day}-${parsed.getFullYear()}`;
+}
+
 function formatTocDocumentLabel(entry: EvidencePacketTocEntry): string {
-  const title = (entry.title || "").trim();
-  const date = (entry.date || "").trim();
+  const title = stripDocumentExtension(entry.title || "");
+  const date = formatIndexDate(entry.date);
   if (!date) return title;
   if (title.toLowerCase().includes(date.toLowerCase())) return title;
   return `${title} - ${date}`;
@@ -2975,20 +3009,21 @@ async function buildDocxFrontMatter(
     || template.sourceFile === "source/__builtin-ao-standard.docx";
   for (let i = 0; i < tocEntries.length; i++) {
     const entry = tocEntries[i];
+    const docTitle = stripDocumentExtension(entry.title || "");
     const pageRange = entry.startPage === entry.endPage
       ? `${entry.startPage}`
       : `${entry.startPage}-${entry.endPage}`;
-    const dateStr = entry.date || "";
+    const dateStr = formatIndexDate(entry.date);
     if (useNumberedRightAlignedIndex) {
       const label = truncateDocIndexLabel(
-        `${i + 1}. ${entry.title}${dateStr ? ` - ${dateStr}` : ""}`
+        `${i + 1}. ${docTitle}${dateStr ? ` - ${dateStr}` : ""}`
       );
       documentIndexLines.push(`${label}\tPg. ${pageRange}`);
     } else if (template.tocFormat === "date-doc-page") {
-      documentIndexLines.push(`${dateStr}\t${entry.title}\t${pageRange}`);
+      documentIndexLines.push(`${dateStr}\t${docTitle}\t${pageRange}`);
     } else {
       const label = truncateDocIndexLabel(
-        `${i + 1}. ${entry.title}${dateStr ? ` - ${dateStr}` : ""}`
+        `${i + 1}. ${docTitle}${dateStr ? ` - ${dateStr}` : ""}`
       );
       documentIndexLines.push(`${label}\tPg. ${pageRange}`);
     }
@@ -3047,17 +3082,20 @@ async function buildDocxFrontMatter(
     hoCaptionPreamble2,
     signatureFirmBlock,
     documentIndexText,
-    tocEntries: tocEntries.map((entry, i) => ({
-      number: String(i + 1),
-      title: entry.title,
-      date: entry.date || "",
-      dateLine: entry.date ? ` - ${entry.date}` : "",
-      startPage: String(entry.startPage),
-      endPage: String(entry.endPage),
-      pageRange: entry.startPage === entry.endPage
-        ? String(entry.startPage)
-        : `${entry.startPage}-${entry.endPage}`,
-    })),
+    tocEntries: tocEntries.map((entry, i) => {
+      const formattedDate = formatIndexDate(entry.date);
+      return {
+        number: String(i + 1),
+        title: stripDocumentExtension(entry.title || ""),
+        date: formattedDate,
+        dateLine: formattedDate ? ` - ${formattedDate}` : "",
+        startPage: String(entry.startPage),
+        endPage: String(entry.endPage),
+        pageRange: entry.startPage === entry.endPage
+          ? String(entry.startPage)
+          : `${entry.startPage}-${entry.endPage}`,
+      };
+    }),
     // Template text fields the AI may have injected
     counselPreamble: interpolateTemplateText(template.counselPreamble || "", caption),
     affirmationTitle: template.affirmationTitle || "",

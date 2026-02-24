@@ -27,9 +27,31 @@ function formatPageRange(start: number, end: number): string {
   return start === end ? `${start}` : `${start}-${end}`;
 }
 
+function stripDocumentExtension(title: string): string {
+  const value = (title || "").trim();
+  return value.replace(/\.(pdf|docx?|xlsx?|pptx?|txt|rtf|jpe?g|png|tiff?|heic)$/i, "");
+}
+
+function formatIndexDate(value?: string): string {
+  const raw = (value || "").trim();
+  if (!raw) return "";
+
+  const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:\b.*)?$/);
+  if (isoMatch) {
+    const [, year, month, day] = isoMatch;
+    return `${month}-${day}-${year}`;
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return raw;
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${month}-${day}-${parsed.getFullYear()}`;
+}
+
 function formatTocLabel(entry: { title: string; date?: string }, index: number): string {
-  const title = (entry.title || "").trim();
-  const date = (entry.date || "").trim();
+  const title = stripDocumentExtension(entry.title || "");
+  const date = formatIndexDate(entry.date);
   const label = date && !title.toLowerCase().includes(date.toLowerCase())
     ? `${title} - ${date}`
     : title;
