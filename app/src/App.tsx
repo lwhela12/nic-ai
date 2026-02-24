@@ -1684,11 +1684,13 @@ function App() {
   const handleEvidencePacketGenerated = useCallback((filePath: string) => {
     const normalizedPath = filePath.trim()
     if (!normalizedPath) return
+    handleShowFile(normalizedPath)
+    setVisualizerMode('document')
     setEvidencePacketTakeover({
       path: normalizedPath,
       version: Date.now(),
     })
-  }, [])
+  }, [handleShowFile])
 
   // Handle logout
   const handleLogout = async () => {
@@ -2131,6 +2133,8 @@ function App() {
               onShowFile={handleShowFile}
               onExit={handleExitPacketMode}
               onGenerated={(outputPath) => {
+                handleShowFile(outputPath)
+                setVisualizerMode('document')
                 setEvidencePacketTakeover({ path: outputPath, version: Date.now() })
                 setRefreshDraftsKey(k => k + 1)
               }}

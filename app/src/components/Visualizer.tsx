@@ -740,6 +740,11 @@ export default function Visualizer({
     }
   }, [activeTab, drafts, filePath])
 
+  useEffect(() => {
+    if (!filePath) return
+    setActiveTab('view')
+  }, [filePath])
+
   const clearDraftPreviewRefresh = useCallback(() => {
     if (draftPreviewRefreshTimeoutRef.current !== null) {
       window.clearTimeout(draftPreviewRefreshTimeoutRef.current)
@@ -952,11 +957,13 @@ export default function Visualizer({
   }, [caseFolder, apiUrl, loadDrafts])
 
   useEffect(() => {
-    if (!evidencePacketPath) return
+    if (!evidencePacketPath || !caseFolder) return
     setPendingEvidencePacketPath(evidencePacketPath)
     setSelectedDraft(null)
-    setActiveTab('drafts')
-  }, [evidencePacketPath, evidencePacketVersion])
+    setActiveTab('view')
+    const url = `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(evidencePacketPath)}#view=FitH`
+    window.open(url, '_blank', 'width=1200,height=900')
+  }, [apiUrl, caseFolder, evidencePacketPath, evidencePacketVersion])
 
   // Track currently selected draft preview metadata
   useEffect(() => {
@@ -1506,17 +1513,12 @@ export default function Visualizer({
   }, [apiUrl, caseFolder, redactedOutputPath])
 
   const handleReviewEvidencePacket = useCallback(() => {
-    if (!pendingEvidencePacketPath) return
-
-    if (onOpenFilePath) {
-      onOpenFilePath(pendingEvidencePacketPath)
-    } else {
-      const url = `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(pendingEvidencePacketPath)}#view=FitH`
-      window.open(url, '_blank', 'width=1200,height=900')
-    }
+    if (!caseFolder || !pendingEvidencePacketPath) return
+    const url = `${apiUrl}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(pendingEvidencePacketPath)}#view=FitH`
+    window.open(url, '_blank', 'width=1200,height=900')
 
     setActiveTab('view')
-  }, [apiUrl, caseFolder, onOpenFilePath, pendingEvidencePacketPath])
+  }, [apiUrl, caseFolder, pendingEvidencePacketPath])
 
   // Handle bundle generation
   const handleGeneratePackage = async () => {

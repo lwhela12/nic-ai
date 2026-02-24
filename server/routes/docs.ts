@@ -951,7 +951,7 @@ app.get("/drafts", async (c) => {
           path: `.ai_tool/drafts/${entry}`,
           type: "packet",
           createdAt: fileStat.mtime.toISOString(),
-          targetPath: "Hearing/Evidence Packet.pdf",
+          targetPath: outputPath || "Hearing/Evidence Packet.pdf",
           generatedAt,
           outputPath,
         });
@@ -2164,8 +2164,9 @@ app.post("/generate-packet", async (c) => {
     });
 
     // Determine output paths
-    const dateStr = new Date().toISOString().slice(0, 10);
-    const outputRelPath = `Evidence Packet - ${dateStr}.pdf`;
+    const generatedAt = new Date();
+    const timestampToken = generatedAt.toISOString().replace("T", "-").replace(/[:.]/g, "-");
+    const outputRelPath = `Evidence Packet - ${timestampToken}.pdf`;
     const fullOutputPath = join(caseFolder, outputRelPath);
     await mkdir(dirname(fullOutputPath), { recursive: true });
     await writeFile(fullOutputPath, result.pdfBytes);
@@ -2173,7 +2174,7 @@ app.post("/generate-packet", async (c) => {
     // Save front matter DOCX alongside the packet PDF
     let frontMatterDocxPath: string | undefined;
     if (result.frontMatterDocxBytes) {
-      const docxRelPath = `Front Matter - ${dateStr}.docx`;
+      const docxRelPath = `Front Matter - ${timestampToken}.docx`;
       await writeFile(join(caseFolder, docxRelPath), result.frontMatterDocxBytes);
       frontMatterDocxPath = docxRelPath;
     }
@@ -2185,7 +2186,7 @@ app.post("/generate-packet", async (c) => {
       const draftId = `packet-${Date.now()}`;
       await writeFile(
         join(draftsDir, `${draftId}.json`),
-        JSON.stringify({ documents: canonicalDocuments, frontMatter, generatedAt: new Date().toISOString(), outputPath: outputRelPath }, null, 2),
+        JSON.stringify({ documents: canonicalDocuments, frontMatter, generatedAt: generatedAt.toISOString(), outputPath: outputRelPath }, null, 2),
         "utf-8"
       );
     } catch { /* ignore draft save errors */ }
