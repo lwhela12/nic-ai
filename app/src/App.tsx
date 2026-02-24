@@ -711,13 +711,6 @@ function App() {
           if (Array.isArray(config?.serviceRecipients)) {
             fm.recipients = config.serviceRecipients
           }
-          // Default signer from primary attorney
-          if (Array.isArray(config?.attorneys) && config.attorneys.length > 0) {
-            const primaryAttorney = config.attorneys.find((a: any) => typeof a?.name === 'string' && a.name.trim())
-            fm.signerName = primaryAttorney?.name || config.attorneys[0].name || ''
-          } else if (config?.attorneyName) {
-            fm.signerName = config.attorneyName
-          }
         }
       } catch { /* ignore */ }
     }

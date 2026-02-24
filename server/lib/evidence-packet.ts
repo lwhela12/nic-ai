@@ -2086,15 +2086,13 @@ async function addStatementPages(
   // ── Compute signature block data before measuring height ──
   const sigLineHeight = 14;
   const displayFirmName = options.firmName || "";
-  const signerDisplayName = options.signerName || options.caption.introductoryCounselLine || "";
   const cleanedFirmLines = (options.firmBlockLines || [])
     .map((l) => l.trim().replace(/\[[^\]]+\]/g, "").trim())
     .filter((l) => l && !/not configured/i.test(l));
-  const filteredFirmLines = cleanedFirmLines.filter((line) => {
-    if (displayFirmName && isSignerLineDuplicate(line, displayFirmName)) return false;
-    if (signerDisplayName && isSignerLineDuplicate(line, signerDisplayName)) return false;
-    return true;
-  });
+  const signerFromFirmLines = cleanedFirmLines[0] || "";
+  const signerDisplayName = signerFromFirmLines || options.signerName || options.caption.introductoryCounselLine || "";
+  const filteredFirmLines = (signerFromFirmLines ? cleanedFirmLines.slice(1) : cleanedFirmLines)
+    .filter((line) => !(displayFirmName && line.toLowerCase() === displayFirmName.toLowerCase()));
 
   // Count signature block lines
   let sigBlockLineCount = 2; // "Respectfully submitted," + "By: ___"
@@ -2452,7 +2450,11 @@ function addAffirmationPage(
   page.drawText(`Dated: ${serviceDate}`, { x: 84, y, size: 11, font: regularFont });
 
   const signY = y - 65;
-  const signerDisplayName = options.signerName || options.caption.introductoryCounselLine || "";
+  const cleanedFirmLines = (options.firmBlockLines || [])
+    .map((l) => l.trim().replace(/\[[^\]]+\]/g, "").trim())
+    .filter((l) => l && !/not configured/i.test(l));
+  const signerFromFirmLines = cleanedFirmLines[0] || "";
+  const signerDisplayName = signerFromFirmLines || options.signerName || options.caption.introductoryCounselLine || "";
   const signerLines = [
     "Claimant's Counsel",
     signerDisplayName,
@@ -2461,12 +2463,8 @@ function addAffirmationPage(
   // When firm info belongs in the signature block (not the page header),
   // append the firm block lines below the signer name.
   if (tpl?.firmBlockPosition === "signature" && options.firmBlockLines) {
-    const cleaned = options.firmBlockLines
-      .map((l) => l.trim().replace(/\[[^\]]+\]/g, "").trim())
-      .filter((l) => l && !/not configured/i.test(l));
-    // Skip lines that duplicate the signer name already shown
-    for (const line of cleaned) {
-      if (signerDisplayName && isSignerLineDuplicate(line, signerDisplayName)) continue;
+    const signatureBlockLines = signerFromFirmLines ? cleanedFirmLines.slice(1) : cleanedFirmLines;
+    for (const line of signatureBlockLines) {
       signerLines.push(line);
     }
   }
@@ -2724,17 +2722,6 @@ function truncateToWidth(text: string, font: PDFFont, size: number, maxWidth: nu
 
 function formatPageRange(start: number, end: number): string {
   return start === end ? `${start}` : `${start}-${end}`;
-}
-
-function normalizeSignerComparison(value: string): string {
-  return (value || "")
-    .toLowerCase()
-    .replace(/,?\s*esq\.?/g, "")
-    .replace(/[^a-z0-9]/g, "");
-}
-
-function isSignerLineDuplicate(line: string, signerLine: string): boolean {
-  return normalizeSignerComparison(line) === normalizeSignerComparison(signerLine);
 }
 
 function stripDocumentExtension(title: string): string {
@@ -3055,12 +3042,10 @@ async function buildDocxFrontMatter(
   const cleanedFirmLines = (firmBlockLines || [])
     .map((line) => line.replace(/\[[^\]]+\]/g, "").trim())
     .filter((line) => line && !/not configured/i.test(line));
-  const signerDisplayName = signerName || caption.introductoryCounselLine || "";
-  const signatureFirmLines = cleanedFirmLines.filter((line) => {
-    if (signerDisplayName && isSignerLineDuplicate(line, signerDisplayName)) return false;
-    if (firmName && isSignerLineDuplicate(line, firmName)) return false;
-    return true;
-  });
+  const signerFromFirmLines = cleanedFirmLines[0] || "";
+  const signerDisplayName = signerFromFirmLines || signerName || caption.introductoryCounselLine || "";
+  const signatureFirmLines = (signerFromFirmLines ? cleanedFirmLines.slice(1) : cleanedFirmLines)
+    .filter((line) => !(firmName && line.toLowerCase() === firmName.toLowerCase()));
   const signatureFirmBlock = signatureFirmLines.join("\n");
 
   const docxData: Record<string, string | object[]> = {
@@ -3118,7 +3103,7 @@ async function buildDocxFrontMatter(
     agencyLine: template.agencyLine || "",
     documentTitle: template.documentTitle || "",
     // Firm/signer data
-    signerName: signerName || "",
+    signerName: signerDisplayName || "",
     firmBlockText: (firmBlockLines || []).join("\n"),
     attorneyNames: (firmBlockLines || []).join("\n"),
     // Extra section values (issueOnAppeal, etc.)

@@ -16,13 +16,6 @@ interface Props {
 type Tab = 'documents' | 'frontmatter' | 'pii'
 const DEFAULT_SIGNER_CREDENTIAL_LABEL = 'NV Bar No.'
 
-function normalizeSignerValue(value: string): string {
-  return (value || '')
-    .toLowerCase()
-    .replace(/,?\s*esq\.?/g, '')
-    .replace(/[^a-z0-9]/g, '')
-}
-
 function formatSignerCredentialLine(attorney?: { barNo?: string; barLabel?: string } | null): string {
   if (!attorney) return ''
   const number = String(attorney.barNo || '').trim()
@@ -1005,18 +998,17 @@ function FrontMatterTab({
   }
 
   const handleSignerChange = (signerName: string) => {
-    onUpdate('signerName', signerName)
-    // Update signer credential line to match selected signer.
+    onUpdate('signerName', '')
+    if (!signerName) return
+    // Populate signature block lines from selected signer.
     const attorney = attorneys.find(a => a.name === signerName)
     if (attorney) {
       const lines = [...frontMatter.firmBlockLines]
       while (lines.length < 7) lines.push('')
+      lines[0] = attorney.name
       const credentialLine = formatSignerCredentialLine(attorney)
       if (credentialLine) {
         lines[1] = credentialLine
-      }
-      if (normalizeSignerValue(lines[0] || '') === normalizeSignerValue(attorney.name || '')) {
-        lines[0] = ''
       }
       onUpdate('firmBlockLines', lines)
     }
@@ -1057,6 +1049,8 @@ function FrontMatterTab({
   // Ensure 7 firm block lines
   const firmLines = [...frontMatter.firmBlockLines]
   while (firmLines.length < 7) firmLines.push('')
+  const signerFromLine0 = (firmLines[0] || '').trim()
+  const selectedSigner = attorneys.find(a => a.name === signerFromLine0)?.name || (frontMatter.signerName || '')
 
   return (
     <div className="p-4 space-y-4">
@@ -1179,7 +1173,7 @@ function FrontMatterTab({
           {attorneys.length > 0 ? (
             <select
               className={inputClass}
-              value={frontMatter.signerName || ''}
+              value={selectedSigner}
               onChange={e => handleSignerChange(e.target.value)}
             >
               <option value="">Select signer...</option>
