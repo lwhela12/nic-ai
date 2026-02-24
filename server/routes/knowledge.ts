@@ -644,7 +644,7 @@ app.get("/firm-config", async (c) => {
     const config = JSON.parse(await readFile(configPath, "utf-8"));
     // Synthesize attorneys[] from legacy attorneyName/nevadaBarNo if missing
     if (!Array.isArray(config.attorneys) && config.attorneyName) {
-      config.attorneys = [{ name: config.attorneyName, barNo: config.nevadaBarNo || "" }];
+      config.attorneys = [{ name: config.attorneyName, barLabel: "NV Bar No.", barNo: config.nevadaBarNo || "" }];
     }
     return c.json(config);
   } catch (error) {

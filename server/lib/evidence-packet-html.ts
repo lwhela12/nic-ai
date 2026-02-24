@@ -49,6 +49,17 @@ function formatIndexDate(value?: string): string {
   return `${month}-${day}-${parsed.getFullYear()}`;
 }
 
+function normalizeSignerComparison(value: string): string {
+  return (value || "")
+    .toLowerCase()
+    .replace(/,?\s*esq\.?/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function isSignerLineDuplicate(line: string, signerLine: string): boolean {
+  return normalizeSignerComparison(line) === normalizeSignerComparison(signerLine);
+}
+
 function formatTocLabel(entry: { title: string; date?: string }, index: number): string {
   const title = stripDocumentExtension(entry.title || "");
   const date = formatIndexDate(entry.date);
@@ -437,11 +448,17 @@ export function buildFrontMatterHtml(
   }
 
   // Build firm block
-  const firmBlock = options.firmBlockLines
-    ? buildFirmBlockHtml(options.firmBlockLines)
-    : "";
+  const signerDisplayName = values.signerName || "";
+  const filteredSignatureLines = (options.firmBlockLines || []).filter((line) => {
+    const cleaned = (line || "").trim().replace(/\[[^\]]+\]/g, "").trim();
+    if (!cleaned || /not configured/i.test(cleaned)) return false;
+    if (signerDisplayName && isSignerLineDuplicate(cleaned, signerDisplayName)) return false;
+    return true;
+  });
+  const firmBlock = options.firmBlockLines ? buildFirmBlockHtml(options.firmBlockLines) : "";
+  const signatureBlock = filteredSignatureLines.length > 0 ? buildFirmBlockHtml(filteredSignatureLines) : "";
   const firmPos = tpl.firmBlockPosition ?? "header";
-  const signatureFirmBlock = firmPos === "signature" ? firmBlock : "";
+  const signatureFirmBlock = firmPos === "signature" ? signatureBlock : "";
 
   // Build firm block (backward-compatible placeholder when template expects
   // `{{firmBlock}}` while intentionally using signature placement).

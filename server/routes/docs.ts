@@ -1684,8 +1684,23 @@ app.post("/preview-front-matter", async (c) => {
         const configContent = await readFile(configPath, "utf-8");
         const config = JSON.parse(configContent);
         const built: string[] = [];
-        if (config.attorneyName) built.push(config.attorneyName);
-        if (config.nevadaBarNo) built.push(`NV Bar No. ${config.nevadaBarNo}`);
+        const primaryAttorney = Array.isArray(config.attorneys)
+          ? config.attorneys.find((attorney: any) => typeof attorney?.name === "string" && attorney.name.trim())
+          : null;
+        if (primaryAttorney?.name) built.push(primaryAttorney.name);
+        const credentialNumber = typeof primaryAttorney?.barNo === "string" ? primaryAttorney.barNo.trim() : "";
+        const credentialLabel = typeof primaryAttorney?.barLabel === "string" && primaryAttorney.barLabel.trim()
+          ? primaryAttorney.barLabel.trim()
+          : "NV Bar No.";
+        if (credentialNumber) {
+          if (credentialNumber.toLowerCase().startsWith(credentialLabel.toLowerCase())) {
+            built.push(credentialNumber);
+          } else {
+            built.push(`${credentialLabel} ${credentialNumber}`);
+          }
+        } else if (config.nevadaBarNo) {
+          built.push(`NV Bar No. ${config.nevadaBarNo}`);
+        }
         if (config.firmName) built.push(config.firmName);
         if (config.address) built.push(config.address);
         if (config.cityStateZip) built.push(config.cityStateZip);

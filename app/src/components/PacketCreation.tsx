@@ -14,6 +14,25 @@ interface Props {
 }
 
 type Tab = 'documents' | 'frontmatter' | 'pii'
+const DEFAULT_SIGNER_CREDENTIAL_LABEL = 'NV Bar No.'
+
+function normalizeSignerValue(value: string): string {
+  return (value || '')
+    .toLowerCase()
+    .replace(/,?\s*esq\.?/g, '')
+    .replace(/[^a-z0-9]/g, '')
+}
+
+function formatSignerCredentialLine(attorney?: { barNo?: string; barLabel?: string } | null): string {
+  if (!attorney) return ''
+  const number = String(attorney.barNo || '').trim()
+  if (!number) return ''
+  const label = String(attorney.barLabel || DEFAULT_SIGNER_CREDENTIAL_LABEL).trim() || DEFAULT_SIGNER_CREDENTIAL_LABEL
+  if (number.toLowerCase().startsWith(label.toLowerCase())) {
+    return number
+  }
+  return `${label} ${number}`.trim()
+}
 
 function packetDisplayTitle(title: string | undefined, fallback: string): string {
   const normalized = String(title || '').trim()
@@ -122,8 +141,13 @@ export default function PacketCreation({
           return
         }
         const lines: string[] = []
-        if (config?.attorneyName) lines.push(config.attorneyName)
-        if (config?.nevadaBarNo) lines.push(`NV Bar No. ${config.nevadaBarNo}`)
+        const primaryAttorney = Array.isArray(config?.attorneys)
+          ? config.attorneys.find((a: AttorneyOption) => a?.name?.trim())
+          : null
+        if (primaryAttorney?.name) lines.push(primaryAttorney.name)
+        const credentialLine = formatSignerCredentialLine(primaryAttorney)
+        if (credentialLine) lines.push(credentialLine)
+        else if (config?.nevadaBarNo) lines.push(`NV Bar No. ${config.nevadaBarNo}`)
         if (config?.firmName) lines.push(config.firmName)
         if (config?.address) lines.push(config.address)
         if (config?.cityStateZip) lines.push(config.cityStateZip)
@@ -811,6 +835,7 @@ interface TemplateOption {
 interface AttorneyOption {
   name: string
   barNo: string
+  barLabel?: string
 }
 
 // Well-known caption field keys that map directly to PacketFrontMatter properties
@@ -956,7 +981,13 @@ function FrontMatterTab({
       .then(res => res.ok ? res.json() : null)
       .then(config => {
         if (Array.isArray(config?.attorneys)) {
-          setAttorneys(config.attorneys.filter((a: AttorneyOption) => a.name?.trim()))
+          const normalized = config.attorneys
+            .filter((a: AttorneyOption) => a.name?.trim())
+            .map((a: AttorneyOption) => ({
+              ...a,
+              barLabel: a?.barLabel?.trim() || DEFAULT_SIGNER_CREDENTIAL_LABEL,
+            }))
+          setAttorneys(normalized)
         }
       })
       .catch(() => {})
@@ -975,13 +1006,18 @@ function FrontMatterTab({
 
   const handleSignerChange = (signerName: string) => {
     onUpdate('signerName', signerName)
-    // Update firm block lines 0-1 to match selected attorney
+    // Update signer credential line to match selected signer.
     const attorney = attorneys.find(a => a.name === signerName)
     if (attorney) {
       const lines = [...frontMatter.firmBlockLines]
       while (lines.length < 7) lines.push('')
-      lines[0] = attorney.name
-      lines[1] = attorney.barNo ? `NV Bar No. ${attorney.barNo}` : lines[1]
+      const credentialLine = formatSignerCredentialLine(attorney)
+      if (credentialLine) {
+        lines[1] = credentialLine
+      }
+      if (normalizeSignerValue(lines[0] || '') === normalizeSignerValue(attorney.name || '')) {
+        lines[0] = ''
+      }
       onUpdate('firmBlockLines', lines)
     }
   }
@@ -1167,7 +1203,7 @@ function FrontMatterTab({
               className={`${inputClass} text-xs`}
               value={line}
               onChange={e => onUpdateFirmBlockLine(i, e.target.value)}
-              placeholder={i === 0 ? 'Attorney Name, Esq.' : i === 1 ? 'NV Bar No. XXXXX' : ''}
+              placeholder={i === 0 ? 'Firm line (optional)' : i === 1 ? 'NV Bar No. XXXXX or Nevada License # XXXXX' : ''}
             />
           ))}
         </div>

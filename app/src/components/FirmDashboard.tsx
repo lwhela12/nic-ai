@@ -1842,7 +1842,7 @@ export default function FirmDashboard({
                       <button
                         onClick={() => {
                           const attorneys = Array.isArray(firmConfig.attorneys) ? [...firmConfig.attorneys] : []
-                          attorneys.push({ name: '', barNo: '' })
+                          attorneys.push({ name: '', barLabel: 'NV Bar No.', barNo: '' })
                           setFirmConfig(prev => ({ ...prev, attorneys }))
                         }}
                         className="text-xs text-accent-600 hover:text-accent-800 font-medium"
@@ -1851,7 +1851,7 @@ export default function FirmDashboard({
                       </button>
                     </div>
                     <div className="space-y-2">
-                      {(Array.isArray(firmConfig.attorneys) ? firmConfig.attorneys : []).map((attorney: { name: string; barNo: string }, i: number) => (
+                      {(Array.isArray(firmConfig.attorneys) ? firmConfig.attorneys : []).map((attorney: { name: string; barNo: string; barLabel?: string }, i: number) => (
                         <div key={i} className="flex gap-2 items-center">
                           <input
                             value={attorney.name || ''}
@@ -1864,6 +1864,19 @@ export default function FirmDashboard({
                             className="flex-1 border border-surface-200 rounded-lg px-3 py-1.5 text-sm
                                        focus:outline-none focus:ring-2 focus:ring-accent-500"
                           />
+                          <select
+                            value={attorney.barLabel || 'NV Bar No.'}
+                            onChange={(e) => {
+                              const attorneys = [...(firmConfig.attorneys || [])]
+                              attorneys[i] = { ...attorneys[i], barLabel: e.target.value }
+                              setFirmConfig(prev => ({ ...prev, attorneys }))
+                            }}
+                            className="w-40 border border-surface-200 rounded-lg px-2 py-1.5 text-sm
+                                       focus:outline-none focus:ring-2 focus:ring-accent-500"
+                          >
+                            <option value="NV Bar No.">NV Bar No.</option>
+                            <option value="Nevada License #">Nevada License #</option>
+                          </select>
                           <input
                             value={attorney.barNo || ''}
                             onChange={(e) => {
@@ -1871,8 +1884,8 @@ export default function FirmDashboard({
                               attorneys[i] = { ...attorneys[i], barNo: e.target.value }
                               setFirmConfig(prev => ({ ...prev, attorneys }))
                             }}
-                            placeholder="Bar No."
-                            className="w-28 border border-surface-200 rounded-lg px-3 py-1.5 text-sm
+                            placeholder="Number"
+                            className="w-24 border border-surface-200 rounded-lg px-3 py-1.5 text-sm
                                        focus:outline-none focus:ring-2 focus:ring-accent-500"
                           />
                           <button

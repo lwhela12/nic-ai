@@ -2091,8 +2091,8 @@ async function addStatementPages(
     .map((l) => l.trim().replace(/\[[^\]]+\]/g, "").trim())
     .filter((l) => l && !/not configured/i.test(l));
   const filteredFirmLines = cleanedFirmLines.filter((line) => {
-    if (displayFirmName && line.toLowerCase() === displayFirmName.toLowerCase()) return false;
-    if (signerDisplayName && line.toLowerCase() === signerDisplayName.toLowerCase()) return false;
+    if (displayFirmName && isSignerLineDuplicate(line, displayFirmName)) return false;
+    if (signerDisplayName && isSignerLineDuplicate(line, signerDisplayName)) return false;
     return true;
   });
 
@@ -2466,7 +2466,7 @@ function addAffirmationPage(
       .filter((l) => l && !/not configured/i.test(l));
     // Skip lines that duplicate the signer name already shown
     for (const line of cleaned) {
-      if (signerDisplayName && line.toLowerCase() === signerDisplayName.toLowerCase()) continue;
+      if (signerDisplayName && isSignerLineDuplicate(line, signerDisplayName)) continue;
       signerLines.push(line);
     }
   }
@@ -2724,6 +2724,17 @@ function truncateToWidth(text: string, font: PDFFont, size: number, maxWidth: nu
 
 function formatPageRange(start: number, end: number): string {
   return start === end ? `${start}` : `${start}-${end}`;
+}
+
+function normalizeSignerComparison(value: string): string {
+  return (value || "")
+    .toLowerCase()
+    .replace(/,?\s*esq\.?/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function isSignerLineDuplicate(line: string, signerLine: string): boolean {
+  return normalizeSignerComparison(line) === normalizeSignerComparison(signerLine);
 }
 
 function stripDocumentExtension(title: string): string {
@@ -3046,8 +3057,8 @@ async function buildDocxFrontMatter(
     .filter((line) => line && !/not configured/i.test(line));
   const signerDisplayName = signerName || caption.introductoryCounselLine || "";
   const signatureFirmLines = cleanedFirmLines.filter((line) => {
-    if (signerDisplayName && line.toLowerCase() === signerDisplayName.toLowerCase()) return false;
-    if (firmName && line.toLowerCase() === firmName.toLowerCase()) return false;
+    if (signerDisplayName && isSignerLineDuplicate(line, signerDisplayName)) return false;
+    if (firmName && isSignerLineDuplicate(line, firmName)) return false;
     return true;
   });
   const signatureFirmBlock = signatureFirmLines.join("\n");

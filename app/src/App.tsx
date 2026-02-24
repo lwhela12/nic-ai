@@ -681,8 +681,23 @@ function App() {
           } else {
             // Build from individual firm config fields
             const lines: string[] = []
-            if (config.attorneyName) lines.push(config.attorneyName)
-            if (config.nevadaBarNo) lines.push(`NV Bar No. ${config.nevadaBarNo}`)
+            const primaryAttorney = Array.isArray(config?.attorneys)
+              ? config.attorneys.find((a: any) => typeof a?.name === 'string' && a.name.trim())
+              : null
+            if (primaryAttorney?.name) lines.push(primaryAttorney.name)
+            const credentialNumber = typeof primaryAttorney?.barNo === 'string' ? primaryAttorney.barNo.trim() : ''
+            const credentialLabel = typeof primaryAttorney?.barLabel === 'string' && primaryAttorney.barLabel.trim()
+              ? primaryAttorney.barLabel.trim()
+              : 'NV Bar No.'
+            if (credentialNumber) {
+              if (credentialNumber.toLowerCase().startsWith(credentialLabel.toLowerCase())) {
+                lines.push(credentialNumber)
+              } else {
+                lines.push(`${credentialLabel} ${credentialNumber}`)
+              }
+            } else if (config.nevadaBarNo) {
+              lines.push(`NV Bar No. ${config.nevadaBarNo}`)
+            }
             if (config.firmName) lines.push(config.firmName)
             if (config.address) lines.push(config.address)
             if (config.cityStateZip) lines.push(config.cityStateZip)
@@ -698,7 +713,8 @@ function App() {
           }
           // Default signer from primary attorney
           if (Array.isArray(config?.attorneys) && config.attorneys.length > 0) {
-            fm.signerName = config.attorneys[0].name || ''
+            const primaryAttorney = config.attorneys.find((a: any) => typeof a?.name === 'string' && a.name.trim())
+            fm.signerName = primaryAttorney?.name || config.attorneys[0].name || ''
           } else if (config?.attorneyName) {
             fm.signerName = config.attorneyName
           }
