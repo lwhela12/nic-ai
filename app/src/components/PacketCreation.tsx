@@ -205,6 +205,7 @@ export default function PacketCreation({
   const [isOpeningWord, setIsOpeningWord] = useState(false)
   const [isWatchingWordEdits, setIsWatchingWordEdits] = useState(false)
   const [generateError, setGenerateError] = useState<string | null>(null)
+  const [generateWarning, setGenerateWarning] = useState<string | null>(null)
   const [frontMatterError, setFrontMatterError] = useState<string | null>(null)
   const [documentPageCounts, setDocumentPageCounts] = useState<Record<string, number | null>>({})
 
@@ -827,6 +828,7 @@ export default function PacketCreation({
       return
     }
     setGenerateError(null)
+    setGenerateWarning(null)
     setIsGenerating(true)
     const selectedManualRedactions = piiResults
       .map((result) => ({
@@ -866,6 +868,21 @@ export default function PacketCreation({
       })
       if (res.ok) {
         const data = await res.json()
+        const invalidPaths = Array.isArray(data?.invalidPaths)
+          ? data.invalidPaths.filter((v: unknown): v is string => typeof v === 'string' && v.trim().length > 0)
+          : []
+        const warningCount = Array.isArray(data?.warnings)
+          ? data.warnings.filter((v: unknown): v is string => typeof v === 'string' && v.trim().length > 0).length
+          : 0
+        if (invalidPaths.length > 0) {
+          const preview = invalidPaths.slice(0, 3).join(', ')
+          const suffix = invalidPaths.length > 3 ? ` (+${invalidPaths.length - 3} more)` : ''
+          setGenerateWarning(`Generated with warnings. Skipped missing paths: ${preview}${suffix}`)
+        } else if (warningCount > 0) {
+          setGenerateWarning(`Generated with ${warningCount} warning${warningCount === 1 ? '' : 's'}.`)
+        } else {
+          setGenerateWarning(null)
+        }
         onUpdateState(prev => ({
           ...prev,
           generatedAt: new Date().toISOString(),
@@ -915,9 +932,11 @@ export default function PacketCreation({
         } else {
           setGenerateError(data.error || 'Generation failed')
         }
+        setGenerateWarning(null)
       }
     } catch (err) {
       setGenerateError(err instanceof Error ? err.message : 'Generation failed')
+      setGenerateWarning(null)
     }
     setIsGenerating(false)
   }
@@ -1012,6 +1031,9 @@ export default function PacketCreation({
       <div className="border-t border-surface-200 px-4 py-3 bg-surface-50 flex items-center gap-3">
         {generateError && (
           <p className="text-xs text-red-600 flex-1">{generateError}</p>
+        )}
+        {!generateError && generateWarning && (
+          <p className="text-xs text-amber-700 flex-1">{generateWarning}</p>
         )}
         {packetState.generatedAt && !generateError && (
           <div className="text-xs text-emerald-600 flex-1 flex items-center gap-3">

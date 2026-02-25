@@ -2637,15 +2637,13 @@ app.post("/generate-packet", async (c) => {
       })
       .filter((d): d is { path: string; title: string; date?: string; docType?: string; include: boolean } => Boolean(d));
 
-    if (unresolvedPaths.length > 0) {
+    if (canonicalDocuments.length === 0) {
       return c.json({
-        error: "Some selected documents could not be resolved from the current index. Refresh the packet selections and try again.",
+        error: unresolvedPaths.length > 0
+          ? "None of the selected documents could be resolved from the current index. Refresh packet selections and try again."
+          : "None of the selected documents matched indexed files",
         invalidPaths: unresolvedPaths,
       }, 400);
-    }
-
-    if (canonicalDocuments.length === 0) {
-      return c.json({ error: "None of the selected documents matched indexed files" }, 400);
     }
 
     const manualRedactionsByPath: Record<string, EvidencePacketManualRedactionBox[]> = {};
@@ -2790,12 +2788,18 @@ app.post("/generate-packet", async (c) => {
       console.warn("generate-packet cleanup warning:", cleanupErr);
     }
 
+    const pathResolutionWarnings = unresolvedPaths.length > 0
+      ? [`Skipped ${unresolvedPaths.length} unresolved document path${unresolvedPaths.length === 1 ? "" : "s"} during generation.`]
+      : [];
+
     return c.json({
       success: true,
       outputPath: outputRelPath,
       frontMatterDocxPath,
       totalPages: result.totalPages,
-      warnings: result.warnings,
+      warnings: [...pathResolutionWarnings, ...result.warnings],
+      invalidPaths: unresolvedPaths,
+      includedCount: canonicalDocuments.length,
     });
   } catch (err) {
     console.error("generate-packet error:", err);

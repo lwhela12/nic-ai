@@ -25,6 +25,46 @@ interface Draft {
   outputPath?: string
 }
 
+const normalizeDraftRecord = (value: unknown): Draft | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const source = value as Record<string, unknown>
+
+  const id = typeof source.id === 'string' ? source.id.trim() : ''
+  const path = typeof source.path === 'string' ? source.path.trim() : ''
+  if (!id || !path) return null
+
+  const draft: Draft = {
+    id,
+    name: typeof source.name === 'string' && source.name.trim() ? source.name : id,
+    path,
+    type: typeof source.type === 'string' && source.type.trim() ? source.type : 'document',
+    createdAt: typeof source.createdAt === 'string' && source.createdAt.trim()
+      ? source.createdAt
+      : new Date().toISOString(),
+    targetPath: typeof source.targetPath === 'string' && source.targetPath.trim()
+      ? source.targetPath
+      : `${id}.pdf`,
+  }
+
+  if (typeof source.workingDocxPath === 'string' && source.workingDocxPath.trim()) {
+    draft.workingDocxPath = source.workingDocxPath
+  }
+  if (typeof source.workingDocxMtimeMs === 'number' && Number.isFinite(source.workingDocxMtimeMs)) {
+    draft.workingDocxMtimeMs = source.workingDocxMtimeMs
+  }
+  if (typeof source.previewPdfPath === 'string' && source.previewPdfPath.trim()) {
+    draft.previewPdfPath = source.previewPdfPath
+  }
+  if (typeof source.generatedAt === 'string' && source.generatedAt.trim()) {
+    draft.generatedAt = source.generatedAt
+  }
+  if (typeof source.outputPath === 'string' && source.outputPath.trim()) {
+    draft.outputPath = source.outputPath
+  }
+
+  return draft
+}
+
 type ExportStyleProfile = 'court_safe' | 'd_and_o' | 'letter' | 'text_only'
 
 const EXPORT_STYLE_OPTIONS: Array<{ value: ExportStyleProfile; label: string }> = [
@@ -1108,7 +1148,12 @@ export default function Visualizer({
       const res = await fetch(`${apiUrl}/api/docs/drafts?case=${encodeURIComponent(caseFolder)}`)
       if (res.ok) {
         const data = await res.json()
-        setDrafts(data.drafts || [])
+        const normalizedDrafts = Array.isArray(data?.drafts)
+          ? data.drafts
+            .map((entry: unknown) => normalizeDraftRecord(entry))
+            .filter((entry: Draft | null): entry is Draft => Boolean(entry))
+          : []
+        setDrafts(normalizedDrafts)
       }
     } catch (err) {
       console.error('Failed to load drafts:', err)
@@ -2781,7 +2826,7 @@ export default function Visualizer({
                 <div className="space-y-3">
                   {drafts.map((draft) => {
                     // Detect packet drafts (JSON files with packet- prefix)
-                    const isPacketDraft = draft.id.startsWith('packet-') || draft.type === 'packet'
+                    const isPacketDraft = draft.type === 'packet' || draft.id.startsWith('packet-')
                     if (isPacketDraft && onOpenPacketDraft) {
                       const isGenerated = !!draft.generatedAt
                       return (

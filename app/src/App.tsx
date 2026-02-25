@@ -11,7 +11,8 @@ import TodoDrawer from './components/TodoDrawer'
 import UserNotes from './components/UserNotes'
 import ContactCard from './components/ContactCard'
 import PacketCreation from './components/PacketCreation'
-import type { PacketDocument, PacketFrontMatter, PacketPiiResult, PacketState } from './types/packet'
+import PanelErrorBoundary from './components/PanelErrorBoundary'
+import type { PacketDocument, PacketFrontMatter, PacketPiiResult, PacketRedactionBox, PacketState } from './types/packet'
 const API_URL = ''  // Use relative URLs - Vite proxies /api to localhost:3001
 
 interface FirmTodo {
@@ -77,6 +78,276 @@ const normalizePacketPageSelection = (
     }
   }
   return getDefaultPacketPageSelection()
+}
+
+type PacketDocumentWithDocId = PacketDocument & { docId?: string }
+
+const normalizePacketPathForState = (value: unknown): string => {
+  if (typeof value !== 'string') return ''
+  return value
+    .replace(/\\/g, '/')
+    .replace(/^\.\/+/, '')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/')
+    .trim()
+}
+
+const normalizePacketStringMap = (value: unknown): Record<string, string> => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const entries = Object.entries(value as Record<string, unknown>)
+    .flatMap(([rawKey, rawValue]) => {
+      const key = rawKey.trim()
+      if (!key || typeof rawValue !== 'string') return [] as Array<[string, string]>
+      return [[key, rawValue]] as Array<[string, string]>
+    })
+  return Object.fromEntries(entries)
+}
+
+const getFallbackPacketFrontMatter = (): PacketFrontMatter => ({
+  claimantName: '',
+  claimNumber: '',
+  hearingNumber: '',
+  hearingDateTime: '',
+  appearance: 'Telephonic',
+  introductoryCounselLine: '',
+  serviceDate: new Date().toLocaleDateString('en-US'),
+  serviceMethod: 'Via E-File',
+  recipients: [],
+  firmBlockLines: [],
+  templateId: 'ho-standard',
+  signerName: '',
+  issueOnAppeal: '',
+  extraSectionValues: {},
+  captionValues: {},
+})
+
+const normalizePacketFrontMatter = (value: unknown): PacketFrontMatter => {
+  const source = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+  const fallback = getFallbackPacketFrontMatter()
+
+  const recipients = Array.isArray(source.recipients)
+    ? source.recipients.filter((entry): entry is string => typeof entry === 'string')
+    : fallback.recipients
+
+  const firmBlockLines = Array.isArray(source.firmBlockLines)
+    ? source.firmBlockLines.filter((entry): entry is string => typeof entry === 'string')
+    : fallback.firmBlockLines
+
+  const templateId = typeof source.templateId === 'string' && source.templateId.trim()
+    ? source.templateId.trim()
+    : fallback.templateId
+
+  const signerName = typeof source.signerName === 'string' ? source.signerName : fallback.signerName
+  const issueOnAppeal = typeof source.issueOnAppeal === 'string' ? source.issueOnAppeal : fallback.issueOnAppeal
+
+  return {
+    claimantName: typeof source.claimantName === 'string' ? source.claimantName : fallback.claimantName,
+    claimNumber: typeof source.claimNumber === 'string' ? source.claimNumber : fallback.claimNumber,
+    hearingNumber: typeof source.hearingNumber === 'string' ? source.hearingNumber : fallback.hearingNumber,
+    hearingDateTime: typeof source.hearingDateTime === 'string' ? source.hearingDateTime : fallback.hearingDateTime,
+    appearance: typeof source.appearance === 'string' && source.appearance.trim()
+      ? source.appearance
+      : fallback.appearance,
+    introductoryCounselLine: typeof source.introductoryCounselLine === 'string'
+      ? source.introductoryCounselLine
+      : fallback.introductoryCounselLine,
+    serviceDate: typeof source.serviceDate === 'string' && source.serviceDate.trim()
+      ? source.serviceDate
+      : fallback.serviceDate,
+    serviceMethod: typeof source.serviceMethod === 'string' && source.serviceMethod.trim()
+      ? source.serviceMethod
+      : fallback.serviceMethod,
+    recipients,
+    firmBlockLines,
+    templateId,
+    signerName,
+    issueOnAppeal,
+    extraSectionValues: normalizePacketStringMap(source.extraSectionValues),
+    captionValues: normalizePacketStringMap(source.captionValues),
+  }
+}
+
+const toFiniteNumber = (value: unknown): number | null => {
+  const parsed = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+const clampPacketPercentage = (value: unknown): number => {
+  const parsed = toFiniteNumber(value)
+  if (parsed === null) return 0
+  if (parsed < 0) return 0
+  if (parsed > 1) return 1
+  return parsed
+}
+
+const normalizePacketDocument = (value: unknown, fallbackOrder: number): PacketDocumentWithDocId | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const source = value as Record<string, unknown>
+  const path = normalizePacketPathForState(source.path)
+  if (!path) return null
+
+  const fileName = (typeof source.fileName === 'string' && source.fileName.trim())
+    ? source.fileName.trim()
+    : (path.split('/').pop() || path)
+  const title = resolvePacketTitle(
+    typeof source.title === 'string' ? source.title : '',
+    fileName,
+  )
+  const rawDate = typeof source.date === 'string' ? source.date.trim() : ''
+  const date = rawDate || null
+  const warningReasonFromState = typeof source.warningReason === 'string' && source.warningReason.trim()
+    ? source.warningReason
+    : undefined
+  const hasWarning = source.hasWarning === true || !date
+  const warningReason = warningReasonFromState || (hasWarning && !date ? 'No date' : undefined)
+  const order = toFiniteNumber(source.order)
+  const docId = typeof source.docId === 'string' && source.docId.trim() ? source.docId.trim() : undefined
+  const pageSelectionSource = source.pageSelection as
+    | PacketDocument['pageSelection']
+    | { allPages?: unknown; pageRanges?: unknown }
+    | undefined
+
+  return {
+    path,
+    title,
+    date,
+    type: typeof source.type === 'string' ? source.type : '',
+    fileName,
+    pageSelection: normalizePacketPageSelection(pageSelectionSource),
+    pinned: source.pinned === true,
+    order: order === null ? fallbackOrder : Math.max(0, Math.floor(order)),
+    hasWarning,
+    warningReason,
+    docId,
+  }
+}
+
+const normalizePacketPiiResult = (value: unknown): PacketPiiResult | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const source = value as Record<string, unknown>
+  const path = normalizePacketPathForState(source.path)
+  if (!path) return null
+
+  const findings = Array.isArray(source.findings)
+    ? source.findings
+      .map((rawFinding) => {
+        if (!rawFinding || typeof rawFinding !== 'object') return null
+        const finding = rawFinding as Record<string, unknown>
+        const page = toFiniteNumber(finding.page)
+        if (page === null || page < 1) return null
+        return {
+          page: Math.floor(page),
+          kind: finding.kind === 'ssn' ? 'ssn' as const : 'dob' as const,
+          preview: typeof finding.preview === 'string' ? finding.preview : '',
+        }
+      })
+      .filter((finding): finding is { page: number; kind: 'dob' | 'ssn'; preview: string } => Boolean(finding))
+    : []
+
+  const boxes = Array.isArray(source.boxes)
+    ? source.boxes
+      .map((rawBox) => {
+        if (!rawBox || typeof rawBox !== 'object') return null
+        const box = rawBox as Record<string, unknown>
+        const page = toFiniteNumber(box.page)
+        if (page === null || page < 1) return null
+        const xPct = clampPacketPercentage(box.xPct)
+        const yPct = clampPacketPercentage(box.yPct)
+        const widthPct = clampPacketPercentage(box.widthPct)
+        const heightPct = clampPacketPercentage(box.heightPct)
+        if (widthPct <= 0 || heightPct <= 0) return null
+        const fallbackId = `box:${Math.floor(page)}:${xPct.toFixed(4)}:${yPct.toFixed(4)}:${widthPct.toFixed(4)}:${heightPct.toFixed(4)}`
+        const sourceType: PacketRedactionBox['source'] = box.source === 'draw' || box.source === 'text'
+          ? box.source
+          : 'detected'
+        const kind: PacketRedactionBox['kind'] = box.kind === 'ssn' || box.kind === 'dob'
+          ? box.kind
+          : undefined
+        return {
+          id: typeof box.id === 'string' && box.id.trim() ? box.id : fallbackId,
+          page: Math.floor(page),
+          xPct,
+          yPct,
+          widthPct,
+          heightPct,
+          selected: box.selected !== false,
+          source: sourceType,
+          kind,
+          preview: typeof box.preview === 'string' ? box.preview : undefined,
+        }
+      })
+      .filter((box): box is NonNullable<typeof box> => Boolean(box))
+    : []
+
+  const warnings = Array.isArray(source.warnings)
+    ? source.warnings.filter((warning): warning is string => typeof warning === 'string' && warning.trim().length > 0)
+    : []
+
+  const scanned = typeof source.scanned === 'boolean' ? source.scanned : undefined
+
+  return {
+    path,
+    findings,
+    boxes,
+    warnings,
+    scanned,
+    approved: source.approved === true,
+  }
+}
+
+const normalizePacketState = (value: unknown): PacketState | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const source = value as Record<string, unknown>
+
+  const documents = Array.isArray(source.documents)
+    ? source.documents
+      .map((entry, index) => normalizePacketDocument(entry, index))
+      .filter((entry): entry is PacketDocumentWithDocId => Boolean(entry))
+      .map((entry, index) => ({ ...entry, order: index }))
+    : []
+
+  const piiResults = Array.isArray(source.piiResults)
+    ? source.piiResults
+      .map((entry) => normalizePacketPiiResult(entry))
+      .filter((entry): entry is PacketPiiResult => Boolean(entry))
+    : []
+
+  const previewBaseline = (
+    source.frontMatterPreviewBaseline &&
+    typeof source.frontMatterPreviewBaseline === 'object' &&
+    !Array.isArray(source.frontMatterPreviewBaseline)
+  )
+    ? normalizePacketFrontMatter(source.frontMatterPreviewBaseline)
+    : null
+
+  const frontMatterWorkingDocxMtime = toFiniteNumber(source.frontMatterWorkingDocxMtime)
+
+  return {
+    documents,
+    frontMatter: normalizePacketFrontMatter(source.frontMatter),
+    frontMatterPreviewBaseline: previewBaseline,
+    frontMatterPreviewDocumentsSignature:
+      typeof source.frontMatterPreviewDocumentsSignature === 'string'
+        ? source.frontMatterPreviewDocumentsSignature
+        : null,
+    piiResults,
+    piiScanned: source.piiScanned === true,
+    generatedAt: typeof source.generatedAt === 'string' && source.generatedAt.trim() ? source.generatedAt : null,
+    outputPath: typeof source.outputPath === 'string' && source.outputPath.trim() ? source.outputPath : null,
+    frontMatterDocxPath:
+      typeof source.frontMatterDocxPath === 'string' && source.frontMatterDocxPath.trim()
+        ? source.frontMatterDocxPath
+        : null,
+    frontMatterWorkingDocxPath:
+      typeof source.frontMatterWorkingDocxPath === 'string' && source.frontMatterWorkingDocxPath.trim()
+        ? source.frontMatterWorkingDocxPath
+        : null,
+    frontMatterWorkingDocxMtime: frontMatterWorkingDocxMtime === null ? null : frontMatterWorkingDocxMtime,
+    draftId: typeof source.draftId === 'string' && source.draftId.trim() ? source.draftId : null,
+    draftName: typeof source.draftName === 'string' && source.draftName.trim() ? source.draftName : undefined,
+  }
 }
 
 // Dev mode - skip auth in Vite dev server
@@ -529,28 +800,8 @@ function App() {
   const [packetState, setPacketState] = useState<PacketState | null>(() => {
     try {
       const raw = sessionStorage.getItem('pi-packet-state')
-      const parsed = raw ? JSON.parse(raw) as PacketState : null
-      if (!parsed) return null
-      return {
-        ...parsed,
-        documents: Array.isArray(parsed.documents)
-          ? parsed.documents.map((doc) => ({
-            ...doc,
-            pageSelection: normalizePacketPageSelection((doc as PacketDocument).pageSelection),
-          }))
-          : [],
-        frontMatterPreviewBaseline:
-          parsed.frontMatterPreviewBaseline && typeof parsed.frontMatterPreviewBaseline === 'object'
-            ? parsed.frontMatterPreviewBaseline
-            : null,
-        frontMatterPreviewDocumentsSignature:
-          typeof parsed.frontMatterPreviewDocumentsSignature === 'string'
-            ? parsed.frontMatterPreviewDocumentsSignature
-            : null,
-        frontMatterDocxPath: typeof parsed.frontMatterDocxPath === 'string' ? parsed.frontMatterDocxPath : null,
-        frontMatterWorkingDocxPath: typeof parsed.frontMatterWorkingDocxPath === 'string' ? parsed.frontMatterWorkingDocxPath : null,
-        frontMatterWorkingDocxMtime: typeof parsed.frontMatterWorkingDocxMtime === 'number' ? parsed.frontMatterWorkingDocxMtime : null,
-      }
+      const parsed = raw ? normalizePacketState(JSON.parse(raw)) : null
+      return parsed
     } catch { return null }
   })
 
@@ -912,45 +1163,40 @@ function App() {
     if (!caseFolder) return
     try {
       const res = await fetch(`${API_URL}/api/docs/packet-draft/${encodeURIComponent(draftId)}?case=${encodeURIComponent(caseFolder)}`)
-      if (res.ok) {
-        const draft = await res.json() as PacketState
-        const canonicalDocs = (draft.documents || [])
-          .map((doc, index) => {
-            const derivedDocId = (doc as PacketDocument & { docId?: string }).docId
-              || buildDocumentIdFromPath(doc.path)
-            const canonicalPath =
-              getCanonicalPacketPathById(derivedDocId, docLookupById)
-              || getCanonicalPacketPath(doc.path, docLookup)
-            if (!canonicalPath) return null
-            return {
-              ...doc,
-              pageSelection: normalizePacketPageSelection((doc as PacketDocument).pageSelection),
-              path: canonicalPath,
-              title: resolvePacketTitle(doc.title, canonicalPath.split('/').pop() || canonicalPath),
-              order: index,
-            }
-          })
-          .filter((doc): doc is PacketDocument => Boolean(doc))
+      if (!res.ok) return
 
-        setPacketState({
-          ...draft,
-          documents: canonicalDocs,
-          draftId,
-          frontMatterPreviewBaseline:
-            draft.frontMatterPreviewBaseline && typeof draft.frontMatterPreviewBaseline === 'object'
-              ? draft.frontMatterPreviewBaseline
-              : null,
-          frontMatterPreviewDocumentsSignature:
-            typeof draft.frontMatterPreviewDocumentsSignature === 'string'
-              ? draft.frontMatterPreviewDocumentsSignature
-              : null,
-          frontMatterDocxPath: typeof draft.frontMatterDocxPath === 'string' ? draft.frontMatterDocxPath : null,
-          frontMatterWorkingDocxPath: typeof draft.frontMatterWorkingDocxPath === 'string' ? draft.frontMatterWorkingDocxPath : null,
-          frontMatterWorkingDocxMtime: typeof draft.frontMatterWorkingDocxMtime === 'number' ? draft.frontMatterWorkingDocxMtime : null,
-        })
-        setPacketMode(true)
+      const rawDraft = await res.json()
+      const draft = normalizePacketState(rawDraft)
+      if (!draft) {
+        console.warn(`Ignoring malformed packet draft: ${draftId}`)
+        return
       }
-    } catch { /* ignore */ }
+
+      const canonicalDocs = (draft.documents as PacketDocumentWithDocId[])
+        .map((doc, index) => {
+          const derivedDocId = doc.docId || buildDocumentIdFromPath(doc.path)
+          const canonicalPath =
+            getCanonicalPacketPathById(derivedDocId, docLookupById)
+            || getCanonicalPacketPath(doc.path, docLookup)
+          if (!canonicalPath) return null
+          return {
+            ...doc,
+            path: canonicalPath,
+            title: resolvePacketTitle(doc.title, canonicalPath.split('/').pop() || canonicalPath),
+            order: index,
+          }
+        })
+        .filter((doc): doc is PacketDocumentWithDocId => Boolean(doc))
+
+      setPacketState({
+        ...draft,
+        documents: canonicalDocs,
+        draftId,
+      })
+      setPacketMode(true)
+    } catch (error) {
+      console.error('Failed to load packet draft:', error)
+    }
   }, [caseFolder, docLookup, docLookupById])
 
   const handleExitPacketMode = useCallback(() => {
@@ -2172,144 +2418,177 @@ function App() {
         leftLabel="Files"
         rightLabel="Preview"
         leftPanel={
-          <FileViewer
-            documentIndex={documentIndex}
-            generatedDocs={generatedDocs}
-            caseFolder={caseFolder}
-            apiUrl={API_URL}
-            packetMode={packetMode}
-            packetSelectedPaths={packetSelectedPaths}
-            onPacketToggleFile={handlePacketToggleFile}
-            onDocSelect={(doc, docPath, filePath) => {
-              handleViewUpdate(doc, docPath)
-              setSelectedFilePath(filePath || null)
-              // Also compute file URL so we can toggle to document view
-              if (filePath) {
-                const url = `${API_URL}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(filePath)}`
-                setFileViewUrl(url)
-                setFileViewName(filePath.split('/').pop() || filePath)
-              } else {
-                setFileViewUrl(null)
-              }
-              setVisualizerMode('document')
+          <PanelErrorBoundary
+            panelName="File List"
+            resetKey={`${caseFolder || 'none'}:${packetMode ? 'packet' : 'default'}`}
+            onReset={() => {
+              setSelectedFilePath(null)
+              setFileViewUrl(null)
+              setViewContent('')
+              setVisualizerMode('summary')
             }}
-            onFileView={(url, filename, filePath) => {
-              setFileViewUrl(url)
-              setFileViewName(filename)
-              setSelectedFilePath(filePath)
-              const summary = buildDocSummaryContent(filePath)
-              if (summary) setViewContent(summary)
-              setVisualizerMode('document')
-            }}
-            indexStatus={indexStatusForViewer}
-            agentView={agentDocumentView}
-            onClearAgentView={() => setAgentDocumentView(null)}
-            savedAgentViews={savedAgentViews}
-            activeAgentViewId={agentDocumentView?.id || null}
-            onApplyAgentView={handleApplySavedAgentView}
-            onClearSavedAgentViews={handleClearSavedAgentViews}
-          />
-        }
-        centerPanel={
-              packetMode && packetState ? (
-            <PacketCreation
-              packetState={packetState}
-              onUpdateState={handlePacketUpdateState}
+          >
+            <FileViewer
+              documentIndex={documentIndex}
+              generatedDocs={generatedDocs}
               caseFolder={caseFolder}
               apiUrl={API_URL}
-              firmRoot={firmRoot || undefined}
-              onShowFile={handleShowFile}
-              onShowPiiFile={handleShowPacketFile}
-              onPiiTabActiveChange={setPacketPiiTabActive}
-              onExit={handleExitPacketMode}
-              onGenerated={(outputPath) => {
-                handleShowPacketFile(outputPath)
-                setEvidencePacketTakeover({ path: outputPath, version: Date.now() })
-                setRefreshDraftsKey(k => k + 1)
-              }}
-              onPreviewReady={(blobUrl) => {
-                setFileViewUrl(blobUrl)
-                setFileViewName('Front Matter Preview.pdf')
-                setSelectedFilePath(null)
-                setViewContent('')
+              packetMode={packetMode}
+              packetSelectedPaths={packetSelectedPaths}
+              onPacketToggleFile={handlePacketToggleFile}
+              onDocSelect={(doc, docPath, filePath) => {
+                handleViewUpdate(doc, docPath)
+                setSelectedFilePath(filePath || null)
+                // Also compute file URL so we can toggle to document view
+                if (filePath) {
+                  const url = `${API_URL}/api/files/view?case=${encodeURIComponent(caseFolder)}&path=${encodeURIComponent(filePath)}`
+                  setFileViewUrl(url)
+                  setFileViewName(filePath.split('/').pop() || filePath)
+                } else {
+                  setFileViewUrl(null)
+                }
                 setVisualizerMode('document')
               }}
+              onFileView={(url, filename, filePath) => {
+                setFileViewUrl(url)
+                setFileViewName(filename)
+                setSelectedFilePath(filePath)
+                const summary = buildDocSummaryContent(filePath)
+                if (summary) setViewContent(summary)
+                setVisualizerMode('document')
+              }}
+              indexStatus={indexStatusForViewer}
+              agentView={agentDocumentView}
+              onClearAgentView={() => setAgentDocumentView(null)}
+              savedAgentViews={savedAgentViews}
+              activeAgentViewId={agentDocumentView?.id || null}
+              onApplyAgentView={handleApplySavedAgentView}
+              onClearSavedAgentViews={handleClearSavedAgentViews}
             />
-          ) : (
-            <div className="relative h-full">
-              <Chat
+          </PanelErrorBoundary>
+        }
+        centerPanel={
+          <PanelErrorBoundary
+            panelName={packetMode ? 'Packet Builder' : 'Chat'}
+            resetKey={`${caseFolder || 'none'}:${packetMode ? (packetState?.draftId || 'packet') : 'chat'}`}
+            onReset={() => {
+              if (packetMode) {
+                setPacketMode(false)
+                setPacketState(null)
+              }
+            }}
+          >
+            {packetMode && packetState ? (
+              <PacketCreation
+                packetState={packetState}
+                onUpdateState={handlePacketUpdateState}
                 caseFolder={caseFolder}
                 apiUrl={API_URL}
-                onViewUpdate={handleViewUpdate}
-                initialPrompt={reviewPrompt}
-                onInitialPromptUsed={() => setReviewPrompt('')}
-                onIndexMayHaveChanged={reloadDocumentIndex}
-                onDraftsMayHaveChanged={() => setRefreshDraftsKey(k => k + 1)}
-                onEvidencePacketGenerated={handleEvidencePacketGenerated}
+                firmRoot={firmRoot || undefined}
                 onShowFile={handleShowFile}
-                onDocumentView={handleDocumentView}
-                onIndexStatusChange={setIndexStatusForViewer}
-                onStartReindex={(forceFullReindex) => {
-                  if (forceFullReindex) {
-                    startCaseIndexing(caseFolder)
-                  } else {
-                    // Check for changed files first, then start indexing only those
-                    fetch(`${API_URL}/api/files/index-status?case=${encodeURIComponent(caseFolder)}`)
-                      .then(res => res.json())
-                      .then(status => {
-                        if (!status.needsIndex) return
-                        const changedFiles = [...(status.newFiles || []), ...(status.modifiedFiles || [])]
-                        if (changedFiles.length > 0 && status.reason !== 'no_index') {
-                          startCaseIndexing(caseFolder, changedFiles)
-                        } else {
-                          startCaseIndexing(caseFolder)
-                        }
-                      })
-                      .catch(() => startCaseIndexing(caseFolder))
-                  }
+                onShowPiiFile={handleShowPacketFile}
+                onPiiTabActiveChange={setPacketPiiTabActive}
+                onExit={handleExitPacketMode}
+                onGenerated={(outputPath) => {
+                  handleShowPacketFile(outputPath)
+                  setEvidencePacketTakeover({ path: outputPath, version: Date.now() })
+                  setRefreshDraftsKey(k => k + 1)
                 }}
-                isReindexing={indexingProgress?.isRunning && indexingProgress?.caseFolder === caseFolder}
-                onEvidencePacketPlanned={(data) => {
-                  void handleEnterPacketModeFromAgent(data.documents, data.frontMatter).catch((error) => {
-                    console.error("Failed to enter packet mode from agent plan", error)
-                  })
+                onPreviewReady={(blobUrl) => {
+                  setFileViewUrl(blobUrl)
+                  setFileViewName('Front Matter Preview.pdf')
+                  setSelectedFilePath(null)
+                  setViewContent('')
+                  setVisualizerMode('document')
                 }}
               />
-            </div>
-          )
+            ) : (
+              <div className="relative h-full">
+                <Chat
+                  caseFolder={caseFolder}
+                  apiUrl={API_URL}
+                  onViewUpdate={handleViewUpdate}
+                  initialPrompt={reviewPrompt}
+                  onInitialPromptUsed={() => setReviewPrompt('')}
+                  onIndexMayHaveChanged={reloadDocumentIndex}
+                  onDraftsMayHaveChanged={() => setRefreshDraftsKey(k => k + 1)}
+                  onEvidencePacketGenerated={handleEvidencePacketGenerated}
+                  onShowFile={handleShowFile}
+                  onDocumentView={handleDocumentView}
+                  onIndexStatusChange={setIndexStatusForViewer}
+                  onStartReindex={(forceFullReindex) => {
+                    if (forceFullReindex) {
+                      startCaseIndexing(caseFolder)
+                    } else {
+                      // Check for changed files first, then start indexing only those
+                      fetch(`${API_URL}/api/files/index-status?case=${encodeURIComponent(caseFolder)}`)
+                        .then(res => res.json())
+                        .then(status => {
+                          if (!status.needsIndex) return
+                          const changedFiles = [...(status.newFiles || []), ...(status.modifiedFiles || [])]
+                          if (changedFiles.length > 0 && status.reason !== 'no_index') {
+                            startCaseIndexing(caseFolder, changedFiles)
+                          } else {
+                            startCaseIndexing(caseFolder)
+                          }
+                        })
+                        .catch(() => startCaseIndexing(caseFolder))
+                    }
+                  }}
+                  isReindexing={indexingProgress?.isRunning && indexingProgress?.caseFolder === caseFolder}
+                  onEvidencePacketPlanned={(data) => {
+                    void handleEnterPacketModeFromAgent(data.documents, data.frontMatter).catch((error) => {
+                      console.error("Failed to enter packet mode from agent plan", error)
+                    })
+                  }}
+                />
+              </div>
+            )}
+          </PanelErrorBoundary>
         }
         rightPanel={
-          <Visualizer
-            content={viewContent}
-            docPath={viewDocPath}
-            fileUrl={fileViewUrl}
-            fileName={fileViewName}
-            filePath={selectedFilePath}
-            caseFolder={caseFolder}
-            apiUrl={API_URL}
-            documentIndex={documentIndex}
-            firmRoot={firmRoot || undefined}
-            onCloseFile={() => {
+          <PanelErrorBoundary
+            panelName="Preview"
+            resetKey={`${caseFolder || 'none'}:${selectedFilePath || fileViewName || 'none'}`}
+            onReset={() => {
               setFileViewUrl(null)
               setSelectedFilePath(null)
               setViewContent('')
               setVisualizerMode('summary')
             }}
-            onIndexUpdated={reloadDocumentIndex}
-            onDraftsUpdated={() => loadGeneratedDocs(caseFolder)}
-            refreshDraftsKey={refreshDraftsKey}
-            viewMode={visualizerMode}
-            onToggleViewMode={() => setVisualizerMode(m => m === 'summary' ? 'document' : 'summary')}
-            hasFile={!!selectedFilePath}
-            hasSummary={!!viewContent}
-            evidencePacketPath={evidencePacketTakeover?.path || null}
-            evidencePacketVersion={evidencePacketTakeover?.version || 0}
-            onOpenFilePath={handleShowFile}
-            onOpenPacketDraft={handleEnterPacketModeFromDraft}
-            packetPiiActive={packetMode && packetPiiTabActive}
-            packetPiiResult={activePacketPiiResult}
-            onPacketPiiResultUpdate={handleUpdatePacketPiiResult}
-          />
+          >
+            <Visualizer
+              content={viewContent}
+              docPath={viewDocPath}
+              fileUrl={fileViewUrl}
+              fileName={fileViewName}
+              filePath={selectedFilePath}
+              caseFolder={caseFolder}
+              apiUrl={API_URL}
+              documentIndex={documentIndex}
+              firmRoot={firmRoot || undefined}
+              onCloseFile={() => {
+                setFileViewUrl(null)
+                setSelectedFilePath(null)
+                setViewContent('')
+                setVisualizerMode('summary')
+              }}
+              onIndexUpdated={reloadDocumentIndex}
+              onDraftsUpdated={() => loadGeneratedDocs(caseFolder)}
+              refreshDraftsKey={refreshDraftsKey}
+              viewMode={visualizerMode}
+              onToggleViewMode={() => setVisualizerMode(m => m === 'summary' ? 'document' : 'summary')}
+              hasFile={!!selectedFilePath}
+              hasSummary={!!viewContent}
+              evidencePacketPath={evidencePacketTakeover?.path || null}
+              evidencePacketVersion={evidencePacketTakeover?.version || 0}
+              onOpenFilePath={handleShowFile}
+              onOpenPacketDraft={handleEnterPacketModeFromDraft}
+              packetPiiActive={packetMode && packetPiiTabActive}
+              packetPiiResult={activePacketPiiResult}
+              onPacketPiiResultUpdate={handleUpdatePacketPiiResult}
+            />
+          </PanelErrorBoundary>
         }
       />
 
