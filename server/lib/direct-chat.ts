@@ -643,7 +643,7 @@ function normalizeSectionFilename(section: any): string | null {
   return typeof filename === "string" && filename.trim() ? filename.trim() : null;
 }
 
-function normalizeServiceInput(raw: any): EvidencePacketServiceInfo | undefined {
+export function normalizeServiceInput(raw: any): EvidencePacketServiceInfo | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   return {
     serviceDate: typeof raw.serviceDate === "string"
@@ -673,7 +673,7 @@ function normalizeHearingNumber(input: string): string {
   return /^ho-/i.test(trimmed) ? trimmed : `HO-${trimmed}`;
 }
 
-function extractHearingCore(input: string): string {
+export function extractHearingCore(input: string): string {
   return normalizeHearingNumber(input).replace(/^ho-/i, "");
 }
 
@@ -1178,7 +1178,7 @@ function summarizeCommonFolder(paths: string[]): string | null {
 }
 
 
-function inferHearingNumberFromDocs(docs: IndexedPdfDoc[]): string | null {
+export function inferHearingNumberFromDocs(docs: IndexedPdfDoc[]): string | null {
   const hearingCandidates = new Map<string, number>();
   const hoRegex = /ho[-_ ]?(\d{4,}-[a-z]{1,3})/ig;
 
@@ -1237,7 +1237,7 @@ function resolveRedactionOptions(
   return { enabled: false };
 }
 
-function normalizeDocumentsInput(raw: any): EvidencePacketDocumentInput[] {
+export function normalizeDocumentsInput(raw: any): EvidencePacketDocumentInput[] {
   if (!Array.isArray(raw)) return [];
   const docs: EvidencePacketDocumentInput[] = [];
   for (const item of raw) {
@@ -1308,7 +1308,7 @@ function normalizeDocumentsInput(raw: any): EvidencePacketDocumentInput[] {
   return docs;
 }
 
-function canonicalizePacketDocumentsFromIndex(
+export function canonicalizePacketDocumentsFromIndex(
   documents: EvidencePacketDocumentInput[],
   indexData: any
 ): {
@@ -1520,7 +1520,7 @@ async function buildPacketFromInputs(
   };
 }
 
-async function saveIndexAndMap(
+export async function saveIndexAndMap(
   caseFolder: string,
   indexPath: string,
   index: Record<string, any>
@@ -1530,7 +1530,7 @@ async function saveIndexAndMap(
 }
 
 // Execute a tool and return result
-async function executeTool(
+export async function executeTool(
   toolName: string,
   toolInput: Record<string, any>,
   caseFolder: string

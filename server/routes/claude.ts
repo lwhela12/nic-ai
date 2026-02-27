@@ -15,6 +15,9 @@ import { indexCase } from "./firm";
 import { buildPhasePrompt } from "../shared/phase-rules";
 import { isPathWithinBounds, extractPathsFromBash } from "../lib/path-validator";
 import { directChat, type ChatMessage as DirectChatMessage } from "../lib/direct-chat";
+import { densityChat } from "../lib/density-chat";
+
+const CHAT_BACKEND = process.env.CHAT_BACKEND || "direct";
 import { requireCaseAccess } from "../lib/team-access";
 import { acquireCaseLock, releaseCaseLock } from "../lib/case-lock";
 import { applyResolvedFieldToSummary } from "../lib/index-summary-sync";
@@ -728,10 +731,17 @@ app.post("/chat-v2", async (c) => {
         }).catch(() => {});
       }, 15000);
 
-      for await (const event of directChat(caseFolder, message, chatHistory, {
-        lockOwner,
-        lockDisplayName: typeof authEmail === "string" ? authEmail : undefined,
-      })) {
+      const chatBackend = CHAT_BACKEND === "density"
+        ? densityChat(caseFolder, message, chatHistory, {
+            lockOwner,
+            lockDisplayName: typeof authEmail === "string" ? authEmail : undefined,
+          })
+        : directChat(caseFolder, message, chatHistory, {
+            lockOwner,
+            lockDisplayName: typeof authEmail === "string" ? authEmail : undefined,
+          });
+
+      for await (const event of chatBackend) {
         if (event.type === "text" && event.content) {
           fullResponse += event.content;
           await stream.writeSSE({

@@ -121,7 +121,7 @@ const DEFAULT_DOC_GEN_OPTIONS: DocGenOptions = {
   fallbackMode: "full_scaffold_verify",
 };
 
-const DEFAULT_COMPOSE_BUDGET: ComposeBudget = {
+export const DEFAULT_COMPOSE_BUDGET: ComposeBudget = {
   maxSystemChars: 28000,
   maxUserPromptChars: 5000,
   maxCaseContextChars: 28000,
@@ -665,7 +665,7 @@ interface YearSourceRoot {
   root: string;
 }
 
-interface DocAgentPathContext {
+export interface DocAgentPathContext {
   clientSlug: string | null;
   registry: ClientRegistry | null;
   yearSources: YearSourceRoot[];
@@ -1040,7 +1040,7 @@ const RESEARCH_DOC_TOOLS: Anthropic.Tool[] = DOC_TOOLS.filter((tool) => RESEARCH
 /**
  * Load the full case index.
  */
-async function loadCaseIndex(caseFolder: string): Promise<Record<string, any>> {
+export async function loadCaseIndex(caseFolder: string): Promise<Record<string, any>> {
   try {
     const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
     const content = await readFile(indexPath, "utf-8");
@@ -1054,7 +1054,7 @@ async function loadCaseIndex(caseFolder: string): Promise<Record<string, any>> {
  * Build a bounded prompt view of case context for document generation.
  * Uses meta_index for a compact navigable summary, plus a trimmed index preview.
  */
-async function buildCasePromptContext(
+export async function buildCasePromptContext(
   caseFolder: string,
   caseIndex: Record<string, any>
 ): Promise<string> {
@@ -1142,7 +1142,7 @@ ${content}
 /**
  * Load firm configuration.
  */
-async function loadFirmConfig(firmRoot: string): Promise<Record<string, any>> {
+export async function loadFirmConfig(firmRoot: string): Promise<Record<string, any>> {
   try {
     const configPath = join(firmRoot, ".ai_tool", "firm-config.json");
     return JSON.parse(await readFile(configPath, "utf-8"));
@@ -1633,7 +1633,7 @@ Research instructions:
 - When enough information is gathered, include the line: RESEARCH_COMPLETE`;
 }
 
-function buildComposeSystemPrompt(
+export function buildComposeSystemPrompt(
   docType: DocumentType,
   knowledge: string,
   firmConfig: Record<string, any>
@@ -1726,7 +1726,7 @@ function extractTemplateContentWindow(content: string, maxChars: number): string
   return trimContentToBudget(content, maxChars, "template");
 }
 
-async function loadNarrowedTemplates(
+export async function loadNarrowedTemplates(
   firmRoot: string,
   docType: DocumentType,
   userPrompt: string,
@@ -1789,7 +1789,7 @@ async function loadNarrowedTemplates(
   }
 }
 
-function applyComposeBudget(
+export function applyComposeBudget(
   budget: ComposeBudget,
   userPrompt: string,
   caseContext: string,
@@ -1835,7 +1835,7 @@ function applyComposeBudget(
   };
 }
 
-function isDraftTooThin(content: string, docType: DocumentType): { thin: boolean; reason?: string } {
+export function isDraftTooThin(content: string, docType: DocumentType): { thin: boolean; reason?: string } {
   const trimmed = content.trim();
   if (trimmed.length === 0) {
     return { thin: true, reason: "Compose returned empty content." };
@@ -1861,7 +1861,7 @@ function isDraftTooThin(content: string, docType: DocumentType): { thin: boolean
   return { thin: false };
 }
 
-function buildFallbackDraftContent(
+export function buildFallbackDraftContent(
   docType: DocumentType,
   userPrompt: string,
   researchPacketMarkdown: string,
@@ -2185,7 +2185,7 @@ Draft the full final document now in markdown only.`;
   }
 }
 
-async function persistDraftContent(
+export async function persistDraftContent(
   caseFolder: string,
   firmRoot: string,
   docType: DocumentType,
