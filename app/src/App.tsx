@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import './index.css'
+import nicLogo from './assets/nic_logo.png'
 import FileViewer from './components/FileViewer'
 import Chat from './components/Chat'
 import Visualizer from './components/Visualizer'
@@ -25,7 +26,7 @@ interface FirmTodo {
 }
 const FIRM_ROOT_KEY = 'claude-pi-firm-root'
 
-type PracticeArea = 'Personal Injury' | 'Workers\' Compensation'
+type PracticeArea = 'Personal Injury' | 'Workers\' Compensation' | 'Elder Care'
 
 // URL param helpers for persisting navigation state across refreshes
 const getUrlParam = (key: string): string | null => {
@@ -57,6 +58,9 @@ const normalizePracticeArea = (value: unknown): PracticeArea | null => {
   }
   if (normalized === 'pi' || normalized.includes('personal') || normalized.includes('injury')) {
     return 'Personal Injury'
+  }
+  if (normalized === 'ec' || normalized.includes('elder') || normalized.includes('care')) {
+    return 'Elder Care'
   }
   return null
 }
@@ -356,7 +360,7 @@ const DEV_MODE = import.meta.env.DEV && import.meta.env.VITE_AUTH_ENABLED !== 't
 const MAX_SAVED_AGENT_VIEWS = 4
 const AGENT_VIEWS_STORAGE_KEY = 'claude-pi-agent-views-by-case-v1'
 
-type TeamRole = 'attorney' | 'case_manager_lead' | 'case_manager' | 'case_manager_assistant'
+type TeamRole = 'owner' | 'admin' | 'member' | 'viewer'
 
 interface TeamContext {
   userId: string
@@ -390,6 +394,14 @@ export interface NeedsReviewItem {
   description?: string
 }
 
+export interface NeedsContextItem {
+  folder: string
+  filename: string
+  type: string
+  key_info: string
+  question: string
+}
+
 export interface ErrataItem {
   field: string
   decision: string
@@ -418,21 +430,21 @@ export interface ChatArchive {
 
 export type DocumentFile =
   | {
-      filename?: string
-      file?: string
-      title?: string
-      date?: string
-      issues?: string
-      type?: string
-      key_info?: string
-      has_handwritten_data?: boolean
-      handwritten_fields?: string[]
-      user_reviewed?: boolean
-      reviewed_at?: string
-      review_notes?: string
-      extracted_data?: Record<string, unknown>
-      [key: string]: unknown
-    }
+    filename?: string
+    file?: string
+    title?: string
+    date?: string
+    issues?: string
+    type?: string
+    key_info?: string
+    has_handwritten_data?: boolean
+    handwritten_fields?: string[]
+    user_reviewed?: boolean
+    reviewed_at?: string
+    review_notes?: string
+    extracted_data?: Record<string, unknown>
+    [key: string]: unknown
+  }
   | string
 
 export type DocumentFolder =
@@ -508,6 +520,7 @@ export interface DocumentIndex {
   issues_found?: string[]
   case_analysis?: string
   needs_review?: NeedsReviewItem[]
+  needs_context?: NeedsContextItem[]
   reconciled_values?: Record<string, unknown>
   errata?: ErrataItem[]
   case_notes?: CaseNote[]
@@ -733,10 +746,8 @@ const ArrowLeftIcon = () => (
   </svg>
 )
 
-const ScaleIcon = () => (
-  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v17.25m0 0c-1.472 0-2.882.265-4.185.75M12 20.25c1.472 0 2.882.265 4.185.75M18.75 4.97A48.416 48.416 0 0012 4.5c-2.291 0-4.545.16-6.75.47m13.5 0c1.01.143 2.01.317 3 .52m-3-.52l2.62 10.726c.122.499-.106 1.028-.589 1.202a5.988 5.988 0 01-2.031.352 5.988 5.988 0 01-2.031-.352c-.483-.174-.711-.703-.59-1.202L18.75 4.971zm-16.5.52c.99-.203 1.99-.377 3-.52m0 0l2.62 10.726c.122.499-.106 1.028-.589 1.202a5.989 5.989 0 01-2.031.352 5.989 5.989 0 01-2.031-.352c-.483-.174-.711-.703-.59-1.202L5.25 4.971z" />
-  </svg>
+const LeafIcon = () => (
+  <img src={nicLogo} alt="NIC Logo" className="w-8 h-8 object-contain" />
 )
 
 const ClipboardListIcon = () => (
@@ -783,6 +794,7 @@ function App() {
   const [fileViewUrl, setFileViewUrl] = useState<string | null>(null)
   const [fileViewName, setFileViewName] = useState<string>('')
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)  // Track selected file for view toggling
+  const [initialPage, setInitialPage] = useState<{ page: number; ts: number } | null>(null)
   const [visualizerMode, setVisualizerMode] = useState<'summary' | 'document'>('summary')
   const [reviewPrompt, setReviewPrompt] = useState<string>('')
   const [viewDocPath, setViewDocPath] = useState<string | null>(null)
@@ -792,23 +804,17 @@ function App() {
   const [agentDocumentView, setAgentDocumentView] = useState<AgentDocumentView | null>(null)
   const [savedAgentViews, setSavedAgentViews] = useState<AgentDocumentView[]>([])
 
-  // Packet creation mode state — persisted to sessionStorage so Vite HMR reloads don't lose it
-  const [packetMode, setPacketMode] = useState(() => {
-    try { return sessionStorage.getItem('pi-packet-mode') === '1' } catch { return false }
-  })
+  const packetFeaturesEnabled = false
+  // Packet workflows are deprecated; keep legacy state archived but inactive.
+  const [packetMode, setPacketMode] = useState(false)
   const [packetPiiTabActive, setPacketPiiTabActive] = useState(false)
-  const [packetState, setPacketState] = useState<PacketState | null>(() => {
-    try {
-      const raw = sessionStorage.getItem('pi-packet-state')
-      const parsed = raw ? normalizePacketState(JSON.parse(raw)) : null
-      return parsed
-    } catch { return null }
-  })
+  const [packetState, setPacketState] = useState<PacketState | null>(null)
+  const [packetMigrationNotice, setPacketMigrationNotice] = useState<string | null>(null)
 
   // Sync packet mode to sessionStorage so it survives page reloads (Vite HMR)
   useEffect(() => {
     try {
-      if (packetMode) {
+      if (packetFeaturesEnabled && packetMode) {
         sessionStorage.setItem('pi-packet-mode', '1')
       } else {
         sessionStorage.removeItem('pi-packet-mode')
@@ -816,17 +822,31 @@ function App() {
         setPacketPiiTabActive(false)
       }
     } catch { /* ignore */ }
-  }, [packetMode])
+  }, [packetFeaturesEnabled, packetMode])
 
   useEffect(() => {
     try {
-      if (packetState) {
+      if (packetFeaturesEnabled && packetState) {
         sessionStorage.setItem('pi-packet-state', JSON.stringify(packetState))
       } else {
         sessionStorage.removeItem('pi-packet-state')
       }
     } catch { /* ignore */ }
-  }, [packetState])
+  }, [packetFeaturesEnabled, packetState])
+
+  useEffect(() => {
+    try {
+      const hadLegacyPacketState =
+        sessionStorage.getItem('pi-packet-mode') === '1' ||
+        Boolean(sessionStorage.getItem('pi-packet-state'))
+      if (!hadLegacyPacketState) return
+      sessionStorage.removeItem('pi-packet-mode')
+      sessionStorage.removeItem('pi-packet-state')
+      setPacketMigrationNotice('Legacy packet state was archived. Packet workflows are no longer active.')
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [])
 
   // Sync packet document metadata (date, title, type) when the document index updates
   useEffect(() => {
@@ -1305,17 +1325,12 @@ function App() {
   const [lastIndexedCasePath, setLastIndexedCasePath] = useState<string | null>(null)
 
   // Batch indexing state — lifted from FirmDashboard so it survives navigation
-  const [batchProgress, setBatchProgress] = useState<{
-    isRunning: boolean
-    totalCases: number
-    currentText: string
-    toolsUsed: string[]
-    logs: string[]
-    filesTotal: number
-    filesComplete: number
-    currentFile: string
-  } | null>(null)
   const [showBatchModal, setShowBatchModal] = useState(false)
+
+  // Google Drive Setup state
+  const [gdriveStatus, setGdriveStatus] = useState<{ connected: boolean; vfsMode: string; rootFolderId: string | null } | null>(null)
+  const [pickingGdriveRoot, setPickingGdriveRoot] = useState(false)
+  const [pickingLocalRoot, setPickingLocalRoot] = useState(false)
 
   // Knowledge init state — shown when selecting a firm root without knowledge
   const [showKnowledgeInit, setShowKnowledgeInit] = useState(false)
@@ -1345,6 +1360,84 @@ function App() {
     return nextState
   }, [firmRoot])
 
+  const loadGdriveStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/auth/gdrive/status`)
+      if (!res.ok) return
+      const payload = await res.json()
+      setGdriveStatus(payload)
+    } catch {
+      // Ignore status refresh errors.
+    }
+  }, [])
+
+  const switchVfsMode = useCallback(async (mode: 'local' | 'gdrive'): Promise<boolean> => {
+    try {
+      const res = await fetch(`${API_URL}/api/auth/vfs/mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      })
+
+      let payload: unknown = null
+      try {
+        payload = await res.json()
+      } catch {
+        payload = null
+      }
+      const parsedPayload = payload && typeof payload === 'object'
+        ? (payload as Record<string, unknown>)
+        : null
+
+      if (!res.ok) {
+        const message = typeof parsedPayload?.error === 'string'
+          ? parsedPayload.error
+          : 'Failed to switch storage mode'
+        setFolderSetupError(message)
+        return false
+      }
+
+      if (parsedPayload) {
+        setGdriveStatus({
+          connected: !!parsedPayload.connected,
+          vfsMode: typeof parsedPayload.vfsMode === 'string' ? parsedPayload.vfsMode : mode,
+          rootFolderId: typeof parsedPayload.rootFolderId === 'string' ? parsedPayload.rootFolderId : null,
+        })
+      } else {
+        await loadGdriveStatus()
+      }
+
+      return true
+    } catch {
+      setFolderSetupError('Failed to switch storage mode')
+      return false
+    }
+  }, [loadGdriveStatus])
+
+  // On mount and auth check, fetch config
+  useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/config`)
+        const contentType = res.headers.get("content-type")
+        if (res.ok && contentType && contentType.includes("application/json")) {
+          const cfg = await res.json()
+          // If auto root is enabled and no root is set, automatically use it
+          if (cfg.autoRoot && !localStorage.getItem(FIRM_ROOT_KEY) && !firmRoot) {
+            beginFolderSetup(cfg.autoRoot)
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load config:', err)
+      }
+    }
+
+    if (authChecked) {
+      fetchConfig()
+      loadGdriveStatus()
+    }
+  }, [authChecked, firmRoot, loadGdriveStatus])
+
   const loadTodos = useCallback(async () => {
     if (!firmRoot) return
     try {
@@ -1364,7 +1457,6 @@ function App() {
 
   // Load todos when firmRoot changes
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadTodos()
   }, [loadTodos])
 
@@ -1855,14 +1947,14 @@ function App() {
 
       let effectiveArea = detectedArea
       if (!effectiveArea) {
-        // Workers' Comp only – auto-save without prompting.
-        const area: PracticeArea = 'Workers\' Compensation'
+        // Elder Care only – auto-save without prompting.
+        const area: PracticeArea = 'Elder Care'
         const saved = await saveFolderPracticeArea(firmRoot, area)
         if (cancelled) return
         if (!saved) {
           // Don't nuke firmRoot here — beginFolderSetup may have already
           // succeeded.  Just default the area so the dashboard can load.
-          console.warn('[syncFolderContext] Could not persist practice area; defaulting to Workers\' Comp')
+          console.warn('[syncFolderContext] Could not persist practice area; defaulting to Elder Care')
         }
         effectiveArea = area
       }
@@ -1967,7 +2059,7 @@ function App() {
         </div>`
       : ''
     const reviewedBlock = isUserReviewed
-      ? `<div class="mt-4 bg-emerald-50 border border-emerald-200 rounded-xl p-4 text-sm text-emerald-800">
+      ? `<div class="mt-4 bg-accent-50 border border-accent-200 rounded-xl p-4 text-sm text-accent-800">
           <span class="font-medium">✅ User Reviewed</span>
           ${reviewedAt ? `<div class="mt-2 text-xs">Reviewed at: ${reviewedAt}</div>` : ''}
           ${reviewNotes ? `<div class="mt-2 text-xs">${reviewNotes}</div>` : ''}
@@ -1976,12 +2068,12 @@ function App() {
 
     return `
 <div class="p-6">
-  <h2 class="text-lg font-semibold text-gray-900 mb-1">${title}</h2>
-  <p class="text-sm text-gray-500 mb-4">${fileName}</p>
-  ${date ? `<div class="text-sm mb-3"><span class="font-medium text-gray-700">Date:</span> <span class="text-gray-600">${date}</span></div>` : ''}
-  <div class="bg-gray-50 rounded-xl p-4">
-    <p class="text-sm font-medium text-gray-900 mb-2">Key Information</p>
-    <p class="text-sm text-gray-600 leading-relaxed">${keyInfo}</p>
+  <h2 class="text-lg font-semibold text-brand-900 mb-1">${title}</h2>
+  <p class="text-sm text-brand-500 mb-4">${fileName}</p>
+  ${date ? `<div class="text-sm mb-3"><span class="font-medium text-brand-700">Date:</span> <span class="text-brand-600">${date}</span></div>` : ''}
+  <div class="bg-surface-50 rounded-xl p-4">
+    <p class="text-sm font-medium text-brand-900 mb-2">Key Information</p>
+    <p class="text-sm text-brand-600 leading-relaxed">${keyInfo}</p>
   </div>
   ${issues ? `<div class="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800"><span class="font-medium">Issue:</span> ${issues}</div>` : ''}
   ${handwrittenWarning}
@@ -2075,7 +2167,7 @@ function App() {
       authState?.teamError === 'invite_required'
         ? 'Your email does not have an active invite for this firm.'
         : authState?.teamError === 'firm_not_bootstrapped'
-          ? 'This firm is not initialized yet. Sign in with the first approved attorney account to bootstrap it.'
+          ? 'This workspace is not initialized yet. Sign in with the first approved owner account to bootstrap it.'
           : undefined
     return <Login apiUrl={API_URL} onLoginSuccess={handleLoginSuccess} initialError={setupError} firmRoot={firmRoot} />
   }
@@ -2123,31 +2215,104 @@ function App() {
           {/* Logo/Brand */}
           <div className="flex items-center gap-3 mb-2">
             <div className="w-10 h-10 rounded-xl bg-brand-900 flex items-center justify-center text-white">
-              <ScaleIcon />
+              <LeafIcon />
             </div>
-            <h1 className="font-serif text-3xl text-brand-900">Jason AI</h1>
+            <h1 className="font-serif text-3xl text-brand-900">Nic</h1>
           </div>
-          <p className="text-brand-500 mb-8">Legal Case Management</p>
+          <p className="text-brand-500 mb-8">Personal Assistant</p>
 
-          <button
-            onClick={() => setShowPicker(true)}
-            className="w-full px-6 py-6 border-2 border-dashed border-surface-300 rounded-xl
-                       hover:border-accent-500 hover:bg-accent-50 transition-all group"
-          >
-            <div className="text-center">
-              <div className="inline-flex items-center justify-center w-14 h-14 rounded-full
+          <div className="flex flex-col gap-4">
+            <button
+              onClick={() => setShowPicker(true)}
+              className="w-full px-6 py-4 border-2 border-surface-200 rounded-xl
+                         hover:border-accent-500 hover:bg-accent-50 transition-all group flex items-center gap-4 text-left"
+            >
+              <div className="flex-shrink-0 inline-flex items-center justify-center w-12 h-12 rounded-full
                               bg-surface-100 text-brand-400 group-hover:bg-accent-100
-                              group-hover:text-accent-600 transition-colors mb-3">
+                              group-hover:text-accent-600 transition-colors">
                 <FolderIcon />
               </div>
-              <p className="text-base font-medium text-brand-700 group-hover:text-brand-900">
-                Select Cases Folder
-              </p>
-              <p className="mt-1 text-sm text-brand-400">
-                Choose the folder containing all your case files first
-              </p>
+              <div>
+                <p className="text-base font-medium text-brand-700 group-hover:text-brand-900">
+                  Select Local Folder
+                </p>
+                <p className="text-sm text-brand-400">
+                  Pick a folder from your computer's local drive
+                </p>
+              </div>
+            </button>
+
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center" aria-hidden="true">
+                <div className="w-full border-t border-surface-200"></div>
+              </div>
+              <div className="relative flex justify-center">
+                <span className="bg-white px-2 text-xs text-brand-400 uppercase tracking-widest">Or</span>
+              </div>
             </div>
-          </button>
+
+            {gdriveStatus?.connected ? (
+              <button
+                onClick={() => setPickingGdriveRoot(true)}
+                className="w-full px-6 py-4 border-2 border-surface-200 rounded-xl
+                            hover:border-accent-500 hover:bg-accent-50 transition-all group flex items-center gap-4 text-left"
+              >
+                <div className="flex-shrink-0 inline-flex items-center justify-center w-12 h-12 rounded-full
+                                 bg-blue-50 text-blue-500 group-hover:bg-blue-100 transition-colors">
+                  <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M7.71,11A4.26,4.26,0,0,0,8.87,14h6.26a4.26,4.26,0,0,0,1.16-3,4.26,4.26,0,0,0-1.16-3H8.87A4.26,4.26,0,0,0,7.71,11ZM12,14.65A1.35,1.35,0,1,1,13.35,16,1.35,1.35,0,0,1,12,14.65ZM5,20H19a2,2,0,0,0,2-2V6a2,2,0,0,0-2-2H5A2,2,0,0,0,3,6V18A2,2,0,0,0,5,20Zm0-14H19V18H5ZM12,6h4V8H12ZM8,8v2h4V8Zm0,4h4v2H8Z" opacity="0" /></svg>
+                  {/* Using a generic cloud icon as a placeholder since heroicons might not have gdrive */}
+                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z" /></svg>
+                </div>
+                <div>
+                  <p className="text-base font-medium text-brand-700 group-hover:text-brand-900">
+                    Browse Google Drive
+                  </p>
+                  <p className="text-sm text-brand-400">
+                    Select your firm's folder from Google Drive
+                  </p>
+                </div>
+              </button>
+            ) : (
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await fetch(`${API_URL}/api/auth/gdrive/url`)
+                    const { url } = await res.json()
+                    const width = 500;
+                    const height = 600;
+                    const left = Math.max(0, (window.screen.width / 2) - (width / 2));
+                    const top = Math.max(0, (window.screen.height / 2) - (height / 2));
+                    const popup = window.open(url, "Google Drive Auth", `width=${width},height=${height},left=${left},top=${top}`);
+
+                    const timer = setInterval(async () => {
+                      if (popup?.closed) {
+                        clearInterval(timer);
+                        const statusRes = await fetch(`${API_URL}/api/auth/gdrive/status`)
+                        if (statusRes.ok) setGdriveStatus(await statusRes.json())
+                      }
+                    }, 500);
+                  } catch (e) {
+                    alert("Failed to connect to Google Drive");
+                  }
+                }}
+                className="w-full px-6 py-4 border-2 border-surface-200 rounded-xl
+                             hover:border-accent-500 hover:bg-accent-50 transition-all group flex items-center gap-4 text-left"
+              >
+                <div className="flex-shrink-0 inline-flex items-center justify-center w-12 h-12 rounded-full
+                                 bg-blue-50 text-blue-500 group-hover:bg-blue-100 transition-colors">
+                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z" /></svg>
+                </div>
+                <div>
+                  <p className="text-base font-medium text-brand-700 group-hover:text-brand-900">
+                    Connect Google Drive
+                  </p>
+                  <p className="text-sm text-brand-400">
+                    Sign in to access cases in the cloud
+                  </p>
+                </div>
+              </button>
+            )}
+          </div>
 
           {folderSetupError && (
             <p className="mt-4 text-xs text-red-700 text-center">{folderSetupError}</p>
@@ -2159,13 +2324,35 @@ function App() {
         </div>
 
         {showPicker && (
+          <RootPickerModal
+            gdriveStatus={gdriveStatus}
+            onSelectLocal={async () => {
+              setShowPicker(false)
+              setFolderSetupError(null)
+              const switched = await switchVfsMode('local')
+              if (!switched) return
+              setPickingLocalRoot(true)
+            }}
+            onSelectGdrive={() => {
+              setShowPicker(false)
+              if (gdriveStatus?.connected) {
+                setPickingGdriveRoot(true)
+              } else {
+                handleConnectGdrive()
+              }
+            }}
+            onCancel={() => setShowPicker(false)}
+          />
+        )}
+
+        {pickingLocalRoot && (
           <FolderPicker
             apiUrl={API_URL}
             onSelect={(path) => {
-              setShowPicker(false)
+              setPickingLocalRoot(false)
               beginFolderSetup(path)
             }}
-            onCancel={() => setShowPicker(false)}
+            onCancel={() => setPickingLocalRoot(false)}
           />
         )}
 
@@ -2205,20 +2392,60 @@ function App() {
           indexingProgress={indexingProgress}
           firmCasesVersion={firmCasesVersion}
           lastIndexedCasePath={lastIndexedCasePath}
-          batchProgress={batchProgress}
           showBatchModal={showBatchModal}
-          onBatchProgressChange={setBatchProgress}
           onShowBatchModalChange={setShowBatchModal}
           onBatchComplete={() => { setLastIndexedCasePath(null); setFirmCasesVersion(v => v + 1) }}
         />
         {showPicker && (
+          <RootPickerModal
+            gdriveStatus={gdriveStatus}
+            onSelectLocal={async () => {
+              setShowPicker(false)
+              setFolderSetupError(null)
+              const switched = await switchVfsMode('local')
+              if (!switched) return
+              setPickingLocalRoot(true)
+            }}
+            onSelectGdrive={() => {
+              setShowPicker(false)
+              if (gdriveStatus?.connected) {
+                setPickingGdriveRoot(true)
+              } else {
+                handleConnectGdrive()
+              }
+            }}
+            onCancel={() => setShowPicker(false)}
+          />
+        )}
+
+        {pickingLocalRoot && (
           <FolderPicker
             apiUrl={API_URL}
             onSelect={(path) => {
-              setShowPicker(false)
+              setPickingLocalRoot(false)
               beginFolderSetup(path)
             }}
-            onCancel={() => setShowPicker(false)}
+            onCancel={() => setPickingLocalRoot(false)}
+          />
+        )}
+
+        {pickingGdriveRoot && (
+          <FolderPicker
+            apiUrl={API_URL}
+            apiPath="/api/auth/gdrive/browse"
+            onSelect={async (path) => {
+              setPickingGdriveRoot(false)
+              await fetch(`${API_URL}/api/auth/gdrive/set-root`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ rootFolderId: path })
+              })
+              // Save the selected GDrive root ID to local storage so the frontend uses it
+              localStorage.setItem(FIRM_ROOT_KEY, path)
+              // Hard reload once root is selected to fetch firm config
+              window.location.reload()
+            }}
+            onCancel={() => setPickingGdriveRoot(false)}
           />
         )}
         <TodoDrawer
@@ -2246,7 +2473,7 @@ function App() {
         <div className="flex items-center justify-between">
           <div className="flex items-center justify-end gap-2 flex-wrap">
             <div className="w-9 h-9 rounded-lg bg-white/10 flex items-center justify-center">
-              <ScaleIcon />
+              <LeafIcon />
             </div>
             <div>
               <h1 className="font-serif text-xl tracking-tight">
@@ -2266,8 +2493,8 @@ function App() {
                 )}
               </div>
             </div>
-            {/* Packet Creation button - WC only */}
-            {practiceArea === 'Workers\' Compensation' && documentIndex && (
+            {/* Packet workflows are deprecated and intentionally hidden */}
+            {packetFeaturesEnabled && practiceArea === 'Workers\' Compensation' && documentIndex && (
               packetMode ? (
                 <button
                   onClick={handleExitPacketMode}
@@ -2295,8 +2522,8 @@ function App() {
             )}
           </div>
           <div className="flex items-center gap-4">
-            {/* Review Items button - highlighted when there are items */}
-            {documentIndex?.needs_review && documentIndex.needs_review.length > 0 && (
+            {/* Clarify Docs button - amber when there are documents needing context */}
+            {documentIndex?.needs_context && documentIndex.needs_context.length > 0 && (
               <button
                 onClick={async () => {
                   // Clear session first to prevent context overflow
@@ -2310,20 +2537,19 @@ function App() {
                     // Ignore clear errors
                   }
 
-                  // Prompt that triggers batch conflict review
-                  const count = documentIndex.needs_review?.length || 0
-                  setReviewPrompt(`Review the ${count} document conflicts. Analyze them, make recommendations for the easy ones, and present them in batches for my approval.`)
+                  const count = documentIndex.needs_context?.length || 0
+                  setReviewPrompt(`Review the ${count} document(s) that need clarification. Show me each one with its question so I can explain what it is.`)
                 }}
                 className="flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-lg
-                           bg-red-600 text-white hover:bg-red-700 transition-colors
-                           ring-1 ring-red-300/30 shadow-card"
+                           bg-amber-600 text-white hover:bg-amber-700 transition-colors
+                           ring-1 ring-amber-300/30 shadow-card"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5.25h.008v.008H12v-.008z" />
                 </svg>
-                <span>Review Items</span>
+                <span>Clarify Docs</span>
                 <span className="bg-white/20 px-1.5 py-0.5 rounded text-xs">
-                  {documentIndex.needs_review.length}
+                  {documentIndex.needs_context.length}
                 </span>
               </button>
             )}
@@ -2414,13 +2640,18 @@ function App() {
       </header>
 
       {/* Main content */}
+      {packetMigrationNotice && (
+        <div className="mx-6 mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          {packetMigrationNotice}
+        </div>
+      )}
       <ResizablePanelLayout
         leftLabel="Files"
         rightLabel="Preview"
         leftPanel={
           <PanelErrorBoundary
             panelName="File List"
-            resetKey={`${caseFolder || 'none'}:${packetMode ? 'packet' : 'default'}`}
+            resetKey={`${caseFolder || 'none'}:${packetFeaturesEnabled && packetMode ? 'packet' : 'default'}`}
             onReset={() => {
               setSelectedFilePath(null)
               setFileViewUrl(null)
@@ -2433,7 +2664,7 @@ function App() {
               generatedDocs={generatedDocs}
               caseFolder={caseFolder}
               apiUrl={API_URL}
-              packetMode={packetMode}
+              packetMode={packetFeaturesEnabled && packetMode}
               packetSelectedPaths={packetSelectedPaths}
               onPacketToggleFile={handlePacketToggleFile}
               onDocSelect={(doc, docPath, filePath) => {
@@ -2449,10 +2680,12 @@ function App() {
                 }
                 setVisualizerMode('document')
               }}
-              onFileView={(url, filename, filePath) => {
+              onFileView={(url, filename, filePath, startPage) => {
+                console.log('[App.onFileView]', { url: url?.slice(-40), filename, filePath, startPage })
                 setFileViewUrl(url)
                 setFileViewName(filename)
                 setSelectedFilePath(filePath)
+                setInitialPage(startPage ? { page: startPage, ts: Date.now() } : null)
                 const summary = buildDocSummaryContent(filePath)
                 if (summary) setViewContent(summary)
                 setVisualizerMode('document')
@@ -2469,16 +2702,16 @@ function App() {
         }
         centerPanel={
           <PanelErrorBoundary
-            panelName={packetMode ? 'Packet Builder' : 'Chat'}
-            resetKey={`${caseFolder || 'none'}:${packetMode ? (packetState?.draftId || 'packet') : 'chat'}`}
+            panelName={packetFeaturesEnabled && packetMode ? 'Packet Builder' : 'Chat'}
+            resetKey={`${caseFolder || 'none'}:${packetFeaturesEnabled && packetMode ? (packetState?.draftId || 'packet') : 'chat'}`}
             onReset={() => {
-              if (packetMode) {
+              if (packetFeaturesEnabled && packetMode) {
                 setPacketMode(false)
                 setPacketState(null)
               }
             }}
           >
-            {packetMode && packetState ? (
+            {packetFeaturesEnabled && packetMode && packetState ? (
               <PacketCreation
                 packetState={packetState}
                 onUpdateState={handlePacketUpdateState}
@@ -2512,6 +2745,7 @@ function App() {
                   onInitialPromptUsed={() => setReviewPrompt('')}
                   onIndexMayHaveChanged={reloadDocumentIndex}
                   onDraftsMayHaveChanged={() => setRefreshDraftsKey(k => k + 1)}
+                  onTodosMayHaveChanged={loadTodos}
                   onEvidencePacketGenerated={handleEvidencePacketGenerated}
                   onShowFile={handleShowFile}
                   onDocumentView={handleDocumentView}
@@ -2536,11 +2770,6 @@ function App() {
                     }
                   }}
                   isReindexing={indexingProgress?.isRunning && indexingProgress?.caseFolder === caseFolder}
-                  onEvidencePacketPlanned={(data) => {
-                    void handleEnterPacketModeFromAgent(data.documents, data.frontMatter).catch((error) => {
-                      console.error("Failed to enter packet mode from agent plan", error)
-                    })
-                  }}
                 />
               </div>
             )}
@@ -2567,11 +2796,13 @@ function App() {
               apiUrl={API_URL}
               documentIndex={documentIndex}
               firmRoot={firmRoot || undefined}
+              initialPage={initialPage}
               onCloseFile={() => {
                 setFileViewUrl(null)
                 setSelectedFilePath(null)
                 setViewContent('')
                 setVisualizerMode('summary')
+                setInitialPage(null)
               }}
               onIndexUpdated={reloadDocumentIndex}
               onDraftsUpdated={() => loadGeneratedDocs(caseFolder)}
@@ -2580,13 +2811,11 @@ function App() {
               onToggleViewMode={() => setVisualizerMode(m => m === 'summary' ? 'document' : 'summary')}
               hasFile={!!selectedFilePath}
               hasSummary={!!viewContent}
-              evidencePacketPath={evidencePacketTakeover?.path || null}
-              evidencePacketVersion={evidencePacketTakeover?.version || 0}
+              evidencePacketPath={null}
+              evidencePacketVersion={0}
               onOpenFilePath={handleShowFile}
-              onOpenPacketDraft={handleEnterPacketModeFromDraft}
-              packetPiiActive={packetMode && packetPiiTabActive}
-              packetPiiResult={activePacketPiiResult}
-              onPacketPiiResultUpdate={handleUpdatePacketPiiResult}
+              packetPiiActive={false}
+              packetPiiResult={null}
             />
           </PanelErrorBoundary>
         }
@@ -2620,37 +2849,107 @@ function App() {
     </div>
   )
 
-  function IndexingUI() {
-    // Batch indexing floating pill — shown when batch is running and modal is hidden
-    // (rendered here in App.tsx so it survives navigation away from the dashboard)
-    const batchPill = batchProgress?.isRunning && !showBatchModal ? (
-      <div
-        onClick={() => {
-          // Navigate back to dashboard and open the modal
-          if (caseFolder) {
-            setCaseFolder(null)
-            setDocumentIndex(null)
-            setViewContent('')
-            setFileViewUrl(null)
-          }
-          setShowBatchModal(true)
-        }}
-        className="fixed bottom-6 right-6 z-50 flex items-center gap-3 px-4 py-3 bg-brand-900 text-white
-                   rounded-full shadow-elevated cursor-pointer hover:bg-brand-800 transition-colors"
-      >
-        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-        <span className="text-sm font-medium">
-          Indexing {batchProgress.totalCases} case{batchProgress.totalCases !== 1 ? 's' : ''}
-        </span>
-        {batchProgress.filesTotal > 0 && (
-          <span className="text-xs text-brand-300">
-            {batchProgress.filesComplete}/{batchProgress.filesTotal} files
-          </span>
-        )}
-      </div>
-    ) : null
+  function handleConnectGdrive() {
+    fetch(`${API_URL}/api/auth/gdrive/url`)
+      .then(res => res.json())
+      .then(({ url }) => {
+        const width = 500;
+        const height = 600;
+        const left = Math.max(0, (window.screen.width / 2) - (width / 2));
+        const top = Math.max(0, (window.screen.height / 2) - (height / 2));
+        const popup = window.open(url, "Google Drive Auth", `width=${width},height=${height},left=${left},top=${top}`);
 
-    if (!indexingProgress) return batchPill
+        const timer = setInterval(async () => {
+          if (popup?.closed) {
+            clearInterval(timer);
+            await loadGdriveStatus()
+          }
+        }, 500);
+      })
+      .catch(() => alert("Failed to connect to Google Drive"));
+  }
+
+  function RootPickerModal({ gdriveStatus, onSelectLocal, onSelectGdrive, onCancel }: {
+    gdriveStatus: { connected: boolean; vfsMode: string; rootFolderId: string | null } | null
+    onSelectLocal: () => void
+    onSelectGdrive: () => void
+    onCancel: () => void
+  }) {
+    return (
+      <div className="fixed inset-0 bg-brand-900/40 backdrop-blur-sm flex items-center justify-center z-[100] p-4 animate-fade-in" onClick={onCancel}>
+        <div className="bg-white rounded-2xl shadow-elevated w-full max-w-lg overflow-hidden animate-slide-up" onClick={e => e.stopPropagation()}>
+          <div className="p-6 border-b border-surface-200 flex items-center justify-between">
+            <div>
+              <h2 className="text-xl font-bold text-brand-900">Select Firm Directory</h2>
+              <p className="text-sm text-brand-500 mt-1">Choose where your case files are stored</p>
+            </div>
+            <button
+              onClick={onCancel}
+              className="w-8 h-8 flex items-center justify-center rounded-lg text-brand-400 hover:text-brand-900 hover:bg-surface-100 transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          <div className="p-6 flex flex-col gap-4 bg-surface-50">
+            <button
+              onClick={onSelectLocal}
+              className="w-full px-6 py-4 border-2 border-surface-200 rounded-xl bg-white
+                         hover:border-accent-500 hover:bg-accent-50 transition-all group flex items-center gap-4 text-left shadow-sm"
+            >
+              <div className="flex-shrink-0 inline-flex items-center justify-center w-12 h-12 rounded-full
+                              bg-surface-100 text-brand-400 group-hover:bg-accent-100
+                              group-hover:text-accent-600 transition-colors">
+                <FolderIcon />
+              </div>
+              <div>
+                <p className="text-base font-medium text-brand-700 group-hover:text-brand-900">
+                  Select Local Folder
+                </p>
+                <p className="text-sm text-brand-400">
+                  Pick a folder from your computer's local drive
+                </p>
+              </div>
+            </button>
+
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center" aria-hidden="true">
+                <div className="w-full border-t border-surface-200"></div>
+              </div>
+              <div className="relative flex justify-center">
+                <span className="bg-surface-50 px-2 text-xs text-brand-400 uppercase tracking-widest">Or</span>
+              </div>
+            </div>
+
+            <button
+              onClick={onSelectGdrive}
+              className="w-full px-6 py-4 border-2 border-surface-200 rounded-xl bg-white
+                         hover:border-accent-500 hover:bg-accent-50 transition-all group flex items-center gap-4 text-left shadow-sm"
+            >
+              <div className="flex-shrink-0 inline-flex items-center justify-center w-12 h-12 rounded-full
+                              bg-blue-50 text-blue-500 group-hover:bg-blue-100 transition-colors">
+                <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M7.71,11A4.26,4.26,0,0,0,8.87,14h6.26a4.26,4.26,0,0,0,1.16-3,4.26,4.26,0,0,0-1.16-3H8.87A4.26,4.26,0,0,0,7.71,11ZM12,14.65A1.35,1.35,0,1,1,13.35,16,1.35,1.35,0,0,1,12,14.65ZM5,20H19a2,2,0,0,0,2-2V6a2,2,0,0,0-2-2H5A2,2,0,0,0,3,6V18A2,2,0,0,0,5,20Zm0-14H19V18H5ZM12,6h4V8H12ZM8,8v2h4V8Zm0,4h4v2H8Z" opacity="0" /></svg>
+                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z" /></svg>
+              </div>
+              <div>
+                <p className="text-base font-medium text-brand-700 group-hover:text-brand-900">
+                  {gdriveStatus?.connected ? "Browse Google Drive" : "Connect Google Drive"}
+                </p>
+                <p className="text-sm text-brand-400">
+                  {gdriveStatus?.connected ? "Select your firm's folder from Google Drive" : "Sign in to access cases in the cloud"}
+                </p>
+              </div>
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  function IndexingUI() {
+    if (!indexingProgress) return null
 
     const pct = indexingProgress.filesTotal > 0
       ? Math.round((indexingProgress.filesComplete / indexingProgress.filesTotal) * 100)
@@ -2662,7 +2961,7 @@ function App() {
         <>
           <div
             onClick={() => setShowIndexingModal(true)}
-            className={`fixed ${batchPill ? 'bottom-20' : 'bottom-6'} right-6 z-50 flex items-center gap-3 px-4 py-3 bg-brand-900 text-white
+            className={`fixed bottom-6 right-6 z-50 flex items-center gap-3 px-4 py-3 bg-brand-900 text-white
                        rounded-full shadow-elevated cursor-pointer hover:bg-brand-800 transition-colors`}
           >
             <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -2673,13 +2972,12 @@ function App() {
               </span>
             )}
           </div>
-          {batchPill}
         </>
       )
     }
 
     // Modal — shown when showIndexingModal is true
-    if (!showIndexingModal) return batchPill
+    if (!showIndexingModal) return null
 
     return (
       <div
@@ -2695,7 +2993,7 @@ function App() {
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-4">
                 <div className="w-12 h-12 rounded-xl bg-brand-900 flex items-center justify-center text-white">
-                  <ScaleIcon />
+                  <LeafIcon />
                 </div>
                 <div>
                   <h2 className="text-lg font-semibold text-brand-900">
@@ -2728,9 +3026,8 @@ function App() {
                 </div>
                 <div className="h-2 bg-surface-200 rounded-full overflow-hidden">
                   <div
-                    className={`h-full rounded-full transition-all duration-300 ${
-                      indexingProgress.error ? 'bg-red-500' : 'bg-accent-500'
-                    }`}
+                    className={`h-full rounded-full transition-all duration-300 ${indexingProgress.error ? 'bg-red-500' : 'bg-accent-500'
+                      }`}
                     style={{ width: `${pct}%` }}
                   />
                 </div>
@@ -2769,14 +3066,14 @@ function App() {
               const isCheck = line.startsWith('✓')
               const isError = line.startsWith('✗') || line.startsWith('Error:')
               return (
-                <div key={i} className={`py-0.5 ${isError ? 'text-red-400' : isCheck ? 'text-emerald-400' : 'text-brand-300'}`}>
+                <div key={i} className={`py-0.5 ${isError ? 'text-red-400' : isCheck ? 'text-accent-400' : 'text-brand-300'}`}>
                   <span className="text-brand-600 mr-2 select-none">$</span>
                   {line}
                 </div>
               )
             })}
             {indexingProgress.isRunning && (
-              <div className="text-emerald-400 py-0.5">
+              <div className="text-accent-400 py-0.5">
                 <span className="text-brand-600 mr-2 select-none">$</span>
                 {indexingProgress.currentFile || indexingProgress.status || 'Working...'}
                 <span className="ml-1 animate-pulse">_</span>

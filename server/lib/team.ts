@@ -4,16 +4,61 @@ import { join } from "path";
 import { randomUUID } from "crypto";
 
 export type TeamRole =
+  | "owner"
+  | "admin"
+  | "member"
+  | "viewer";
+
+export type LegacyTeamRole =
   | "attorney"
   | "case_manager_lead"
   | "case_manager"
   | "case_manager_assistant";
+
+const LEGACY_ROLE_MAP: Record<LegacyTeamRole, TeamRole> = {
+  attorney: "owner",
+  case_manager_lead: "admin",
+  case_manager: "member",
+  case_manager_assistant: "viewer",
+};
+
+const ROLE_ALIAS_TELEMETRY: Record<LegacyTeamRole, number> = {
+  attorney: 0,
+  case_manager_lead: 0,
+  case_manager: 0,
+  case_manager_assistant: 0,
+};
+
+function warnLegacyRoleAlias(role: LegacyTeamRole): void {
+  ROLE_ALIAS_TELEMETRY[role] += 1;
+  console.warn(
+    `[team] Legacy role alias used: ${role} -> ${LEGACY_ROLE_MAP[role]} (count=${ROLE_ALIAS_TELEMETRY[role]})`
+  );
+}
+
+export function normalizeTeamRole(input: unknown): TeamRole {
+  const role = typeof input === "string" ? input.trim().toLowerCase() : "";
+  if (role === "owner" || role === "admin" || role === "member" || role === "viewer") {
+    return role;
+  }
+  if (
+    role === "attorney" ||
+    role === "case_manager_lead" ||
+    role === "case_manager" ||
+    role === "case_manager_assistant"
+  ) {
+    warnLegacyRoleAlias(role);
+    return LEGACY_ROLE_MAP[role];
+  }
+  return "member";
+}
 
 export interface TeamMember {
   id: string;
   email: string;
   name?: string;
   role: TeamRole;
+  legacyRole?: string;
   status: "pending" | "active" | "deactivated";
   invitedAt?: string;
   joinedAt?: string;
@@ -24,6 +69,7 @@ export interface TeamInvite {
   id: string;
   email: string;
   role: TeamRole;
+  legacyRole?: string;
   status: "pending" | "accepted" | "revoked" | "expired";
   invitedBy: string;
   invitedAt: string;
@@ -92,28 +138,28 @@ function createEmptyTeam(): TeamState {
 
 export function getPermissionsForRole(role: TeamRole): TeamPermissions {
   switch (role) {
-    case "attorney":
+    case "owner":
       return {
         canManageTeam: true,
         canAssignCases: true,
         canViewAllCases: true,
         canEditKnowledge: true,
       };
-    case "case_manager_lead":
+    case "admin":
       return {
-        canManageTeam: false,
+        canManageTeam: true,
         canAssignCases: true,
         canViewAllCases: true,
-        canEditKnowledge: false,
+        canEditKnowledge: true,
       };
-    case "case_manager":
+    case "member":
       return {
         canManageTeam: false,
         canAssignCases: false,
         canViewAllCases: true,
         canEditKnowledge: false,
       };
-    case "case_manager_assistant":
+    case "viewer":
       return {
         canManageTeam: false,
         canAssignCases: false,
@@ -150,10 +196,32 @@ function normalizeTeamState(input: unknown): TeamState {
     createdAt: typeof team.createdAt === "string" ? team.createdAt : nowIso(),
     updatedAt: typeof team.updatedAt === "string" ? team.updatedAt : nowIso(),
     members: Array.isArray(team.members)
-      ? team.members.filter((m): m is TeamMember => !!m && typeof m.email === "string")
+      ? team.members
+          .filter((m): m is TeamMember => !!m && typeof m.email === "string")
+          .map((m) => {
+            const normalizedRole = normalizeTeamRole((m as any).role);
+            return {
+              ...m,
+              role: normalizedRole,
+              legacyRole: typeof (m as any).role === "string" && (m as any).role !== normalizedRole
+                ? (m as any).role
+                : m.legacyRole,
+            };
+          })
       : [],
     invites: Array.isArray(team.invites)
-      ? team.invites.filter((i): i is TeamInvite => !!i && typeof i.email === "string")
+      ? team.invites
+          .filter((i): i is TeamInvite => !!i && typeof i.email === "string")
+          .map((i) => {
+            const normalizedRole = normalizeTeamRole((i as any).role);
+            return {
+              ...i,
+              role: normalizedRole,
+              legacyRole: typeof (i as any).role === "string" && (i as any).role !== normalizedRole
+                ? (i as any).role
+                : i.legacyRole,
+            };
+          })
       : [],
   };
 }
@@ -227,7 +295,7 @@ async function bootstrapFounderIfAllowed(
   const founder: TeamMember = {
     id: randomUUID(),
     email,
-    role: "attorney",
+    role: "owner",
     status: "active",
     joinedAt: nowIso(),
   };
@@ -360,7 +428,8 @@ export async function createTeamInvite(
   const invite: TeamInvite = {
     id: randomUUID(),
     email,
-    role,
+    role: normalizeTeamRole(role),
+    legacyRole: typeof role === "string" && normalizeTeamRole(role) !== role ? role : undefined,
     status: "pending",
     invitedBy: normalizeEmail(invitedByEmail),
     invitedAt: nowIso(),
@@ -420,7 +489,13 @@ export async function updateMemberRole(
   const next: TeamState = {
     ...actorResult.team,
     members: actorResult.team.members.map((m) =>
-      m.id === memberId ? { ...m, role } : m
+      m.id === memberId
+        ? {
+            ...m,
+            role: normalizeTeamRole(role),
+            legacyRole: typeof role === "string" && normalizeTeamRole(role) !== role ? role : undefined,
+          }
+        : m
     ),
   };
   await saveTeamState(firmRoot, next);
@@ -461,7 +536,8 @@ export async function ensureTeamMember(
   const member: TeamMember = {
     id: randomUUID(),
     email,
-    role,
+    role: normalizeTeamRole(role),
+    legacyRole: typeof role === "string" && normalizeTeamRole(role) !== role ? role : undefined,
     status: "active",
     joinedAt: nowIso(),
     invitedBy: "remote_sync",
@@ -498,7 +574,7 @@ export async function bootstrapTeamFounder(
   const founder: TeamMember = {
     id: randomUUID(),
     email,
-    role: "attorney",
+    role: "owner",
     status: "active",
     joinedAt: nowIso(),
   };

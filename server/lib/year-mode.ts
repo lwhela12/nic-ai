@@ -5,8 +5,8 @@
  * Creates virtual case folders under .ai_tool/clients/<slug>/ with unified .ai_tool/ directories.
  */
 
-import { readdir, readFile, writeFile, mkdir, stat } from "fs/promises";
 import { join, dirname, sep, resolve } from "path";
+import { getVfs } from "./vfs";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -48,12 +48,8 @@ export function slugify(name: string): string {
 }
 
 async function pathExists(p: string): Promise<boolean> {
-  try {
-    await stat(p);
-    return true;
-  } catch {
-    return false;
-  }
+  const vfs = getVfs();
+  return vfs.exists(p);
 }
 
 // ---------------------------------------------------------------------------
@@ -65,11 +61,15 @@ async function pathExists(p: string): Promise<boolean> {
  */
 export async function detectYearBasedMode(firmRoot: string): Promise<boolean> {
   try {
-    const entries = await readdir(firmRoot, { withFileTypes: true });
+    const vfs = getVfs();
+    const entries = await vfs.readdir(firmRoot, { withFileTypes: true });
     const dirs = entries.filter(
-      (e) => e.isDirectory() && !e.name.startsWith(".")
+      (e: any) => {
+        const isDir = typeof e.isDirectory === 'function' ? e.isDirectory() : e.isDirectory;
+        return isDir && !e.name.startsWith(".");
+      }
     );
-    const yearCount = dirs.filter((e) => isYearFolder(e.name)).length;
+    const yearCount = dirs.filter((e: any) => isYearFolder(e.name)).length;
     const result = yearCount >= 2;
     console.log(
       `[year-mode] detect: ${dirs.length} dirs, ${yearCount} year folders → ${result ? "YEAR MODE" : "flat mode"}`,
@@ -98,7 +98,8 @@ export async function loadClientRegistry(
   firmRoot: string
 ): Promise<ClientRegistry | null> {
   try {
-    const content = await readFile(registryPath(firmRoot), "utf-8");
+    const vfs = getVfs();
+    const content = await vfs.readFile(registryPath(firmRoot), "utf-8");
     return JSON.parse(content) as ClientRegistry;
   } catch {
     return null;
@@ -110,8 +111,9 @@ async function saveClientRegistry(
   registry: ClientRegistry
 ): Promise<void> {
   const dir = join(firmRoot, AI_TOOL_DIR);
-  await mkdir(dir, { recursive: true });
-  await writeFile(registryPath(firmRoot), JSON.stringify(registry, null, 2));
+  const vfs = getVfs();
+  await vfs.mkdir(dir, { recursive: true });
+  await vfs.writeFile(registryPath(firmRoot), JSON.stringify(registry, null, 2));
 }
 
 // ---------------------------------------------------------------------------
@@ -123,15 +125,17 @@ async function saveClientRegistry(
  */
 async function countDirFiles(dir: string): Promise<number> {
   let count = 0;
-  let entries: Awaited<ReturnType<typeof readdir>>;
+  const vfs = getVfs();
+  let entries: any[];
   try {
-    entries = await readdir(dir, { withFileTypes: true });
+    entries = await vfs.readdir(dir, { withFileTypes: true });
   } catch {
     return 0;
   }
   for (const e of entries) {
     if (e.name === AI_TOOL_DIR || e.name.startsWith(".")) continue;
-    if (e.isDirectory()) {
+    const isDir = typeof e.isDirectory === 'function' ? e.isDirectory() : e.isDirectory;
+    if (isDir) {
       count += await countDirFiles(join(dir, e.name));
     } else {
       count++;
@@ -153,24 +157,31 @@ export async function scanAndBuildRegistry(
     clients: {},
   };
 
-  const entries = await readdir(firmRoot, { withFileTypes: true });
+  const vfs = getVfs();
+  const entries = await vfs.readdir(firmRoot, { withFileTypes: true });
   const yearDirs = entries.filter(
-    (e) => e.isDirectory() && isYearFolder(e.name)
+    (e: any) => {
+      const isDir = typeof e.isDirectory === 'function' ? e.isDirectory() : e.isDirectory;
+      return isDir && isYearFolder(e.name);
+    }
   );
 
   // Read all year folders in parallel
   const yearResults = await Promise.all(
-    yearDirs.map(async (yearDir) => {
+    yearDirs.map(async (yearDir: any) => {
       const yearPath = join(firmRoot, yearDir.name);
-      let clients: Awaited<ReturnType<typeof readdir>>;
+      let clients: any[];
       try {
-        clients = await readdir(yearPath, { withFileTypes: true });
+        clients = await vfs.readdir(yearPath, { withFileTypes: true });
       } catch {
         return [];
       }
       return clients
-        .filter((c) => c.isDirectory() && !c.name.startsWith("."))
-        .map((c) => ({ yearName: yearDir.name, clientName: c.name }));
+        .filter((c: any) => {
+          const isDir = typeof c.isDirectory === 'function' ? c.isDirectory() : c.isDirectory;
+          return isDir && !c.name.startsWith(".");
+        })
+        .map((c: any) => ({ yearName: yearDir.name, clientName: c.name }));
     })
   );
 
@@ -209,7 +220,7 @@ export async function scanAndBuildRegistry(
       entry.fileCount = counts.reduce((a, b) => a + b, 0);
 
       // Ensure virtual client dir exists
-      await mkdir(join(firmRoot, AI_TOOL_DIR, CLIENTS_DIR, entry.slug), {
+      await vfs.mkdir(join(firmRoot, AI_TOOL_DIR, CLIENTS_DIR, entry.slug), {
         recursive: true,
       });
     })
@@ -234,10 +245,14 @@ export async function ensureRegistryFresh(
   registry: ClientRegistry
 ): Promise<ClientRegistry> {
   const currentYear = new Date().getFullYear();
+  const vfs = getVfs();
 
-  const entries = await readdir(firmRoot, { withFileTypes: true });
+  const entries = await vfs.readdir(firmRoot, { withFileTypes: true });
   const yearDirs = entries.filter(
-    (e) => e.isDirectory() && isYearFolder(e.name)
+    (e: any) => {
+      const isDir = typeof e.isDirectory === 'function' ? e.isDirectory() : e.isDirectory;
+      return isDir && isYearFolder(e.name);
+    }
   );
 
   // Collect year folders in the registry for quick lookup
@@ -284,17 +299,20 @@ export async function ensureRegistryFresh(
   // Read client folders in the target year dirs
   let changed = false;
   const scanResults = await Promise.all(
-    foldersToScan.map(async (yearDir) => {
+    foldersToScan.map(async (yearDir: any) => {
       const yearPath = join(firmRoot, yearDir.name);
-      let clients: Awaited<ReturnType<typeof readdir>>;
+      let clients: any[];
       try {
-        clients = await readdir(yearPath, { withFileTypes: true });
+        clients = await vfs.readdir(yearPath, { withFileTypes: true });
       } catch {
         return [];
       }
       return clients
-        .filter((c) => c.isDirectory() && !c.name.startsWith("."))
-        .map((c) => ({ yearName: yearDir.name, clientName: c.name }));
+        .filter((c: any) => {
+          const isDir = typeof c.isDirectory === 'function' ? c.isDirectory() : c.isDirectory;
+          return isDir && !c.name.startsWith(".");
+        })
+        .map((c: any) => ({ yearName: yearDir.name, clientName: c.name }));
     })
   );
 
@@ -338,7 +356,7 @@ export async function ensureRegistryFresh(
         entry.sourceFolders.map((rel) => countDirFiles(join(firmRoot, rel)))
       );
       entry.fileCount = counts.reduce((a, b) => a + b, 0);
-      await mkdir(join(firmRoot, AI_TOOL_DIR, CLIENTS_DIR, entry.slug), {
+      await vfs.mkdir(join(firmRoot, AI_TOOL_DIR, CLIENTS_DIR, entry.slug), {
         recursive: true,
       });
     })
@@ -484,9 +502,10 @@ export async function listYearBasedCaseFiles(
     const yearPrefix = relSourceFolder.split("/")[0];
 
     async function walkDir(dir: string, base: string) {
-      let entries: Awaited<ReturnType<typeof readdir>>;
+      let entries: any[];
+      const vfs = getVfs();
       try {
-        entries = await readdir(dir, { withFileTypes: true });
+        entries = await vfs.readdir(dir, { withFileTypes: true });
       } catch {
         return;
       }
@@ -495,7 +514,8 @@ export async function listYearBasedCaseFiles(
         const fullPath = join(dir, entry.name);
         const relativePath = base ? `${base}/${entry.name}` : entry.name;
 
-        if (entry.isDirectory()) {
+        const isDir = typeof entry.isDirectory === 'function' ? entry.isDirectory() : entry.isDirectory;
+        if (isDir) {
           await walkDir(fullPath, relativePath);
         } else {
           // Prefix with year: "2024/Medical/report.pdf"
@@ -530,9 +550,10 @@ export async function walkYearBasedFiles(
 
     async function walkDir(dir: string, base: string): Promise<any[]> {
       const results: any[] = [];
-      let entries: Awaited<ReturnType<typeof readdir>>;
+      let entries: any[];
+      const vfs = getVfs();
       try {
-        entries = await readdir(dir, { withFileTypes: true });
+        entries = await vfs.readdir(dir, { withFileTypes: true });
       } catch {
         return results;
       }
@@ -553,7 +574,8 @@ export async function walkYearBasedFiles(
           ? `${base}/${dirEntry.name}`
           : dirEntry.name;
 
-        if (dirEntry.isDirectory()) {
+        const isDir = typeof dirEntry.isDirectory === 'function' ? dirEntry.isDirectory() : dirEntry.isDirectory;
+        if (isDir) {
           const children = await walkDir(fullPath, relativePath);
           results.push({
             name: dirEntry.name,
@@ -562,13 +584,13 @@ export async function walkYearBasedFiles(
             children,
           });
         } else {
-          const stats = await stat(fullPath);
+          const stats = await vfs.stat(fullPath);
           results.push({
             name: dirEntry.name,
             type: "file",
             path: `${yearPrefix}/${relativePath}`,
             size: stats.size,
-            modified: stats.mtime,
+            modified: stats.mtimeMs ? new Date(stats.mtimeMs) : new Date(),
           });
         }
       }

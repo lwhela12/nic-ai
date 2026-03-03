@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { google } from "googleapis";
 import {
   bootstrapTeamFounder,
   ensureTeamMember,
@@ -9,6 +10,9 @@ import {
   type TeamRole,
 } from "../lib/team";
 import { invalidateAuthCache } from "../middleware/auth";
+import { setVfsProvider } from "../lib/vfs";
+import { GDriveProvider } from "../lib/vfs/gdrive-provider";
+import { LocalFileSystemProvider } from "../lib/vfs/local-provider";
 
 const auth = new Hono();
 
@@ -42,6 +46,10 @@ interface Config {
   accountType?: "root" | "sub_user";
   ownerEmail?: string | null;
   maxLicenses?: number;
+  // Google Drive Integration
+  gdriveTokens?: any;
+  gdriveRootFolderId?: string;
+  vfsMode?: "local" | "gdrive";
 }
 
 async function validateFirmAccess(
@@ -65,7 +73,7 @@ async function validateFirmAccess(
     options?.autoProvision &&
     (teamResult.reason === "firm_not_bootstrapped" || teamResult.reason === "invite_required")
   ) {
-    await ensureTeamMember(firmRoot, email, options.provisionRole || "case_manager");
+    await ensureTeamMember(firmRoot, email, options.provisionRole || "member");
     return { ok: true };
   }
   return { ok: false, reason: teamResult.reason };
@@ -173,7 +181,7 @@ auth.get("/status", async (c) => {
       const teamAccess = await validateFirmAccess(firmRoot, email, {
         bootstrapIfMissing: true,
         autoProvision: true,
-        provisionRole: config.accountType === "sub_user" ? "case_manager" : "attorney",
+        provisionRole: config.accountType === "sub_user" ? "member" : "owner",
       });
       const teamResult = await requireTeamContext(firmRoot, email);
       if (!teamAccess.ok || !teamResult.ok) {
@@ -276,7 +284,7 @@ auth.get("/status", async (c) => {
     const teamAccess = await validateFirmAccess(firmRoot, effectiveConfig.email, {
       bootstrapIfMissing: true,
       autoProvision: true,
-      provisionRole: effectiveConfig.accountType === "sub_user" ? "case_manager" : "attorney",
+      provisionRole: effectiveConfig.accountType === "sub_user" ? "member" : "owner",
     });
     const teamResult = await requireTeamContext(firmRoot, effectiveConfig.email);
     if (!teamAccess.ok || !teamResult.ok) {
@@ -325,7 +333,7 @@ auth.post("/login", async (c) => {
     const firmAccess = await validateFirmAccess(
       typeof firmRoot === "string" ? firmRoot : undefined,
       email,
-      { bootstrapIfMissing: true, autoProvision: true, provisionRole: "attorney" }
+      { bootstrapIfMissing: true, autoProvision: true, provisionRole: "owner" }
     );
     if (!firmAccess.ok) {
       return c.json({ error: firmAccess.reason }, 403);
@@ -376,7 +384,7 @@ auth.post("/login", async (c) => {
       {
         bootstrapIfMissing: true,
         autoProvision: true,
-        provisionRole: data.accountType === "sub_user" ? "case_manager" : "attorney",
+        provisionRole: data.accountType === "sub_user" ? "member" : "owner",
       }
     );
     if (!firmAccess.ok) {
@@ -434,7 +442,7 @@ auth.post("/signup", async (c) => {
     const firmAccess = await validateFirmAccess(
       typeof firmRoot === "string" ? firmRoot : undefined,
       email,
-      { bootstrapIfMissing: true, autoProvision: true, provisionRole: "attorney" }
+      { bootstrapIfMissing: true, autoProvision: true, provisionRole: "owner" }
     );
     if (!firmAccess.ok) {
       return c.json({ error: firmAccess.reason }, 403);
@@ -486,7 +494,7 @@ auth.post("/signup", async (c) => {
       {
         bootstrapIfMissing: true,
         autoProvision: true,
-        provisionRole: data.accountType === "sub_user" ? "case_manager" : "attorney",
+        provisionRole: data.accountType === "sub_user" ? "member" : "owner",
       }
     );
     if (!firmAccess.ok) {
@@ -586,6 +594,252 @@ auth.get("/subscription-portal", async (c) => {
   } catch (error) {
     console.error("Portal error:", error);
     return c.json({ error: "Could not connect to subscription server" }, 503);
+  }
+});
+
+// ==========================================
+// Google Drive OAuth & VFS Initialization
+// ==========================================
+
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "TODO_CLIENT_ID";
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "TODO_CLIENT_SECRET";
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || "http://localhost:3001/api/auth/gdrive/callback";
+
+export function getGoogleApiClient() {
+  return new google.auth.OAuth2(
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI
+  );
+}
+
+export function initVfs() {
+  const config = loadConfig();
+  if (config?.vfsMode === "gdrive" && config?.gdriveTokens && config?.gdriveRootFolderId) {
+    try {
+      const oauth2Client = getGoogleApiClient();
+      oauth2Client.setCredentials(config.gdriveTokens);
+      const gdriveProvider = new GDriveProvider(oauth2Client, config.gdriveRootFolderId);
+      setVfsProvider(gdriveProvider);
+      console.log("[VFS] Initialized Google Drive Provider");
+    } catch (err) {
+      console.error("[VFS] Failed to initialize Google Drive Provider, falling back to local:", err);
+      setVfsProvider(new LocalFileSystemProvider());
+    }
+  } else {
+    setVfsProvider(new LocalFileSystemProvider());
+    console.log("[VFS] Initialized Local File System Provider");
+  }
+}
+
+async function resolveGdriveRootFolderName(config: Config | null): Promise<string | null> {
+  if (!config?.gdriveTokens || !config.gdriveRootFolderId) return null;
+  try {
+    const oauth2Client = getGoogleApiClient();
+    oauth2Client.setCredentials(config.gdriveTokens);
+    const drive = google.drive({ version: "v3", auth: oauth2Client });
+    const response = await drive.files.get({
+      fileId: config.gdriveRootFolderId,
+      fields: "name",
+    });
+    return response.data.name || null;
+  } catch {
+    return null;
+  }
+}
+
+async function buildGdriveStatusPayload(config: Config | null) {
+  return {
+    connected: !!config?.gdriveTokens,
+    vfsMode: config?.vfsMode || "local",
+    rootFolderId: config?.gdriveRootFolderId || null,
+    rootFolderName: await resolveGdriveRootFolderName(config),
+  };
+}
+
+auth.get("/gdrive/url", (c) => {
+  const oauth2Client = getGoogleApiClient();
+  const authUrl = oauth2Client.generateAuthUrl({
+    access_type: "offline",
+    prompt: "consent",
+    scope: [
+      "https://www.googleapis.com/auth/drive.file",
+      "https://www.googleapis.com/auth/drive.metadata.readonly",
+      "https://www.googleapis.com/auth/drive.readonly",
+    ],
+  });
+  return c.json({ url: authUrl });
+});
+
+auth.get("/gdrive/callback", async (c) => {
+  const code = c.req.query("code");
+  if (!code) return c.json({ error: "Missing code parameter" }, 400);
+
+  try {
+    const oauth2Client = getGoogleApiClient();
+    const { tokens } = await oauth2Client.getToken(code);
+
+    const config = loadConfig() || {};
+    config.gdriveTokens = tokens;
+    // We do not set vfsMode to 'gdrive' yet until a root folder is selected
+    saveConfig(config);
+
+    // Redirect or return success for the frontend
+    return c.html(`<script>window.close();</script>Successfully authenticated with Google Drive. You can close this tab.`);
+  } catch (error) {
+    console.error("[GDrive] Authentication failed", error);
+    return c.json({ error: "Failed to authenticate with Google Drive" }, 500);
+  }
+});
+
+auth.get("/gdrive/status", async (c) => {
+  const config = loadConfig();
+  return c.json(await buildGdriveStatusPayload(config));
+});
+
+auth.post("/vfs/mode", async (c) => {
+  try {
+    const body = await c.req.json();
+    const mode = typeof body?.mode === "string" ? body.mode : "";
+    if (mode !== "local" && mode !== "gdrive") {
+      return c.json({ error: "mode must be 'local' or 'gdrive'" }, 400);
+    }
+
+    const config = loadConfig() || {};
+    if (mode === "gdrive" && (!config.gdriveTokens || !config.gdriveRootFolderId)) {
+      return c.json({ error: "Google Drive is not fully configured" }, 400);
+    }
+
+    config.vfsMode = mode;
+    saveConfig(config);
+    initVfs();
+
+    return c.json({
+      success: true,
+      ...(await buildGdriveStatusPayload(config)),
+    });
+  } catch (error) {
+    console.error("[VFS] Failed to switch mode", error);
+    return c.json({ error: "Failed to switch VFS mode" }, 500);
+  }
+});
+
+auth.post("/gdrive/disconnect", (c) => {
+  const config = loadConfig();
+  if (config) {
+    delete config.gdriveTokens;
+    delete config.gdriveRootFolderId;
+    config.vfsMode = "local";
+    saveConfig(config);
+    setVfsProvider(new LocalFileSystemProvider());
+  }
+  return c.json({ success: true });
+});
+
+auth.post("/gdrive/set-root", async (c) => {
+  const { rootFolderId } = await c.req.json();
+  if (!rootFolderId) return c.json({ error: "rootFolderId is required" }, 400);
+
+  const config = loadConfig();
+  if (!config || !config.gdriveTokens) {
+    return c.json({ error: "Not authenticated with Google Drive" }, 401);
+  }
+
+  config.gdriveRootFolderId = rootFolderId;
+  config.vfsMode = "gdrive";
+  saveConfig(config);
+
+  // Re-initialize VFS
+  initVfs();
+
+  return c.json({ success: true, vfsMode: "gdrive", rootFolderId });
+});
+
+auth.get("/gdrive/browse", async (c) => {
+  const parentId = c.req.query("dir") || "root";
+  const config = loadConfig();
+  if (!config || !config.gdriveTokens) {
+    return c.json({ error: "Not authenticated with Google Drive" }, 401);
+  }
+
+  try {
+    const oauth2Client = getGoogleApiClient();
+    oauth2Client.setCredentials(config.gdriveTokens);
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+    // Get current folder info if not root
+    let parentFolder = "root";
+    if (parentId !== "root") {
+      try {
+        const currentObj = await drive.files.get({ fileId: parentId, fields: "id, name, parents" });
+        if (currentObj.data.parents && currentObj.data.parents.length > 0) {
+          parentFolder = currentObj.data.parents[0];
+        }
+      } catch {
+        parentFolder = "root";
+      }
+    }
+
+    let folders: { name: string, path: string }[] = [];
+
+    if (parentId === "root") {
+      // In root, we want both "My Drive" root folders AND folders shared with the user
+      const [rootRes, sharedRes] = await Promise.all([
+        drive.files.list({
+          q: `'root' in parents and trashed = false and mimeType = 'application/vnd.google-apps.folder'`,
+          fields: "files(id, name)",
+          orderBy: "name",
+          pageSize: 1000
+        }),
+        drive.files.list({
+          q: `sharedWithMe = true and trashed = false and mimeType = 'application/vnd.google-apps.folder'`,
+          fields: "files(id, name)",
+          orderBy: "name",
+          pageSize: 1000
+        })
+      ]);
+
+      const combined = [
+        ...(rootRes.data.files || []),
+        ...(sharedRes.data.files || [])
+      ];
+
+      // Deduplicate by ID just in case
+      const seen = new Set();
+      const uniqueFiles = combined.filter(f => {
+        if (!f.id || seen.has(f.id)) return false;
+        seen.add(f.id);
+        return true;
+      });
+
+      folders = uniqueFiles.map(f => ({
+        name: f.name || "Unknown",
+        path: f.id as string
+      }));
+
+      // Re-sort alphabetically
+      folders.sort((a, b) => a.name.localeCompare(b.name));
+    } else {
+      const res = await drive.files.list({
+        q: `'${parentId}' in parents and trashed = false and mimeType = 'application/vnd.google-apps.folder'`,
+        fields: "files(id, name)",
+        orderBy: "name",
+        pageSize: 1000
+      });
+
+      folders = (res.data.files || []).map(f => ({
+        name: f.name || "Unknown",
+        path: f.id as string
+      }));
+    }
+
+    return c.json({
+      current: parentId,
+      parent: parentFolder,
+      folders
+    });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
   }
 });
 

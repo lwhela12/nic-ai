@@ -7,10 +7,11 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import { readFile, writeFile, readdir, mkdir } from "fs/promises";
+import { readFile, readdir } from "fs/promises";
 import { join } from "path";
 import { formatDateMMDDYYYY, formatDateYYYYMMDD, parseFlexibleDate } from "./date-format";
 import { extractTextFromDocx } from "./extract";
+import { loadFirmTodos, saveFirmTodosWithMemory, type FirmTodo } from "./task-store";
 
 // Lazy client creation - API key is set by auth middleware before requests
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -53,16 +54,6 @@ interface ParsedAssignment {
   userId: string;
   assignedAt?: string;
   assignedBy?: string;
-}
-
-// Firm todo format
-interface FirmTodo {
-  id: string;
-  text: string;
-  caseRef?: string;
-  priority: "high" | "medium" | "low";
-  status: "pending" | "completed";
-  createdAt: string;
 }
 
 // Tool definitions
@@ -175,29 +166,6 @@ const TOOLS: Anthropic.Tool[] = [
     }
   }
 ];
-
-// Helper to load current todos from file
-async function loadTodos(firmRoot: string): Promise<{ updated_at: string; todos: FirmTodo[] }> {
-  const todosPath = join(firmRoot, ".ai_tool", "todos.json");
-  try {
-    const content = await readFile(todosPath, "utf-8");
-    return JSON.parse(content);
-  } catch {
-    return { updated_at: new Date().toISOString(), todos: [] };
-  }
-}
-
-// Helper to save todos to file
-async function saveTodos(firmRoot: string, todos: FirmTodo[]): Promise<void> {
-  const todosDir = join(firmRoot, ".ai_tool");
-  const todosPath = join(todosDir, "todos.json");
-  await mkdir(todosDir, { recursive: true });
-  const data = {
-    updated_at: new Date().toISOString(),
-    todos,
-  };
-  await writeFile(todosPath, JSON.stringify(data, null, 2));
-}
 
 function normalizeAssignments(input: unknown): ParsedAssignment[] {
   if (!Array.isArray(input)) return [];
@@ -316,18 +284,7 @@ async function executeTool(
           createdAt: new Date().toISOString(),
         }));
 
-        // Save to file
-        const todosDir = join(firmRoot, ".ai_tool");
-        const todosPath = join(todosDir, "todos.json");
-
-        await mkdir(todosDir, { recursive: true });
-
-        const data = {
-          updated_at: new Date().toISOString(),
-          todos: firmTodos,
-        };
-
-        await writeFile(todosPath, JSON.stringify(data, null, 2));
+        await saveFirmTodosWithMemory(firmRoot, firmTodos);
         return `Successfully saved ${firmTodos.length} tasks to the firm todo list.`;
       }
 
@@ -342,7 +299,7 @@ async function executeTool(
 
       case "start_review": {
         // Load current todos and return pending items for review
-        const todosData = await loadTodos(firmRoot);
+        const todosData = await loadFirmTodos(firmRoot);
         const pendingTodos = todosData.todos.filter(t => t.status === "pending");
 
         if (pendingTodos.length === 0) {
@@ -371,7 +328,7 @@ async function executeTool(
 
       case "update_todo_item": {
         const { todo_id, action, new_text, new_priority } = toolInput;
-        const todosData = await loadTodos(firmRoot);
+        const todosData = await loadFirmTodos(firmRoot);
         const todoIndex = todosData.todos.findIndex(t => t.id === todo_id);
 
         if (todoIndex === -1) {
@@ -410,7 +367,7 @@ async function executeTool(
         }
 
         // Save updated todos
-        await saveTodos(firmRoot, todosData.todos);
+        await saveFirmTodosWithMemory(firmRoot, todosData.todos);
 
         // Count remaining pending items
         const remainingPending = todosData.todos.filter(t => t.status === "pending").length;
@@ -645,8 +602,8 @@ ${Object.entries(casesByPhase).map(([phase, count]) => `- ${phase}: ${count}`).j
   return parts.join("\n");
 }
 
-// System prompt for firm chat
-const BASE_SYSTEM_PROMPT = `You are a helpful legal assistant for a Personal Injury law firm. You help attorneys and staff with firm-level portfolio analysis, case management, and task generation.
+// System prompt for workspace chat
+const BASE_SYSTEM_PROMPT = `You are a helpful assistant for portfolio-level analysis, workspace management, and task generation across personal, family, and business support domains.
 
 ## YOUR CAPABILITIES
 

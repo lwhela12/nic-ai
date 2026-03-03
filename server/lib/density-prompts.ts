@@ -13,7 +13,6 @@
 
 export const INTENT_TYPES = [
   "answer",
-  "build_packet",
   "generate_document",
   "update_index",
   "update_case_summary",
@@ -22,8 +21,7 @@ export const INTENT_TYPES = [
   "rerun_hypergraph",
   "create_document_view",
   "read_document",
-  "confirm_hearing",
-  "confirm_packet",
+  "clarify_documents",
   "clarify",
 ] as const;
 
@@ -39,7 +37,7 @@ export interface ClassifiedIntent {
 export function buildIntentClassifierPrompt(
   metaIndexSummary: string,
 ): string {
-  return `You are an intent classifier for a personal injury case management system.
+  return `You are an intent classifier for a personal/family/business assistant system.
 Given a user message and case context, classify the intent and extract parameters.
 
 Return JSON with these fields:
@@ -52,17 +50,13 @@ Return JSON with these fields:
 
 ## Intent Definitions & Params
 
-**answer** — User asks a question about the case, documents, law, or wants information.
+**answer** — User asks a question about the case, documents, or wants information.
 params: { "question": "the user's question" }
 Examples: "What are the total medical charges?", "When was the accident?", "Summarize the medical records"
 
 **generate_document** — User wants to draft/write/create a formal document.
-params: { "doc_type": "demand_letter"|"case_memo"|"settlement"|"general_letter"|"decision_order", "instructions": "any specific instructions" }
-Examples: "Draft a demand letter", "Write a case memo", "Generate a settlement calculation"
-
-**build_packet** — User wants to build an evidence packet or hearing binder.
-params: { "hearing_type": "AO"|"HO"|null, "hearing_number": string|null, "instructions": string }
-Examples: "Build a hearing packet", "Create an evidence binder for hearing #12345"
+params: { "doc_type": "financial_summary"|"estate_checklist"|"medical_summary"|"care_plan"|"correspondence"|"meeting_minutes"|"action_plan"|"custom_document", "instructions": "any specific instructions" }
+Examples: "Draft a financial summary", "Write meeting minutes", "Generate an action plan"
 
 **update_index** — User provides corrections or new info about case fields (client name, DOB, phone, etc).
 params: { "field_path": "dotted.path.to.field", "value": "new value" }
@@ -92,13 +86,9 @@ Examples: "Show me all the medical records", "Create a view of the billing docum
 params: { "path": string, "question": string|null }
 Examples: "Read the intake form", "What does the MRI report say?"
 
-**confirm_hearing** — User is confirming a hearing for an evidence packet. Use this when the previous assistant message asked about which hearing to build a packet for and the user confirms (e.g., "yes", "that one", "hearing #1", or specifies a hearing number).
-params: { "hearing_number": string|null }
-Examples: "Yes", "That one", "Use hearing 2680509-RA", "#1"
-
-**confirm_packet** — User is confirming a proposed evidence packet document list. Use this when the previous assistant message showed a proposed document list for a packet and the user approves it.
+**clarify_documents** — User wants to review or provide context for flagged documents.
 params: {}
-Examples: "Yes", "Looks good", "Go ahead and build it", "Confirmed"
+Examples: "What documents need clarification?", "Show me the unclear documents", "Review the documents that need context", "Clarify docs"
 
 **clarify** — Message is too vague or ambiguous to classify.
 params: { "question": "what to ask the user" }
@@ -111,9 +101,6 @@ ${metaIndexSummary}
 - Prefer "answer" for most informational questions — it handles analysis, summaries, and lookups.
 - Only use "generate_document" when the user explicitly wants a formal document drafted.
 - Use "clarify" only when genuinely ambiguous — most messages have clear intent.
-- Use "confirm_hearing" when the previous assistant message asked about a hearing and the user is confirming. Look for hearing selection context.
-- Use "confirm_packet" ONLY when the previous assistant message showed a proposed document list and the user is approving it.
-- If unsure whether the user is confirming a hearing or a document list, check the last assistant message: if it lists documents → confirm_packet, if it asks about a hearing → confirm_hearing.
 - For "update_index", extract the field path and value from the message.
 - If the user asks to "re-index" or "update the index", that's "rerun_hypergraph", not "update_index".`;
 }
@@ -125,7 +112,7 @@ ${metaIndexSummary}
 export function buildRouterPrompt(
   metaIndexSummary: string,
 ): string {
-  return `You are a document router for a personal injury case management system.
+  return `You are a document router for a personal/family/business assistant workspace.
 Given a question and a list of folders in the case index, select which folders likely contain relevant information.
 
 Return JSON:
@@ -155,7 +142,7 @@ Select the folders most likely to contain relevant information.`;
 // ============================================================================
 
 export function buildPlannerPrompt(): string {
-  return `You are a document planner for a personal injury case management system.
+  return `You are a document planner for a personal/family/business assistant workspace.
 Given a question and folder summaries with file listings, decide which specific documents need deeper reading.
 
 Return JSON:
@@ -178,13 +165,16 @@ Return JSON:
 export function buildPlannerUserPrompt(
   question: string,
   folderDetails: string,
+  history?: string,
 ): string {
-  return `Question: ${question}
-
-## Folder Details
-${folderDetails}
-
-Select which documents need deeper reading to answer this question.`;
+  const parts: string[] = [];
+  if (history) {
+    parts.push(history);
+  }
+  parts.push(`Question: ${question}`);
+  parts.push(`## Folder Details\n${folderDetails}`);
+  parts.push("Select which documents need deeper reading to answer this question.");
+  return parts.join("\n\n");
 }
 
 // ============================================================================
@@ -192,7 +182,7 @@ Select which documents need deeper reading to answer this question.`;
 // ============================================================================
 
 export function buildExtractorPrompt(): string {
-  return `You are an information extractor for a personal injury case management system.
+  return `You are an information extractor for a personal/family/business assistant workspace.
 Given a question, existing accumulated context (memory), and new document content, extract and condense all relevant facts into an updated memory.
 
 Respond ONLY with the highly condensed text summary — no JSON wrapper, no preamble.
@@ -279,14 +269,14 @@ ${memory}`;
 // ============================================================================
 
 export function buildAnswererPrompt(knowledge: string): string {
-  return `You are a personal injury case analyst. Answer questions thoroughly and accurately based on the compiled case information.
+  return `You are an assistant analyst for personal/family/business workflows. Answer questions thoroughly and accurately based on the compiled case information.
 
 ${knowledge ? `## Practice Knowledge\n${knowledge}\n` : ""}
 ## Rules
 - Ground all factual claims in the compiled research — cite sources as [document name].
 - If information is incomplete, say what's known and what's missing.
 - Use professional but accessible language.
-- For legal questions, provide relevant analysis informed by PI practice knowledge.
+- For domain-specific questions, provide relevant analysis informed by workspace knowledge.
 - Format responses with clear structure — use headers, bullet points, and tables where appropriate.
 - Be direct and thorough. Don't hedge unnecessarily when the evidence is clear.`;
 }
@@ -295,50 +285,31 @@ export function buildAnswererUserPrompt(
   question: string,
   memory: string,
   caseContext: string,
+  history?: string,
 ): string {
-  return `## Compiled Research
-${memory}
-
-## Case Context
-${caseContext}
-
-## Question
-${question}
-
-Provide a thorough, well-cited answer.`;
+  const parts: string[] = [];
+  if (history) {
+    parts.push(history);
+  }
+  parts.push(`## Compiled Research\n${memory}`);
+  parts.push(`## Case Context\n${caseContext}`);
+  parts.push(`## Question\n${question}`);
+  parts.push("Provide a thorough, well-cited answer.");
+  return parts.join("\n\n");
 }
 
 // ============================================================================
-// Evidence Packet: Document Selection
+// Legacy Packet Selection (Deprecated)
 // ============================================================================
 
 export function buildPacketSelectorPrompt(): string {
-  return `You are an evidence packet planner for a workers' compensation case management system.
-Given open hearing details, case documents, and optionally practice knowledge rules, select and order documents for a hearing evidence packet.
-
-Return JSON:
+  return `Packet workflows are deprecated. Return JSON:
 {
-  "hearing_type": "HO" or "AO",
-  "hearing_number": string or null,
-  "explanation": "Brief explanation of your reasoning and any rules you applied",
-  "documents": [
-    {
-      "folder": "Folder Name",
-      "filename": "document.pdf",
-      "title": "Human-readable title",
-      "reason": "Why this document is included"
-    }
-  ]
-}
-
-## Rules
-- Order documents logically: hearing notices first, then medical records chronologically, then billing, then correspondence.
-- If practice knowledge rules are available, follow them for ordering and inclusion/exclusion.
-- Include all documents that would be relevant to the hearing issues.
-- Exclude clearly irrelevant documents (e.g., internal notes, duplicate copies).
-- If a hearing number has a "-RA", "-AP", or "-APPEAL" suffix, it's an Appeals Officer (AO) hearing. Otherwise it's a Hearing Officer (HO) hearing.
-- For AO hearings, focus on documents relevant to the appealed issue.
-- For HO hearings, include a comprehensive set of medical and legal documents.`;
+  "hearing_type": null,
+  "hearing_number": null,
+  "explanation": "Packet workflows are deprecated. Use create_document_view or generate_document.",
+  "documents": []
+}`;
 }
 
 export function buildPacketSelectorUserPrompt(
@@ -347,16 +318,12 @@ export function buildPacketSelectorUserPrompt(
   knowledgeRules: string,
   userInstructions: string,
 ): string {
-  const parts = [`## Hearing Information\n${hearingInfo}`];
-  if (knowledgeRules) {
-    parts.push(`## Evidence Packet Rules (from Practice Knowledge)\n${knowledgeRules}`);
-  }
-  parts.push(`## Available Documents\n${folderDetails}`);
-  if (userInstructions) {
-    parts.push(`## User Instructions\n${userInstructions}`);
-  }
-  parts.push("Select and order the documents for this evidence packet.");
-  return parts.join("\n\n");
+  return `Packet workflows are deprecated. Use create_document_view or generate_document instead.
+
+Hearing info (ignored): ${hearingInfo}
+Knowledge rules (ignored): ${knowledgeRules}
+Available documents (ignored): ${folderDetails}
+User instructions (ignored): ${userInstructions}`;
 }
 
 // ============================================================================
@@ -364,23 +331,29 @@ export function buildPacketSelectorUserPrompt(
 // ============================================================================
 
 const DOC_TYPE_RESEARCH_QUESTIONS: Record<string, string> = {
-  demand_letter:
-    "Compile all facts needed to draft a demand letter: injuries and diagnoses, treatment timeline, medical charges and balances, liability facts, insurance coverage details (first-party, third-party, policy limits), client demographics, and any settlement demands or offers.",
-  case_memo:
-    "Compile a comprehensive case overview: client information, accident details, injuries and treatment, medical providers and charges, insurance information, case phase and status, outstanding issues, and key evidence.",
-  settlement:
-    "Compile all financial data for settlement calculation: medical charges by provider, outstanding balances, liens, insurance payments, attorney fee percentage, case costs, and any prior settlement offers.",
-  general_letter:
-    "Compile relevant case facts, party information, and key dates needed to draft correspondence related to this case.",
-  decision_order:
-    "Compile all facts for a workers' compensation decision: hearing details, issues in dispute, witness testimony, exhibits, medical evidence, applicable statutes, and findings of fact.",
+  financial_summary:
+    "Compile all financial inputs needed for a summary: income, expenses, balances, obligations, totals, assumptions, and outstanding unknowns.",
+  estate_checklist:
+    "Compile all estate-planning details: available documents, missing documents, responsible parties, and next actions.",
+  medical_summary:
+    "Compile medical facts: provider timeline, diagnoses, treatment details, medications, and follow-up needs.",
+  care_plan:
+    "Compile care-planning details: goals, support needs, tasks, owners, and target dates.",
+  correspondence:
+    "Compile contact facts, timeline context, and key requests needed to draft correspondence.",
+  meeting_minutes:
+    "Compile meeting context: attendees, decisions, open questions, and action items.",
+  action_plan:
+    "Compile tasks, priorities, owners, due dates, dependencies, and risks.",
+  custom_document:
+    "Compile the key facts, structure needs, and constraints required for the requested custom document.",
 };
 
 export function getDocResearchQuestion(
   docType: string,
   userInstructions: string,
 ): string {
-  const base = DOC_TYPE_RESEARCH_QUESTIONS[docType] || DOC_TYPE_RESEARCH_QUESTIONS.case_memo;
+  const base = DOC_TYPE_RESEARCH_QUESTIONS[docType] || DOC_TYPE_RESEARCH_QUESTIONS.action_plan;
   return userInstructions
     ? `${base}\n\nAdditional focus: ${userInstructions}`
     : base;
@@ -395,8 +368,8 @@ export function buildDensityComposePrompt(
   knowledge: string,
   firmContext: string,
 ): string {
-  return `You are composing a formal legal document for a personal injury case.
-Draft a complete, filing-ready ${getDocTypeLabel(docType)} from the provided research and template.
+  return `You are composing a formal support document.
+Draft a complete ${getDocTypeLabel(docType)} from the provided research and template.
 
 ${firmContext}
 
@@ -410,7 +383,7 @@ Drafting rules:
 - Follow template structure where provided.
 - Ground factual statements in the supplied research evidence.
 - For missing required facts, insert [VERIFY: ...] placeholders.
-- Produce a complete filing-ready draft in one response.
+- Produce a complete draft in one response.
 - Output markdown only (no code fences, no JSON).`;
 }
 
@@ -440,35 +413,46 @@ export function buildDensityComposeUserPrompt(
 
 function getDocTypeLabel(docType: string): string {
   const labels: Record<string, string> = {
-    demand_letter: "demand letter",
-    case_memo: "case memorandum",
-    settlement: "settlement calculation",
-    general_letter: "letter",
-    decision_order: "workers' compensation Decision and Order",
+    financial_summary: "financial summary",
+    estate_checklist: "estate checklist",
+    medical_summary: "medical summary",
+    care_plan: "care plan",
+    correspondence: "correspondence document",
+    meeting_minutes: "meeting minutes",
+    action_plan: "action plan",
+    custom_document: "custom document",
   };
   return labels[docType] || "document";
 }
 
 function getDocTypeInstructions(docType: string): string {
   const instructions: Record<string, string> = {
-    demand_letter: `- Include all elements of a PI demand letter: liability, injuries, treatment, damages, demand amount.
-- Present medical charges in a clear table format.
-- Cite specific evidence for each claim.
-- End with a clear demand amount and deadline.`,
-    case_memo: `- Organize into standard sections: Case Overview, Liability, Injuries & Treatment, Damages, Insurance, Assessment.
-- Be thorough but concise.
-- Flag open questions and next steps.`,
-    settlement: `- Present a clear disbursement breakdown.
-- Include: gross settlement, attorney fees, costs, liens, net to client.
-- Show all calculations transparently.`,
-    general_letter: `- Professional tone appropriate for legal correspondence.
-- Clear purpose stated in opening paragraph.
-- Include relevant case reference numbers.`,
-    decision_order: `- Follow WC Decision & Order format.
-- Include: Appearances, Issues, Findings of Fact, Conclusions of Law, Order.
-- Cite applicable statutes and case law.`,
+    financial_summary: `- Present totals and assumptions clearly.
+- Show calculations transparently.
+- Flag unknown values with [VERIFY: ...].`,
+    estate_checklist: `- Use checklist formatting with status/owner fields.
+- Separate complete, in-progress, and missing items.
+- Include concrete next steps.`,
+    medical_summary: `- Organize by timeline and provider.
+- Include diagnosis/treatment summaries.
+- Highlight pending follow-ups.`,
+    care_plan: `- Include goals, tasks, owners, and due dates.
+- Keep action language concise.
+- Note dependencies and risks.`,
+    correspondence: `- Use professional, clear communication style.
+- State purpose and requested action early.
+- Include relevant references and dates.`,
+    meeting_minutes: `- Capture attendees, discussion outcomes, and decisions.
+- Include explicit action items.
+- Keep bullets concise and chronological.`,
+    action_plan: `- Prioritize tasks and identify owners.
+- Include due dates and dependencies.
+- Summarize risks and blockers.`,
+    custom_document: `- Follow user instructions and template structure.
+- Use explicit headings and [VERIFY: ...] for missing details.
+- Keep content actionable.`,
   };
-  return instructions[docType] || "Follow standard legal document format.";
+  return instructions[docType] || "Follow a clear, structured document format.";
 }
 
 // ============================================================================

@@ -347,7 +347,7 @@ export default function FirmChat({ apiUrl, firmRoot, scope, onTodosUpdated, init
           <div className="flex items-center gap-2 text-sm">
             {chatHistory.length > 0 ? (
               <span className="inline-flex items-center gap-1.5 text-brand-500">
-                <span className="w-2 h-2 bg-emerald-400 rounded-full"></span>
+                <span className="w-2 h-2 bg-accent-400 rounded-full"></span>
                 {chatHistory.length / 2} exchanges
               </span>
             ) : (

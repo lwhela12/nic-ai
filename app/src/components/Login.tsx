@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import nicLogo from '../assets/nic_logo.png'
 
 interface LoginProps {
   apiUrl: string
@@ -8,10 +9,8 @@ interface LoginProps {
 }
 
 // Icon components
-const ScaleIcon = () => (
-  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v17.25m0 0c-1.472 0-2.882.265-4.185.75M12 20.25c1.472 0 2.882.265 4.185.75M18.75 4.97A48.416 48.416 0 0012 4.5c-2.291 0-4.545.16-6.75.47m13.5 0c1.01.143 2.01.317 3 .52m-3-.52l2.62 10.726c.122.499-.106 1.028-.589 1.202a5.988 5.988 0 01-2.031.352 5.988 5.988 0 01-2.031-.352c-.483-.174-.711-.703-.59-1.202L18.75 4.971zm-16.5.52c.99-.203 1.99-.377 3-.52m0 0l2.62 10.726c.122.499-.106 1.028-.589 1.202a5.989 5.989 0 01-2.031.352 5.989 5.989 0 01-2.031-.352c-.483-.174-.711-.703-.59-1.202L5.25 4.971z" />
-  </svg>
+const LeafIcon = () => (
+  <img src={nicLogo} alt="NIC Logo" className="w-8 h-8 object-contain" />
 )
 
 const SpinnerIcon = () => (
@@ -33,8 +32,8 @@ export default function Login({ apiUrl, onLoginSuccess, initialError, firmRoot }
     if (typeof raw !== 'string' || !raw.trim()) return 'Authentication failed. Please try again.'
     const code = raw.trim().toLowerCase()
     const map: Record<string, string> = {
-      firm_not_bootstrapped: 'This firm is not initialized yet. Sign in with the first approved attorney account to bootstrap it.',
-      invite_required: 'Your email does not have an active invite for this firm. Ask an attorney or lead to invite you in Team settings.',
+      firm_not_bootstrapped: 'This workspace is not initialized yet. Sign in with the first approved owner account to bootstrap it.',
+      invite_required: 'Your email does not have an active invite for this workspace. Ask an owner or admin to invite you in Team settings.',
       license_limit_reached: 'This firm has reached its license limit. Ask your firm admin to increase available seats.',
       owner_subscription_inactive: 'Your firm owner account is inactive. Ask the owner to re-validate billing access.',
       authentication_required: 'Please sign in to continue.',
@@ -103,31 +102,29 @@ export default function Login({ apiUrl, onLoginSuccess, initialError, firmRoot }
         {/* Logo/Brand */}
         <div className="flex items-center gap-3 mb-2">
           <div className="w-10 h-10 rounded-xl bg-brand-900 flex items-center justify-center text-white">
-            <ScaleIcon />
+            <LeafIcon />
           </div>
-          <h1 className="font-serif text-3xl text-brand-900">Jason AI</h1>
+          <h1 className="font-serif text-3xl text-brand-900">Nic</h1>
         </div>
-        <p className="text-brand-500 mb-8">Personal Injury Case Management</p>
+        <p className="text-brand-500 mb-8">Personal Assistant</p>
 
         {/* Tab selector */}
         <div className="flex border-b border-surface-200 mb-6">
           <button
             onClick={() => { setMode('login'); setError('') }}
-            className={`flex-1 py-3 text-sm font-medium border-b-2 transition-colors ${
-              mode === 'login'
+            className={`flex-1 py-3 text-sm font-medium border-b-2 transition-colors ${mode === 'login'
                 ? 'border-accent-500 text-accent-600'
                 : 'border-transparent text-brand-400 hover:text-brand-600'
-            }`}
+              }`}
           >
             Sign In
           </button>
           <button
             onClick={() => { setMode('signup'); setError('') }}
-            className={`flex-1 py-3 text-sm font-medium border-b-2 transition-colors ${
-              mode === 'signup'
+            className={`flex-1 py-3 text-sm font-medium border-b-2 transition-colors ${mode === 'signup'
                 ? 'border-accent-500 text-accent-600'
                 : 'border-transparent text-brand-400 hover:text-brand-600'
-            }`}
+              }`}
           >
             Create Account
           </button>
@@ -151,7 +148,7 @@ export default function Login({ apiUrl, onLoginSuccess, initialError, firmRoot }
               onChange={(e) => setEmail(e.target.value)}
               className="w-full px-4 py-3 border border-surface-300 rounded-lg focus:outline-none
                          focus:ring-2 focus:ring-accent-500 focus:border-transparent"
-              placeholder="you@lawfirm.com"
+              placeholder="you@example.com"
               autoComplete="email"
             />
           </div>

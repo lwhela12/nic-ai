@@ -34,7 +34,7 @@ export default function KnowledgeTab({ firmRoot, apiUrl }: Props) {
           }`}
         >
           <BookOpenIcon />
-          Practice Knowledge
+          Knowledge Base
         </button>
         <button
           onClick={() => setActiveSubTab('templates')}
@@ -57,9 +57,9 @@ export default function KnowledgeTab({ firmRoot, apiUrl }: Props) {
               <div className="w-16 h-16 rounded-full bg-surface-100 flex items-center justify-center mx-auto mb-4 text-brand-400">
                 <BookOpenIcon />
               </div>
-              <p className="text-lg font-medium text-brand-700">Practice Knowledge</p>
+              <p className="text-lg font-medium text-brand-700">Knowledge Base</p>
               <p className="text-sm text-brand-400 mt-1 max-w-sm mx-auto">
-                Manage your firm's practice knowledge and procedures in the Knowledge tab of the firm dashboard.
+                Manage notes, references, and reusable guidance for personal, family, and business workflows.
               </p>
             </div>
           </div>

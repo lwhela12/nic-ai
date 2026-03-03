@@ -44,10 +44,13 @@ import files from "./routes/files";
 import docs from "./routes/docs";
 import firm from "./routes/firm";
 import knowledge from "./routes/knowledge";
-import auth from "./routes/auth";
+import auth, { initVfs } from "./routes/auth";
 import team from "./routes/team";
 import notes from "./routes/notes";
 import { authMiddleware } from "./middleware/auth";
+
+// Initialize VFS based on stored config (Google Drive vs Local)
+initVfs();
 
 // Reuse the dirname from env loading
 const __filename = __envFilename;

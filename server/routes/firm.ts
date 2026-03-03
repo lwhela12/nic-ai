@@ -5,10 +5,11 @@ import Anthropic from "@anthropic-ai/sdk";
 
 // SDK CLI options helper - handles both direct and npx modes
 import { getSDKCliOptions } from "../lib/sdk-cli-options";
-import { readdir, readFile, stat, writeFile, mkdir } from "fs/promises";
+
 import { readFileSync, existsSync } from "fs";
 import { join, relative, dirname } from "path";
 import { migratePiTool } from "../lib/migrate-pi-tool";
+import { getVfs, FileStats } from "../lib/vfs";
 import {
   detectYearBasedMode,
   loadClientRegistry,
@@ -27,6 +28,7 @@ import { getFirmSession, saveFirmSession } from "../sessions";
 import { PHASE_RULES, getPhaseRules } from "../shared/phase-rules";
 import { loadPracticeGuide, loadSectionsByIds, clearKnowledgeCache } from "./knowledge";
 import { extractTextFromFile, isImageFile } from "../lib/extract";
+import { getPdfPageCount } from "../lib/pdftoppm";
 import { generateCaseSummary } from "../lib/case-summary";
 import { mergeToIndex, diffIndexes, type HypergraphResult, type IndexDiff } from "../lib/merge-index";
 import {
@@ -35,7 +37,12 @@ import {
   extractImageFileWithVision,
   generateHypergraphWithGptOss,
   generateHypergraphConflictReviewWithGptOss,
+  extractTextPerPage,
+  extractVisionPerPage,
+  mergeExtractions,
+  type PageExtractionResult,
 } from "../lib/groq-extract";
+import { groupPagesIntoVirtualDocuments } from "../lib/virtual-documents";
 import { directFirmChat, type FirmChatScope } from "../lib/firm-chat";
 import { writeIndexDerivedFiles } from "../lib/meta-index";
 import {
@@ -49,6 +56,7 @@ import { normalizePracticeArea, resolveFirmPracticeArea } from "../lib/practice-
 import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
 import { formatDateYYYYMMDD, parseFlexibleDate } from "../lib/date-format";
 import { buildDocumentId } from "../lib/document-id";
+import { loadFirmTodos, saveFirmTodosWithMemory } from "../lib/task-store";
 
 // ============================================================================
 // Usage Reporting
@@ -136,7 +144,8 @@ async function loadIndexSchema(): Promise<string> {
   if (indexSchemaCache) return indexSchemaCache;
   const schemaPath = join(import.meta.dir, "../../INDEX_SCHEMA.md");
   try {
-    indexSchemaCache = await readFile(schemaPath, "utf-8");
+    const vfsSchema = getVfs();
+    indexSchemaCache = await vfsSchema.readFile(schemaPath, "utf-8");
   } catch {
     console.warn("[Schema] Could not load INDEX_SCHEMA.md, using fallback");
     indexSchemaCache = "";
@@ -565,7 +574,8 @@ async function buildCaseSummary(
     yearRegistry?: { firmRoot: string; registry: ClientRegistry; slug: string };
   }
 ): Promise<CaseSummary> {
-  const indexPath = join(casePath, ".ai_tool", "document_index.json");
+  const vfs = getVfs();
+  const indexPath = casePath.replace(/\/$/, '') + "/.ai_tool/document_index.json";
   const configuredPracticeArea = normalizePracticeArea(options?.practiceArea);
 
   const caseSummary: CaseSummary = {
@@ -579,12 +589,12 @@ async function buildCaseSummary(
   };
 
   try {
-    const indexContent = await readFile(indexPath, "utf-8");
+    const indexContent = await vfs.readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
-    const indexStats = await stat(indexPath);
+    const indexStats = await vfs.stat(indexPath);
 
     caseSummary.indexed = true;
-    caseSummary.indexedAt = indexStats.mtime.toISOString();
+    caseSummary.indexedAt = new Date(indexStats.mtimeMs).toISOString();
 
     // Extract from index - handle various formats
     caseSummary.clientName = index.summary?.client || index.client_name || index.summary?.client_name || index.case_name?.split(" v.")[0] || caseName;
@@ -683,11 +693,15 @@ async function buildCaseSummary(
     } else {
       let count = 0;
       async function countFiles(dir: string) {
-        let entries: Awaited<ReturnType<typeof readdir>>;
-        try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+        let entries: any[];
+        try {
+          const vfsLocal = getVfs();
+          entries = await vfsLocal.readdir(dir, { withFileTypes: true });
+        } catch { return; }
         for (const e of entries) {
           if (e.name === '.ai_tool' || e.name.startsWith('.')) continue;
-          if (e.isDirectory()) await countFiles(join(dir, e.name));
+          const isDir = typeof e.isDirectory === 'function' ? e.isDirectory() : e.isDirectory;
+          if (isDir) await countFiles(join(dir, e.name));
           else count++;
         }
       }
@@ -839,12 +853,16 @@ app.get("/cases", async (c) => {
       });
     }
 
-    const entries = await readdir(root, { withFileTypes: true });
+    const vfs = getVfs();
+    const entries = await vfs.readdir(root, { withFileTypes: true });
 
     // Process all case directories in parallel for speed
     const casePromises = entries
-      .filter(entry => entry.isDirectory() && entry.name !== ".ai_tool" && entry.name !== ".ai_tool")
-      .map(async (entry) => {
+      .filter((entry: any) => {
+        const isDir = typeof entry.isDirectory === 'function' ? entry.isDirectory() : entry.isDirectory;
+        return isDir && entry.name !== ".ai_tool" && entry.name !== ".ai_tool";
+      })
+      .map(async (entry: any) => {
         const casePath = join(root, entry.name);
         const results: CaseSummary[] = [];
 
@@ -885,8 +903,8 @@ app.get("/cases", async (c) => {
 
     // Sort cases with special handling for containers and DOI cases
     // Containers and their DOI cases should stay together
-    const topLevelCases = cases.filter(c => !c.isSubcase && !c.containerPath);
-    topLevelCases.sort((a, b) => {
+    const topLevelCases = cases.filter((c: any) => !c.isSubcase && !c.containerPath);
+    topLevelCases.sort((a: any, b: any) => {
       // Containers and indexed cases before unindexed regular cases
       if (a.isContainer !== b.isContainer) return a.isContainer ? -1 : 1;
       if (!a.isContainer && !b.isContainer) {
@@ -916,26 +934,26 @@ app.get("/cases", async (c) => {
         sortedCases.push(...doiCases);
       } else {
         // Add subcases for this parent (regular linked cases)
-        const subcases = cases.filter(c => c.isSubcase && c.parentPath === parent.path);
-        subcases.sort((a, b) => a.name.localeCompare(b.name));
+        const subcases = cases.filter((c: any) => c.isSubcase && c.parentPath === parent.path);
+        subcases.sort((a: any, b: any) => a.name.localeCompare(b.name));
         sortedCases.push(...subcases);
       }
     }
 
     // Count indexed cases (DOI cases count, containers don't)
-    const indexedCount = sortedCases.filter(c => c.indexed && !c.isContainer).length;
+    const indexedCount = sortedCases.filter((c: any) => c.indexed && !c.isContainer).length;
 
     // For WC, count open hearings instead of SOL urgency
     const needsAttentionCount = isWC
-      ? sortedCases.filter(c => c.openHearings && c.openHearings.length > 0).length
-      : sortedCases.filter(c => c.solDaysRemaining !== undefined && c.solDaysRemaining <= 90).length;
+      ? sortedCases.filter((c: any) => c.openHearings && c.openHearings.length > 0).length
+      : sortedCases.filter((c: any) => c.solDaysRemaining !== undefined && c.solDaysRemaining <= 90).length;
 
     return c.json({
       root,
       practiceArea,
       cases: sortedCases,
       summary: {
-        total: sortedCases.filter(c => !c.isContainer).length, // Don't count containers
+        total: sortedCases.filter((c: any) => !c.isContainer).length, // Don't count containers
         indexed: indexedCount,
         needsAttention: needsAttentionCount,
       }
@@ -967,12 +985,12 @@ app.get("/case-summary", async (c) => {
     let summary: CaseSummary;
 
     if (yearMode) {
-      const slug = getClientSlug(casePath);
+      const slug = getClientSlug(casePath ?? "");
       const registry = await loadClientRegistry(root);
-      if (!registry || !registry.clients[slug]) {
+      if (!registry || !slug || !registry.clients[slug]) {
         return c.json({ error: "Client not found in registry" }, 404);
       }
-      summary = await buildCaseSummary(casePath, registry.clients[slug].name, {
+      summary = await buildCaseSummary(casePath as string, registry.clients[slug].name, {
         practiceArea,
         yearRegistry: { firmRoot: root, registry, slug },
       });
@@ -981,7 +999,7 @@ app.get("/case-summary", async (c) => {
         .filter((y: number | null): y is number => y !== null);
       summary.latestYear = years.length > 0 ? Math.max(...years) : undefined;
     } else {
-      const caseName = casePath.split("/").pop() || casePath;
+      const caseName = (casePath as string).split("/").pop() || (casePath as string);
       summary = await buildCaseSummary(casePath, caseName, { practiceArea });
     }
 
@@ -1523,6 +1541,9 @@ interface FileExtraction {
   extracted_data?: Record<string, any>;
   error?: string;
   usage?: UsageStats;
+  page_count?: number;
+  page_extractions?: import("../lib/groq-extract").PageExtractionResult[];
+  virtual_documents?: import("../lib/virtual-documents").VirtualDocument[];
 }
 
 function normalizeFolders(input: any): Record<string, { files: any[] }> {
@@ -1552,6 +1573,67 @@ function normalizeFolders(input: any): Record<string, { files: any[] }> {
   }
 
   return normalized;
+}
+
+/**
+ * Assess which files need user-provided context.
+ * Deterministic heuristics — flags a file if ANY of:
+ *  - type === "other"
+ *  - key_info is missing, <30 chars, or contains "unknown"/"unclear"/"unidentified"
+ *  - extracted_data is null/empty (no structured data extracted)
+ * Skips files that already have user_context set.
+ */
+function assessNeedsContext(
+  folders: Record<string, { files: any[] }>,
+): Array<{ folder: string; filename: string; type: string; key_info: string; question: string }> {
+  const results: Array<{ folder: string; filename: string; type: string; key_info: string; question: string }> = [];
+  const VAGUE_KEYWORDS = /\b(unknown|unclear|unidentified|unspecified|n\/a|pending)\b/i;
+
+  for (const [folderName, folderData] of Object.entries(folders)) {
+    if (!folderData?.files) continue;
+    for (const file of folderData.files) {
+      // Skip files that already have user context
+      if (file.user_context) continue;
+
+      const reasons: string[] = [];
+      const keyInfo = typeof file.key_info === "string" ? file.key_info.trim() : "";
+      const fileType = typeof file.type === "string" ? file.type : "other";
+      const hasExtractedData =
+        file.extracted_data &&
+        typeof file.extracted_data === "object" &&
+        Object.keys(file.extracted_data).length > 0;
+
+      if (fileType === "other") {
+        reasons.push("unclassified document type");
+      }
+      if (!keyInfo || keyInfo.length < 30) {
+        reasons.push("very little information was extracted");
+      } else if (VAGUE_KEYWORDS.test(keyInfo)) {
+        reasons.push("key information is vague or uncertain");
+      }
+      if (!hasExtractedData) {
+        reasons.push("no structured data could be extracted");
+      }
+
+      if (reasons.length === 0) continue;
+
+      // Build a human-readable question
+      const reasonText = reasons.join("; ");
+      const question =
+        `This file (${fileType}) in "${folderName}" could not be fully classified: ${reasonText}. ` +
+        `What is this document and how does it relate to the case?`;
+
+      results.push({
+        folder: folderName,
+        filename: file.filename,
+        type: fileType,
+        key_info: keyInfo,
+        question,
+      });
+    }
+  }
+
+  return results;
 }
 
 function normalizeDateToIso(value: unknown): string | null {
@@ -1732,8 +1814,9 @@ async function classifyFile(
 
   let fileSizeMB = 0;
   try {
-    const fileStats = await stat(fullPath);
-    fileSizeMB = fileStats.size / (1024 * 1024);
+    const vfs = getVfs();
+    const fileStats = await vfs.stat(fullPath);
+    fileSizeMB = (fileStats.size || 0) / (1024 * 1024);
   } catch {
     // File not found — will be caught during extraction
     return {
@@ -1779,7 +1862,7 @@ async function extractFileText(
   fileIndex: number,
   totalFiles: number,
   practiceArea?: string,
-  onProgress?: (event: { type: string; [key: string]: any }) => void,
+  onProgress?: (event: { type: string;[key: string]: any }) => void,
 ): Promise<FileExtraction> {
   const { filename, folder, fullPath, extractedText } = classified;
   const startTime = Date.now();
@@ -1804,31 +1887,83 @@ async function extractFileText(
     model: 'groq'
   };
 
+  // Determine page count for PDFs to decide per-page vs whole-file extraction
+  let pageCount = 1;
+  if (classified.isPdf) {
+    try {
+      pageCount = await getPdfPageCount(fullPath);
+    } catch {
+      pageCount = 1;
+    }
+  }
+
   try {
-    const groqResult = await extractWithGptOss(
-      extractedText,
-      filename,
-      folder,
-      getFileExtractionSystemPrompt(practiceArea)
-    );
+    if (classified.isPdf && pageCount > 1) {
+      // Per-page extraction for multi-page PDFs
+      console.log(`[${fileIndex + 1}/${totalFiles}] Per-page text extraction: ${filename} (${pageCount} pages)`);
+      const perPageResult = await extractTextPerPage(
+        fullPath,
+        filename,
+        folder,
+        getFileExtractionSystemPrompt(practiceArea)
+      );
 
-    const handwrittenFields = normalizeHandwrittenFields(groqResult.result.handwritten_fields);
-    const hasHandwrittenData = handwrittenFields.length > 0;
+      // Merge per-page results for top-level backward-compatible fields
+      const merged = mergeExtractions(perPageResult.results, filename);
+      const handwrittenFields = normalizeHandwrittenFields(merged.handwritten_fields);
+      const hasHandwrittenData = handwrittenFields.length > 0;
 
-    result = {
-      filename,
-      folder,
-      type: groqResult.result.type || 'other',
-      key_info: groqResult.result.key_info || '',
-      has_handwritten_data: hasHandwrittenData,
-      handwritten_fields: hasHandwrittenData ? handwrittenFields : [],
-      extracted_data: groqResult.result.extracted_data,
-    };
+      result = {
+        filename,
+        folder,
+        type: merged.type || 'other',
+        key_info: merged.key_info || '',
+        has_handwritten_data: hasHandwrittenData,
+        handwritten_fields: hasHandwrittenData ? handwrittenFields : [],
+        extracted_data: merged.extracted_data as Record<string, any>,
+        page_count: pageCount,
+        page_extractions: perPageResult.results,
+      };
 
-    usage.inputTokens = groqResult.usage.inputTokens;
-    usage.inputTokensNew = groqResult.usage.inputTokens;
-    usage.outputTokens = groqResult.usage.outputTokens;
-    usage.apiCalls = 1;
+      // Group into virtual documents
+      const docId = buildDocumentId(folder, filename);
+      const vdocs = groupPagesIntoVirtualDocuments(perPageResult.results, filename, docId);
+      if (vdocs.length > 0) {
+        result.virtual_documents = vdocs;
+        console.log(`[${fileIndex + 1}/${totalFiles}] Found ${vdocs.length} virtual documents in ${filename}`);
+      }
+
+      usage.inputTokens = perPageResult.usage.inputTokens;
+      usage.inputTokensNew = perPageResult.usage.inputTokens;
+      usage.outputTokens = perPageResult.usage.outputTokens;
+      usage.apiCalls = pageCount;
+    } else {
+      // Single extraction for single-page PDFs and non-PDF files
+      const groqResult = await extractWithGptOss(
+        extractedText,
+        filename,
+        folder,
+        getFileExtractionSystemPrompt(practiceArea)
+      );
+
+      const handwrittenFields = normalizeHandwrittenFields(groqResult.result.handwritten_fields);
+      const hasHandwrittenData = handwrittenFields.length > 0;
+
+      result = {
+        filename,
+        folder,
+        type: groqResult.result.type || 'other',
+        key_info: groqResult.result.key_info || '',
+        has_handwritten_data: hasHandwrittenData,
+        handwritten_fields: hasHandwrittenData ? handwrittenFields : [],
+        extracted_data: groqResult.result.extracted_data,
+      };
+
+      usage.inputTokens = groqResult.usage.inputTokens;
+      usage.inputTokensNew = groqResult.usage.inputTokens;
+      usage.outputTokens = groqResult.usage.outputTokens;
+      usage.apiCalls = 1;
+    }
   } catch (apiErr) {
     console.error(`[${fileIndex + 1}/${totalFiles}] GPT-OSS error for ${filename}:`, apiErr);
     result.key_info = `Extraction failed: ${apiErr instanceof Error ? apiErr.message : String(apiErr)}`;
@@ -1860,7 +1995,7 @@ async function extractFileVision(
   fileIndex: number,
   totalFiles: number,
   practiceArea?: string,
-  onProgress?: (event: { type: string; [key: string]: any }) => void,
+  onProgress?: (event: { type: string;[key: string]: any }) => void,
 ): Promise<FileExtraction> {
   const { filename, folder, fullPath, isPdf, isImage } = classified;
   const startTime = Date.now();
@@ -1889,7 +2024,8 @@ async function extractFileVision(
 
   // Pre-flight: check file exists
   try {
-    await stat(fullPath);
+    const vfs = getVfs();
+    await vfs.stat(fullPath);
   } catch {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.error(`[${fileIndex + 1}/${totalFiles}] ✗ File not found: ${filename} (${elapsed}s)`);
@@ -1926,15 +2062,67 @@ async function extractFileVision(
     return result;
   }
 
+  // Determine page count for per-page vision extraction
+  let pageCount = 1;
+  if (isPdf) {
+    try {
+      pageCount = await getPdfPageCount(fullPath);
+    } catch {
+      pageCount = 1;
+    }
+  }
+
   try {
-    const groqResult = isImage
-      ? await extractImageFileWithVision(
+    if (isPdf && pageCount > 1) {
+      // Per-page vision extraction for multi-page PDFs
+      console.log(`[${fileIndex + 1}/${totalFiles}] Per-page vision extraction: ${filename} (${pageCount} pages)`);
+      const perPageResult = await extractVisionPerPage(
+        fullPath,
+        filename,
+        folder,
+        classified.fileSizeMB,
+        getFileExtractionSystemPrompt(practiceArea)
+      );
+
+      // Merge per-page results for top-level backward-compatible fields
+      const merged = mergeExtractions(perPageResult.results, filename);
+      const handwrittenFields = normalizeHandwrittenFields(merged.handwritten_fields);
+      const hasHandwrittenData = handwrittenFields.length > 0;
+
+      result = {
+        filename,
+        folder,
+        type: merged.type || 'other',
+        key_info: merged.key_info || '',
+        has_handwritten_data: hasHandwrittenData,
+        handwritten_fields: hasHandwrittenData ? handwrittenFields : [],
+        extracted_data: merged.extracted_data as Record<string, any>,
+        page_count: pageCount,
+        page_extractions: perPageResult.results,
+      };
+
+      // Group into virtual documents
+      const docId = buildDocumentId(folder, filename);
+      const vdocs = groupPagesIntoVirtualDocuments(perPageResult.results, filename, docId);
+      if (vdocs.length > 0) {
+        result.virtual_documents = vdocs;
+        console.log(`[${fileIndex + 1}/${totalFiles}] Found ${vdocs.length} virtual documents in ${filename}`);
+      }
+
+      usage.inputTokens = perPageResult.usage.inputTokens;
+      usage.inputTokensNew = perPageResult.usage.inputTokens;
+      usage.outputTokens = perPageResult.usage.outputTokens;
+      usage.apiCalls = pageCount;
+    } else {
+      // Single extraction for single-page PDFs, images, and non-PDF files
+      const groqResult = isImage
+        ? await extractImageFileWithVision(
           fullPath,
           filename,
           folder,
           getFileExtractionSystemPrompt(practiceArea)
         )
-      : await extractWithVision(
+        : await extractWithVision(
           fullPath,
           filename,
           folder,
@@ -1942,23 +2130,24 @@ async function extractFileVision(
           getFileExtractionSystemPrompt(practiceArea)
         );
 
-    const handwrittenFields = normalizeHandwrittenFields(groqResult.result.handwritten_fields);
-    const hasHandwrittenData = handwrittenFields.length > 0;
+      const handwrittenFields = normalizeHandwrittenFields(groqResult.result.handwritten_fields);
+      const hasHandwrittenData = handwrittenFields.length > 0;
 
-    result = {
-      filename,
-      folder,
-      type: groqResult.result.type || 'other',
-      key_info: groqResult.result.key_info || '',
-      has_handwritten_data: hasHandwrittenData,
-      handwritten_fields: hasHandwrittenData ? handwrittenFields : [],
-      extracted_data: groqResult.result.extracted_data,
-    };
+      result = {
+        filename,
+        folder,
+        type: groqResult.result.type || 'other',
+        key_info: groqResult.result.key_info || '',
+        has_handwritten_data: hasHandwrittenData,
+        handwritten_fields: hasHandwrittenData ? handwrittenFields : [],
+        extracted_data: groqResult.result.extracted_data,
+      };
 
-    usage.inputTokens = groqResult.usage.inputTokens;
-    usage.inputTokensNew = groqResult.usage.inputTokens;
-    usage.outputTokens = groqResult.usage.outputTokens;
-    usage.apiCalls = 1;
+      usage.inputTokens = groqResult.usage.inputTokens;
+      usage.inputTokensNew = groqResult.usage.inputTokens;
+      usage.outputTokens = groqResult.usage.outputTokens;
+      usage.apiCalls = 1;
+    }
   } catch (visionErr) {
     console.error(`[${fileIndex + 1}/${totalFiles}] Vision error for ${filename}:`, visionErr);
     result.key_info = `Extraction failed: ${visionErr instanceof Error ? visionErr.message : String(visionErr)}`;
@@ -2009,9 +2198,10 @@ async function synthesizeCaseSummary(
 
   try {
     // Step 1: Pre-read both JSON files server-side
+    const localVfs = getVfs();
     const [documentIndexContent, hypergraphContent] = await Promise.all([
-      readFile(indexPath, 'utf-8'),
-      readFile(hypergraphPath, 'utf-8')
+      localVfs.readFile(indexPath, 'utf-8'),
+      localVfs.readFile(hypergraphPath, 'utf-8')
     ]);
 
     console.log(`[Sonnet] Read index (${documentIndexContent.length} chars) and hypergraph (${hypergraphContent.length} chars)`);
@@ -2132,7 +2322,8 @@ Analyze the case and use the case_synthesis tool to return your synthesis.`
       }
     }
 
-    await writeFile(indexPath, JSON.stringify(merged, null, 2));
+    const localVfsFileWrite = getVfs();
+    await localVfsFileWrite.writeFile(indexPath, JSON.stringify(merged, null, 2));
     await writeIndexDerivedFiles(caseFolder, merged);
     console.log(`[Sonnet] Wrote merged index to ${indexPath}`);
 
@@ -2165,9 +2356,10 @@ async function listCaseFiles(
       const files: string[] = [];
 
       async function walkSourceDir(dir: string, base: string = '') {
-        let entries: Awaited<ReturnType<typeof readdir>>;
+        let entries: any[];
         try {
-          entries = await readdir(dir, { withFileTypes: true });
+          const vfs = getVfs();
+          entries = await vfs.readdir(dir, { withFileTypes: true });
         } catch (err) {
           console.error(`[listCaseFiles] readdir failed for ${dir}:`, err);
           return;
@@ -2179,6 +2371,7 @@ async function listCaseFiles(
           if (entry.isDirectory()) {
             await walkSourceDir(fullPath, relativePath);
           } else {
+            const isDir = typeof entry.isDirectory === 'function' ? entry.isDirectory() : entry.isDirectory;
             files.push(`${yearPrefix}/${relativePath}`);
           }
         }
@@ -2196,7 +2389,8 @@ async function listCaseFiles(
   const files: string[] = [];
 
   async function walkDir(dir: string, base: string = '') {
-    const entries = await readdir(dir, { withFileTypes: true });
+    const vfs = getVfs();
+    const entries = await vfs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       // Skip .ai_tool entirely
       if (entry.name === '.ai_tool') continue;
@@ -2204,7 +2398,8 @@ async function listCaseFiles(
       const fullPath = join(dir, entry.name);
       const relativePath = base ? `${base}/${entry.name}` : entry.name;
 
-      if (entry.isDirectory()) {
+      const isDir = typeof entry.isDirectory === 'function' ? entry.isDirectory() : entry.isDirectory;
+      if (isDir) {
         await walkDir(fullPath, relativePath);
       } else {
         files.push(relativePath);
@@ -2258,10 +2453,12 @@ async function detectDOISubfolders(folderPath: string): Promise<DOIDetectionResu
   };
 
   try {
-    const entries = await readdir(folderPath, { withFileTypes: true });
+    const vfs = getVfs();
+    const entries = await vfs.readdir(folderPath, { withFileTypes: true });
 
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
+      const isDir = typeof entry.isDirectory === 'function' ? entry.isDirectory() : entry.isDirectory;
+      if (!isDir) continue;
       if (entry.name === '.ai_tool') continue;
 
       const parsed = parseDOIFolderName(entry.name);
@@ -2318,7 +2515,7 @@ async function indexContainer(
   sharedFolders: string[],
   doiCases: Array<{ path: string; name: string; dateOfInjury: string }>,
   practiceArea?: string,
-  onProgress?: (event: { type: string; [key: string]: any }) => void
+  onProgress?: (event: { type: string;[key: string]: any }) => void
 ): Promise<{ success: boolean; containerInfo?: ContainerInfo; error?: string }> {
   const containerName = containerPath.split('/').pop() || containerPath;
   const piToolDir = join(containerPath, '.ai_tool');
@@ -2327,12 +2524,13 @@ async function indexContainer(
   onProgress?.({ type: "status", message: `Indexing container: ${containerName}` });
 
   try {
-    await mkdir(piToolDir, { recursive: true });
+    const vfs = getVfs();
+    await vfs.mkdir(piToolDir, { recursive: true });
 
     // Try to load existing container info
     let existingInfo: ContainerInfo | null = null;
     try {
-      const existing = await readFile(containerInfoPath, 'utf-8');
+      const existing = await vfs.readFile(containerInfoPath, 'utf-8');
       existingInfo = JSON.parse(existing);
     } catch {
       // No existing container info
@@ -2357,7 +2555,7 @@ async function indexContainer(
     };
 
     // Write container info
-    await writeFile(containerInfoPath, JSON.stringify(containerInfo, null, 2));
+    await vfs.writeFile(containerInfoPath, JSON.stringify(containerInfo, null, 2));
     onProgress?.({ type: "status", message: `Container info written: ${containerName}` });
 
     return { success: true, containerInfo };
@@ -2372,17 +2570,21 @@ async function indexContainer(
 async function discoverSubcases(casePath: string): Promise<string[]> {
   const subcases: string[] = [];
   try {
-    const entries = await readdir(casePath, { withFileTypes: true });
+    const vfs = getVfs();
+    const entries = await vfs.readdir(casePath, { withFileTypes: true });
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory) continue;
       if (entry.name === '.ai_tool' || entry.name === '.ai_tool') continue;
       if (!entry.name.startsWith('.')) continue;
 
       // Check if subfolder has any files (not empty)
       const subPath = join(casePath, entry.name);
       try {
-        const subEntries = await readdir(subPath, { withFileTypes: true });
-        const hasFiles = subEntries.some(e => !e.isDirectory() || e.name !== '.ai_tool');
+        const subEntries = await vfs.readdir(subPath, { withFileTypes: true });
+        const hasFiles = subEntries.some((e: any) => {
+          const eIsDir = typeof e.isDirectory === 'function' ? e.isDirectory() : e.isDirectory;
+          return !eIsDir || e.name !== '.ai_tool';
+        });
         if (hasFiles) {
           subcases.push(subPath);
         }
@@ -2426,7 +2628,7 @@ function releaseVisionSlot(): void {
 // Index a single case using file-by-file extraction
 async function indexCase(
   caseFolder: string,
-  onProgress: (event: { type: string; [key: string]: any }) => void,
+  onProgress: (event: { type: string;[key: string]: any }) => void,
   options?: {
     incrementalFiles?: string[];
     firmRoot?: string;
@@ -2451,7 +2653,8 @@ async function indexCase(
   let previousIndexContent: string | null = null;
   let previousIndex: any = null;
   try {
-    previousIndexContent = await readFile(indexPath, 'utf-8');
+    const localVfs = getVfs();
+    previousIndexContent = await localVfs.readFile(indexPath, 'utf-8');
     try {
       previousIndex = JSON.parse(previousIndexContent);
     } catch {
@@ -2516,17 +2719,19 @@ async function indexCase(
     let nextFileIndex = 0;
 
     // Incremental folder building — populated inside workers, no extractions[] array needed
-    const folders: Record<string, { files: Array<{
-      doc_id?: string;
-      filename: string;
-      type: string;
-      key_info: string;
-      date?: string;
-      issues?: string;
-      has_handwritten_data: boolean;
-      handwritten_fields: string[];
-      extracted_data?: Record<string, any>;
-    }> }> =
+    const folders: Record<string, {
+      files: Array<{
+        doc_id?: string;
+        filename: string;
+        type: string;
+        key_info: string;
+        date?: string;
+        issues?: string;
+        has_handwritten_data: boolean;
+        handwritten_fields: string[];
+        extracted_data?: Record<string, any>;
+      }>
+    }> =
       isIncremental && existingIndex?.folders ? normalizeFolders(existingIndex.folders) : {};
     const runIssues: string[] = [];
     const failedFiles: Array<{ filename: string; folder: string; error: string | undefined; failed_at: string }> = [];
@@ -2558,26 +2763,26 @@ async function indexCase(
           isVision = !classified.useText;
           extraction = classified.useText
             ? await extractFileText(
-                classified,
-                fileIndex,
-                totalFiles,
-                options?.practiceArea,
-                (event) => { onProgress({ ...event, caseName }); }
-              )
+              classified,
+              fileIndex,
+              totalFiles,
+              options?.practiceArea,
+              (event) => { onProgress({ ...event, caseName }); }
+            )
             : await (async () => {
-                await acquireVisionSlot();
-                try {
-                  return await extractFileVision(
-                    classified!,
-                    fileIndex,
-                    totalFiles,
-                    options?.practiceArea,
-                    (event) => { onProgress({ ...event, caseName }); }
-                  );
-                } finally {
-                  releaseVisionSlot();
-                }
-              })();
+              await acquireVisionSlot();
+              try {
+                return await extractFileVision(
+                  classified!,
+                  fileIndex,
+                  totalFiles,
+                  options?.practiceArea,
+                  (event) => { onProgress({ ...event, caseName }); }
+                );
+              } finally {
+                releaseVisionSlot();
+              }
+            })();
           classified = null; // Release classified (including extractedText) immediately
         } catch (err) {
           const fallbackFolder = dirname(filePath).replace(/\\/g, '/');
@@ -2624,6 +2829,9 @@ async function indexCase(
           has_handwritten_data: boolean;
           handwritten_fields: string[];
           extracted_data?: Record<string, any>;
+          page_count?: number;
+          page_extractions?: PageExtractionResult[];
+          virtual_documents?: import("../lib/virtual-documents").VirtualDocument[];
         } = {
           doc_id: buildDocumentId(extraction!.folder, extraction!.filename),
           filename: extraction!.filename,
@@ -2633,6 +2841,17 @@ async function indexCase(
           handwritten_fields: [],
           extracted_data: extraction!.extracted_data,
         };
+
+        // Add per-page extraction data if available
+        if (extraction!.page_count && extraction!.page_count > 1) {
+          fileEntry.page_count = extraction!.page_count;
+        }
+        if (extraction!.page_extractions && extraction!.page_extractions.length > 0) {
+          fileEntry.page_extractions = extraction!.page_extractions;
+        }
+        if (extraction!.virtual_documents && extraction!.virtual_documents.length > 0) {
+          fileEntry.virtual_documents = extraction!.virtual_documents;
+        }
 
         const dateResolution = resolveDocumentDate(extraction!);
         const handwritingResolution = resolveHandwritingMetadata(extraction!);
@@ -2710,7 +2929,8 @@ async function indexCase(
     // Folders were built incrementally during extraction above.
 
     // Step 4: Write initial document_index.json (before hypergraph/Sonnet)
-    await mkdir(indexDir, { recursive: true });
+    const localVfsIndex = getVfs();
+    await localVfsIndex.mkdir(indexDir, { recursive: true });
 
     // For incremental mode, preserve existing summary fields that won't be re-reconciled
     const baseSummary = isIncremental && existingIndex?.summary ? existingIndex.summary : {
@@ -2783,7 +3003,8 @@ async function indexCase(
       }
     }
 
-    await writeFile(indexPath, JSON.stringify(initialIndex, null, 2));
+    const localVfsIndexInitial = getVfs();
+    await localVfsIndexInitial.writeFile(indexPath, JSON.stringify(initialIndex, null, 2));
     console.log(`[Index] Wrote initial document_index.json`);
 
     // Step 5: Run hypergraph and case summary generation IN PARALLEL
@@ -2810,7 +3031,8 @@ async function indexCase(
 
     // Save hypergraph to file
     const hypergraphPath = join(indexDir, 'hypergraph_analysis.json');
-    await writeFile(hypergraphPath, JSON.stringify(hypergraphResult, null, 2));
+    const localVfsHypergraph = getVfs();
+    await localVfsHypergraph.writeFile(hypergraphPath, JSON.stringify(hypergraphResult, null, 2));
     console.log(`[Hypergraph] Wrote hypergraph_analysis.json`);
 
     // Add hypergraph usage to Groq totals
@@ -2856,11 +3078,26 @@ async function indexCase(
       console.warn(`[Schema] Validation issues in ${caseName}:`, validation.issues.slice(0, 5));
     }
 
+    // Assess documents that need user context (non-blocking, deterministic heuristics)
+    const newContextFlags = assessNeedsContext(normalizedIndex.folders);
+    if (newContextFlags.length > 0) {
+      // Merge with existing unresolved needs_context, dedup by folder+filename
+      const existing = normalizedIndex.needs_context || [];
+      const existingKeys = new Set(existing.map((nc: any) => `${nc.folder}/${nc.filename}`));
+      const merged = [
+        ...existing,
+        ...newContextFlags.filter(nc => !existingKeys.has(`${nc.folder}/${nc.filename}`)),
+      ];
+      (normalizedIndex as any).needs_context = merged;
+      console.log(`[NeedsContext] Flagged ${newContextFlags.length} new doc(s) needing clarification (${merged.length} total)`);
+    }
+
     // Compute diff between old and new index
     const indexDiff = diffIndexes(previousIndex, normalizedIndex);
 
     // Write final normalized index + all derived files
-    await writeFile(indexPath, JSON.stringify(normalizedIndex, null, 2));
+    const localVfsNormalized = getVfs();
+    await localVfsNormalized.writeFile(indexPath, JSON.stringify(normalizedIndex, null, 2));
     await writeIndexDerivedFiles(caseFolder, normalizedIndex);
     console.log(`[Index] Wrote normalized document_index.json + meta_index.json + per-folder indexes`);
     console.log(`[Diff] ${indexDiff.summary}`);
@@ -2933,14 +3170,15 @@ async function indexCase(
     // Report usage to subscription server (fire-and-forget)
     const totalTokensUsed = usageReport.totalInputTokens + usageReport.totalOutputTokens;
     if (totalTokensUsed > 0) {
-      reportUsage(totalTokensUsed, "indexing").catch(() => {});
+      reportUsage(totalTokensUsed, "indexing").catch(() => { });
     }
 
     // If this is a subcase, update parent's index to include it in related_cases
     if (options?.parentCase) {
       try {
         const parentIndexPath = join(options.parentCase.path, '.ai_tool', 'document_index.json');
-        const parentContent = await readFile(parentIndexPath, 'utf-8');
+        const localVfsParent = getVfs();
+        const parentContent = await localVfsParent.readFile(parentIndexPath, 'utf-8');
         const parentIndex = JSON.parse(parentContent);
 
         // Initialize or update related_cases array
@@ -2960,7 +3198,8 @@ async function indexCase(
         }
 
         parentIndex.related_cases = relatedCases;
-        await writeFile(parentIndexPath, JSON.stringify(parentIndex, null, 2));
+        const localVfsParentWrite = getVfs();
+        await localVfsParentWrite.writeFile(parentIndexPath, JSON.stringify(parentIndex, null, 2));
         await writeIndexDerivedFiles(options.parentCase.path, parentIndex);
         console.log(`[Index] Updated parent index with related_cases`);
       } catch (parentErr) {
@@ -2976,7 +3215,8 @@ async function indexCase(
     const error = err instanceof Error ? err.message : String(err);
     if (previousIndexContent !== null) {
       try {
-        await writeFile(indexPath, previousIndexContent);
+        const localVfsRestore = getVfs();
+        await localVfsRestore.writeFile(indexPath, previousIndexContent);
         try {
           const restored = JSON.parse(previousIndexContent);
           await writeIndexDerivedFiles(caseFolder, restored);
@@ -3101,7 +3341,8 @@ app.post("/batch-index", async (c) => {
             for (const doiCase of doiDetection.doiCases) {
               const doiIndexPath = join(doiCase.path, ".ai_tool", "document_index.json");
               try {
-                await stat(doiIndexPath);
+                const localVfsDoi = getVfs();
+                await localVfsDoi.stat(doiIndexPath);
                 // DOI case already indexed, skip
               } catch {
                 // Not indexed, add to list
@@ -3152,7 +3393,8 @@ app.post("/batch-index", async (c) => {
           const subcaseName = subcasePath.split('/').pop() || subcasePath;
           const subcaseIndexPath = join(subcasePath, ".ai_tool", "document_index.json");
           try {
-            await stat(subcaseIndexPath);
+            const localVfsSubcase = getVfs();
+            await localVfsSubcase.stat(subcaseIndexPath);
             // Subcase already indexed, skip
           } catch {
             // No index, add to list
@@ -3179,7 +3421,8 @@ app.post("/batch-index", async (c) => {
         const virtualPath = join(root, ".ai_tool", "clients", client.slug);
         const indexPath = join(virtualPath, ".ai_tool", "document_index.json");
         try {
-          await stat(indexPath);
+          const localVfsStat = getVfs();
+          await localVfsStat.stat(indexPath);
           // Already indexed, skip
         } catch {
           targetCases.push({
@@ -3190,80 +3433,85 @@ app.post("/batch-index", async (c) => {
         }
       }
     } else {
-    try {
-      const entries = await readdir(root, { withFileTypes: true });
-      for (const entry of entries) {
-        if (!entry.isDirectory() || entry.name === ".ai_tool" || entry.name === ".ai_tool") continue;
+      try {
+        const vfs = getVfs();
+        const entries = await vfs.readdir(root, { withFileTypes: true });
+        for (const entry of entries) {
+          const isDir = typeof entry.isDirectory === 'function' ? entry.isDirectory() : entry.isDirectory;
+          if (!isDir || entry.name === ".ai_tool" || entry.name === ".ai_tool") continue;
 
-        const casePath = join(root, entry.name);
+          const casePath = join(root, entry.name);
 
-        // For WC, check for DOI subfolders first
-        if (isWC) {
-          const doiDetection = await detectDOISubfolders(casePath);
-          if (doiDetection.isContainer) {
-            // This is a container - queue container and all its unindexed DOI cases
-            containersToIndex.push({
-              path: casePath,
-              name: entry.name,
-              doiCases: doiDetection.doiCases,
-              sharedFolders: doiDetection.sharedFolders,
-            });
+          // For WC, check for DOI subfolders first
+          if (isWC) {
+            const doiDetection = await detectDOISubfolders(casePath);
+            if (doiDetection.isContainer) {
+              // This is a container - queue container and all its unindexed DOI cases
+              containersToIndex.push({
+                path: casePath,
+                name: entry.name,
+                doiCases: doiDetection.doiCases,
+                sharedFolders: doiDetection.sharedFolders,
+              });
 
-            for (const doiCase of doiDetection.doiCases) {
-              const doiIndexPath = join(doiCase.path, ".ai_tool", "document_index.json");
-              try {
-                await stat(doiIndexPath);
-                // DOI case already indexed, skip
-              } catch {
-                // Not indexed, add to list
-                const siblings = doiDetection.doiCases.filter(d => d.path !== doiCase.path);
-                targetCases.push({
-                  path: doiCase.path,
-                  name: doiCase.name,
-                  containerInfo: {
-                    path: casePath,
-                    clientName: entry.name,
-                    injuryDate: doiCase.dateOfInjury,
-                    siblingCases: siblings,
-                  },
-                });
+              for (const doiCase of doiDetection.doiCases) {
+                const doiIndexPath = join(doiCase.path, ".ai_tool", "document_index.json");
+                try {
+                  const localVfsStatCase = getVfs();
+                  await localVfsStatCase.stat(doiIndexPath);
+                  // DOI case already indexed, skip
+                } catch {
+                  // Not indexed, add to list
+                  const siblings = doiDetection.doiCases.filter(d => d.path !== doiCase.path);
+                  targetCases.push({
+                    path: doiCase.path,
+                    name: doiCase.name,
+                    containerInfo: {
+                      path: casePath,
+                      clientName: entry.name,
+                      injuryDate: doiCase.dateOfInjury,
+                      siblingCases: siblings,
+                    },
+                  });
+                }
               }
+              continue; // Skip regular case handling for containers
             }
-            continue; // Skip regular case handling for containers
           }
-        }
 
-        // Regular case
-        const indexPath = join(casePath, ".ai_tool", "document_index.json");
-        try {
-          await stat(indexPath);
-          // Parent index exists, but check subcases
-        } catch {
-          // No parent index, add to list
-          targetCases.push({ path: casePath, name: entry.name });
-        }
-
-        // Discover and add any unindexed subcases
-        const subcasePaths = await discoverSubcases(casePath);
-        for (const subcasePath of subcasePaths) {
-          const subcaseName = subcasePath.split('/').pop() || subcasePath;
-          const subcaseIndexPath = join(subcasePath, ".ai_tool", "document_index.json");
+          // Regular case
+          const indexPath = join(casePath, ".ai_tool", "document_index.json");
           try {
-            await stat(subcaseIndexPath);
-            // Subcase already indexed, skip
+            const localVfsStatCase = getVfs();
+            await localVfsStatCase.stat(indexPath);
+            // Parent index exists, but check subcases
           } catch {
-            // No index, add to list
-            targetCases.push({
-              path: subcasePath,
-              name: subcaseName,
-              parentCase: { path: casePath, name: entry.name },
-            });
+            // No parent index, add to list
+            targetCases.push({ path: casePath, name: entry.name });
+          }
+
+          // Discover and add any unindexed subcases
+          const subcasePaths = await discoverSubcases(casePath);
+          for (const subcasePath of subcasePaths) {
+            const subcaseName = subcasePath.split('/').pop() || subcasePath;
+            const subcaseIndexPath = join(subcasePath, ".ai_tool", "document_index.json");
+            try {
+              const localVfsStatSubcase = getVfs();
+              await localVfsStatSubcase.stat(subcaseIndexPath);
+              // Subcase already indexed, skip
+            } catch {
+              // No index, add to list
+              targetCases.push({
+                path: subcasePath,
+                name: subcaseName,
+                parentCase: { path: casePath, name: entry.name },
+              });
+            }
           }
         }
+      } catch (error) {
+        return c.json({ error: "Could not read firm directory" }, 500);
       }
-    } catch (error) {
-      return c.json({ error: "Could not read firm directory" }, 500);
-    }
     } // close non-year-mode else
   }
 
@@ -3390,17 +3638,20 @@ async function checkNeedsReindex(casePath: string, indexedAt: number): Promise<b
 
   async function checkDir(dir: string): Promise<boolean> {
     try {
-      const entries = await readdir(dir, { withFileTypes: true });
+      const localVfsCheckDir = getVfs();
+      const entries = await localVfsCheckDir.readdir(dir, { withFileTypes: true });
       const results = await Promise.all(
         entries
-          .filter(entry => entry.name !== ".ai_tool")
-          .map(async (entry) => {
+          .filter((entry: any) => entry.name !== ".ai_tool")
+          .map(async (entry: any) => {
             const fullPath = join(dir, entry.name);
-            if (entry.isDirectory()) {
+            const isDir = typeof entry.isDirectory === 'function' ? entry.isDirectory() : entry.isDirectory;
+            if (isDir) {
               return checkDir(fullPath);
             }
-            const stats = await stat(fullPath);
-            return stats.mtimeMs > indexedAt;
+            const stats = await localVfsCheckDir.stat(fullPath) as FileStats;
+            // @ts-ignore - Handle local fs objects returning mtime/mtimeMs depending on implementation
+            return (stats.mtimeMs || stats.mtime?.getTime() || 0) > indexedAt;
           })
       );
       return results.some(r => r);
@@ -3849,7 +4100,7 @@ function augmentHypergraphFromExtractedData(
         // Only process string/number values
         const strValue = typeof rawValue === "string" ? rawValue.trim()
           : typeof rawValue === "number" ? String(rawValue)
-          : null;
+            : null;
         if (!strValue) continue;
 
         const normalized = normalizeForGrouping(strValue);
@@ -4254,7 +4505,8 @@ app.post("/generate-hypergraph", async (c) => {
   const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
 
   try {
-    const indexContent = await readFile(indexPath, "utf-8");
+    const localVfsGenerate = getVfs();
+    const indexContent = await localVfsGenerate.readFile(indexPath, "utf-8");
     const documentIndex = JSON.parse(indexContent);
 
     // Detect practice area from existing index
@@ -4315,7 +4567,7 @@ function isVisibleInScope(
 }
 
 function defaultScopeForRole(role: string): FirmChatScope {
-  if (role === "case_manager") {
+  if (role === "member" || role === "viewer") {
     return { mode: "mine" };
   }
   return { mode: "firm" };
@@ -4389,7 +4641,8 @@ async function buildFirmContext(
   actorUserId: string,
   memberById: Map<string, { id: string; email: string; name?: string }>
 ): Promise<FirmContext> {
-  const entries = await readdir(root, { withFileTypes: true });
+  const vfs = getVfs();
+  const entries = await vfs.readdir(root, { withFileTypes: true });
   const caseSummaries: FirmContext['caseSummaries'] = [];
   const casesByPhase: Record<string, number> = {};
   let totalSpecials = 0;
@@ -4398,13 +4651,14 @@ async function buildFirmContext(
   let visibleCaseCount = 0;
 
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name === ".ai_tool") continue;
+    const isDir = typeof entry.isDirectory === 'function' ? entry.isDirectory() : entry.isDirectory;
+    if (!isDir || entry.name === ".ai_tool") continue;
 
     const casePath = join(root, entry.name);
     const indexPath = join(casePath, ".ai_tool", "document_index.json");
 
     try {
-      const indexContent = await readFile(indexPath, "utf-8");
+      const indexContent = await getVfs().readFile(indexPath, "utf-8");
       const index = JSON.parse(indexContent);
       const assignments = normalizeScopeAssignments(index.assignments);
       if (!isVisibleInScope(assignments, scope, actorUserId)) {
@@ -4531,8 +4785,9 @@ let firmSystemPromptCache: string | null = null;
 
 async function loadFirmSystemPrompt(): Promise<string> {
   if (firmSystemPromptCache) return firmSystemPromptCache;
-  const systemPromptPath = join(import.meta.dir, "../../agent/firm-system-prompt.md");
-  firmSystemPromptCache = await readFile(systemPromptPath, "utf-8");
+  const systemPromptPath = join(process.cwd(), "server", "agent", "firm-system-prompt.md");
+  const localVfsFirm = getVfs();
+  firmSystemPromptCache = await localVfsFirm.readFile(systemPromptPath, "utf-8");
   return firmSystemPromptCache;
 }
 
@@ -4552,7 +4807,7 @@ app.post("/chat", async (c) => {
   const activeMembers = access.team.members.filter((member) => member.status === "active");
   const scopedMemberIds = new Set(
     activeMembers
-      .filter((member) => member.role === "case_manager" || member.role === "case_manager_assistant")
+      .filter((member) => member.role === "member" || member.role === "viewer")
       .map((member) => member.id)
   );
   const scopeResult = resolveFirmChatScope(rawScope, access.context, scopedMemberIds);
@@ -4695,7 +4950,7 @@ app.post("/direct-chat", async (c) => {
   const activeMembers = access.team.members.filter((member) => member.status === "active");
   const scopedMemberIds = new Set(
     activeMembers
-      .filter((member) => member.role === "case_manager" || member.role === "case_manager_assistant")
+      .filter((member) => member.role === "member" || member.role === "viewer")
       .map((member) => member.id)
   );
   const scopeResult = resolveFirmChatScope(rawScope, access.context, scopedMemberIds);
@@ -4718,7 +4973,7 @@ app.post("/direct-chat", async (c) => {
         if (event.type === "done" && event.usage) {
           const totalTokens = (event.usage.inputTokens || 0) + (event.usage.outputTokens || 0);
           if (totalTokens > 0) {
-            reportUsage(totalTokens, "firm_chat").catch(() => {});
+            reportUsage(totalTokens, "firm_chat").catch(() => { });
           }
         }
         await stream.writeSSE({
@@ -4751,23 +5006,6 @@ app.post("/clear-session", async (c) => {
   return c.json({ success: true });
 });
 
-// Firm todos storage
-interface FirmTodo {
-  id: string;
-  text: string;
-  caseRef?: string;
-  priority: "high" | "medium" | "low";
-  status: "pending" | "completed";
-  createdAt: string;
-}
-
-interface FirmTodosData {
-  updated_at: string;
-  todos: FirmTodo[];
-}
-
-const FIRM_DIR = ".ai_tool";
-
 // Get firm todos
 app.get("/todos", async (c) => {
   const root = c.req.query("root");
@@ -4782,13 +5020,13 @@ app.get("/todos", async (c) => {
   }
 
   try {
-    const todosPath = join(root, FIRM_DIR, "todos.json");
-    const content = await readFile(todosPath, "utf-8");
-    const data: FirmTodosData = JSON.parse(content);
+    const data = await loadFirmTodos(root);
     return c.json(data);
-  } catch {
-    // No todos file yet
-    return c.json({ updated_at: new Date().toISOString(), todos: [] });
+  } catch (error) {
+    console.error("Load todos error:", error);
+    return c.json({
+      error: error instanceof Error ? error.message : String(error),
+    }, 500);
   }
 });
 
@@ -4806,18 +5044,8 @@ app.post("/todos", async (c) => {
   }
 
   try {
-    const dir = join(root, FIRM_DIR);
-    const todosPath = join(dir, "todos.json");
-
-    await mkdir(dir, { recursive: true });
-
-    const data: FirmTodosData = {
-      updated_at: new Date().toISOString(),
-      todos: todos || [],
-    };
-
-    await writeFile(todosPath, JSON.stringify(data, null, 2));
-    return c.json({ success: true });
+    const normalized = await saveFirmTodosWithMemory(root, Array.isArray(todos) ? todos : []);
+    return c.json({ success: true, updated_at: normalized.updated_at, todos: normalized.todos });
   } catch (error) {
     console.error("Save todos error:", error);
     return c.json({
@@ -4857,7 +5085,8 @@ app.put("/case/assign", async (c) => {
       return c.json({ error: "Case index not found" }, 404);
     }
 
-    const indexContent = await readFile(indexPath, "utf-8");
+    const localVfsReadNode = getVfs();
+    const indexContent = await localVfsReadNode.readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
 
     // Initialize or update assignments
@@ -4880,7 +5109,8 @@ app.put("/case/assign", async (c) => {
 
     // Normalize and save
     const normalized = normalizeIndex(index);
-    await writeFile(indexPath, JSON.stringify(normalized, null, 2));
+    const localVfsWriteNode = getVfs();
+    await localVfsWriteNode.writeFile(indexPath, JSON.stringify(normalized, null, 2));
     await writeIndexDerivedFiles(casePath, normalized);
 
     return c.json({ success: true, assignments: normalized.assignments });
@@ -4916,7 +5146,8 @@ app.delete("/case/unassign", async (c) => {
       return c.json({ error: "Case index not found" }, 404);
     }
 
-    const indexContent = await readFile(indexPath, "utf-8");
+    const localVfsReadNode = getVfs();
+    const indexContent = await localVfsReadNode.readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
 
     // Remove the assignment
@@ -4925,7 +5156,8 @@ app.delete("/case/unassign", async (c) => {
 
     // Normalize and save
     const normalized = normalizeIndex(index);
-    await writeFile(indexPath, JSON.stringify(normalized, null, 2));
+    const localVfsWriteNode = getVfs();
+    await localVfsWriteNode.writeFile(indexPath, JSON.stringify(normalized, null, 2));
     await writeIndexDerivedFiles(casePath, normalized);
 
     return c.json({ success: true, assignments: normalized.assignments });

@@ -118,6 +118,7 @@ interface Props {
   apiUrl: string
   documentIndex: DocumentIndex | null
   firmRoot?: string
+  initialPage?: { page: number; ts: number } | null
   onCloseFile: () => void
   onIndexUpdated: () => void
   onDraftsUpdated?: () => void
@@ -129,7 +130,6 @@ interface Props {
   evidencePacketPath?: string | null
   evidencePacketVersion?: number
   onOpenFilePath?: (path: string) => void
-  onOpenPacketDraft?: (draftId: string) => void
   packetPiiActive?: boolean
   packetPiiResult?: PacketPiiResult | null
   onPacketPiiResultUpdate?: (path: string, updater: (prev: PacketPiiResult) => PacketPiiResult) => void
@@ -933,6 +933,7 @@ export default function Visualizer({
   apiUrl,
   documentIndex,
   firmRoot: _firmRoot,
+  initialPage,
   onCloseFile,
   onIndexUpdated,
   onDraftsUpdated,
@@ -944,7 +945,6 @@ export default function Visualizer({
   evidencePacketPath,
   evidencePacketVersion,
   onOpenFilePath,
-  onOpenPacketDraft,
   packetPiiActive = false,
   packetPiiResult = null,
   onPacketPiiResultUpdate,
@@ -975,6 +975,7 @@ export default function Visualizer({
   const [canBundle, setCanBundle] = useState(false)
   const [isBundling, setIsBundling] = useState(false)
   const [bundleError, setBundleError] = useState<string | null>(null)
+  const demandBundleEnabled = false
 
   // PDF viewer state
   const [pdfNumPages, setPdfNumPages] = useState<number | null>(null)
@@ -1096,6 +1097,47 @@ export default function Visualizer({
     setPdfPageNumber(clampPdfPageNumber(requestedPage))
   }, [clampPdfPageNumber])
 
+  // Virtual document page navigation.
+  // initialPage is { page, ts } so clicking the same vdoc twice always re-triggers.
+  // Two cases:
+  //   1. Same file already open (URL unchanged): navigate immediately via state.
+  //   2. Different file opening (URL changed): store in ref, let onLoadSuccess apply it.
+  const pendingInitialPageRef = useRef<number | null>(null)
+  const prevActiveFileUrlRef = useRef(activeFileUrl)
+
+  useEffect(() => {
+    const fileChanged = activeFileUrl !== prevActiveFileUrlRef.current
+    prevActiveFileUrlRef.current = activeFileUrl
+
+    console.log('[Visualizer.initialPage effect]', {
+      initialPage,
+      fileChanged,
+      pdfNumPages,
+      activeFileUrl: activeFileUrl?.slice(-40),
+    })
+
+    if (!initialPage || initialPage.page <= 0) {
+      pendingInitialPageRef.current = null
+      return
+    }
+
+    if (fileChanged) {
+      // New file loading — store for onLoadSuccess to apply after PDF loads
+      console.log('[Visualizer] fileChanged → storing in ref:', initialPage.page)
+      pendingInitialPageRef.current = initialPage.page
+    } else if (pdfNumPages && pdfNumPages > 0) {
+      // Same file, already loaded — navigate immediately
+      const target = Math.min(pdfNumPages, Math.max(1, initialPage.page))
+      console.log('[Visualizer] same file, navigating immediately to page', target)
+      setPdfPageNumber(target)
+      pendingInitialPageRef.current = null
+    } else {
+      // Same file but not yet loaded — store for onLoadSuccess
+      console.log('[Visualizer] same file, not loaded → storing in ref:', initialPage.page)
+      pendingInitialPageRef.current = initialPage.page
+    }
+  }, [initialPage, activeFileUrl]) // both deps so we detect file changes
+
   const indexedSummaryTarget = useMemo<IndexedSummaryTarget | null>(() => {
     if (!documentIndex?.folders || !filePath) return null
     const requestedPath = normalizeRelativePath(filePath).toLowerCase()
@@ -1151,7 +1193,11 @@ export default function Visualizer({
         const normalizedDrafts = Array.isArray(data?.drafts)
           ? data.drafts
             .map((entry: unknown) => normalizeDraftRecord(entry))
-            .filter((entry: Draft | null): entry is Draft => Boolean(entry))
+            .filter((entry: Draft | null): entry is Draft => {
+              if (!entry) return false
+              const isPacketDraft = entry.type === 'packet' || entry.id.startsWith('packet-')
+              return !isPacketDraft
+            })
           : []
         setDrafts(normalizedDrafts)
       }
@@ -1374,39 +1420,6 @@ export default function Visualizer({
     onOpenFilePath?.(nextDraft.path)
   }, [apiUrl, caseFolder, loadDrafts, onOpenFilePath])
 
-  const handleDuplicatePacketDraft = useCallback(async (draftId: string) => {
-    if (!caseFolder) return
-    try {
-      const res = await fetch(`${apiUrl}/api/docs/packet-draft/duplicate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ caseFolder, draftId }),
-      })
-      if (res.ok) {
-        const data = await res.json()
-        await loadDrafts()
-        if (onOpenPacketDraft) onOpenPacketDraft(data.draftId)
-      }
-    } catch (err) {
-      console.error('Failed to duplicate draft:', err)
-    }
-  }, [caseFolder, apiUrl, loadDrafts, onOpenPacketDraft])
-
-  const handleDeletePacketDraft = useCallback(async (draftId: string, name: string) => {
-    if (!caseFolder) return
-    if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return
-    try {
-      const res = await fetch(`${apiUrl}/api/docs/packet-draft/${draftId}?case=${encodeURIComponent(caseFolder)}`, {
-        method: 'DELETE',
-      })
-      if (res.ok) {
-        await loadDrafts()
-      }
-    } catch (err) {
-      console.error('Failed to delete draft:', err)
-    }
-  }, [caseFolder, apiUrl, loadDrafts])
-
   useEffect(() => {
     if (!evidencePacketPath || !caseFolder) return
     setPendingEvidencePacketPath(evidencePacketPath)
@@ -1548,7 +1561,7 @@ export default function Visualizer({
 
   // Check bundle status when a demand letter draft is selected
   useEffect(() => {
-    if (!selectedDraft || !caseFolder || selectedDraft.type !== 'demand') {
+    if (!demandBundleEnabled || !selectedDraft || !caseFolder || selectedDraft.type !== 'demand') {
       setCanBundle(false)
       setBundleError(null)
       return
@@ -1577,7 +1590,7 @@ export default function Visualizer({
     }
 
     checkBundleStatus()
-  }, [selectedDraft, caseFolder, apiUrl])
+  }, [demandBundleEnabled, selectedDraft, caseFolder, apiUrl])
 
   useEffect(() => {
     setPendingEvidencePacketPath(null)
@@ -1585,6 +1598,7 @@ export default function Visualizer({
 
   // Reset PDF state when file changes
   useEffect(() => {
+    console.log('[Visualizer.resetEffect] activeFileUrl changed, resetting PDF state')
     setPdfPageNumber(1)
     setPdfPageInput('1')
     setPdfNumPages(null)
@@ -2733,13 +2747,13 @@ export default function Visualizer({
                   <span className="text-xs text-brand-500">Refreshing preview...</span>
                 )}
                 {isWatchingDraftWordEdits && !isRefreshingDraftPreview && (
-                  <span className="text-xs text-emerald-600">Watching for Word saves...</span>
+                  <span className="text-xs text-accent-600">Watching for Word saves...</span>
                 )}
 
                 <div className="flex-1" />
 
                 {/* Generate Package button - only for demand letter drafts */}
-                {selectedDraft.type === 'demand' && (
+                {demandBundleEnabled && selectedDraft.type === 'demand' && (
                   <div className="flex flex-col items-end gap-1">
                     <button
                       onClick={handleGeneratePackage}
@@ -2765,7 +2779,7 @@ export default function Visualizer({
                   onClick={() => handleApproveDraft(selectedDraft)}
                   disabled={isApprovingDraft}
                   className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium
-                             bg-emerald-600 text-white hover:bg-emerald-700
+                             bg-accent-600 text-white hover:bg-accent-700
                              rounded-lg transition-colors disabled:opacity-50"
                 >
                   <CheckCircleIcon />
@@ -2777,24 +2791,24 @@ export default function Visualizer({
             // Drafts list view
             <div className="p-6">
               {pendingEvidencePacketPath && (
-                <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+                <div className="mb-4 rounded-xl border border-accent-200 bg-accent-50 px-4 py-3">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <p className="text-sm font-semibold text-emerald-900">Evidence packet ready for review</p>
-                      <p className="text-xs text-emerald-700 mt-1 break-all">
+                      <p className="text-sm font-semibold text-accent-900">Generated document ready for review</p>
+                      <p className="text-xs text-accent-700 mt-1 break-all">
                         {pendingEvidencePacketPath}
                       </p>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <button
                         onClick={handleReviewEvidencePacket}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 transition-colors"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-accent-700 text-white hover:bg-accent-800 transition-colors"
                       >
-                        Review Packet
+                        Review Document
                       </button>
                       <button
                         onClick={() => setPendingEvidencePacketPath(null)}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-emerald-300 text-emerald-800 bg-white hover:bg-emerald-100 transition-colors"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-accent-300 text-accent-800 bg-white hover:bg-accent-100 transition-colors"
                       >
                         Dismiss
                       </button>
@@ -2827,100 +2841,7 @@ export default function Visualizer({
                   {drafts.map((draft) => {
                     // Detect packet drafts (JSON files with packet- prefix)
                     const isPacketDraft = draft.type === 'packet' || draft.id.startsWith('packet-')
-                    if (isPacketDraft && onOpenPacketDraft) {
-                      const isGenerated = !!draft.generatedAt
-                      return (
-                        <div
-                          key={draft.id}
-                          className={`p-4 rounded-xl border transition-all ${
-                            isGenerated
-                              ? 'bg-emerald-50 border-emerald-200'
-                              : 'bg-white border-accent-200'
-                          }`}
-                        >
-                          <div className="flex items-start gap-3">
-                            {isGenerated ? (
-                              <div className="w-8 h-8 rounded-lg bg-emerald-100 flex items-center justify-center shrink-0">
-                                <svg className="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                </svg>
-                              </div>
-                            ) : (
-                              <span className="text-2xl">📦</span>
-                            )}
-                            <div className="flex-1 min-w-0">
-                              <p className={`font-medium ${isGenerated ? 'text-emerald-900' : 'text-brand-900'}`}>
-                                {draft.name || 'Evidence Packet Draft'}
-                              </p>
-                              <p className={`text-xs mt-0.5 ${isGenerated ? 'text-emerald-600' : 'text-brand-400'}`}>
-                                {isGenerated
-                                  ? `Generated ${formatDate(draft.generatedAt!)}`
-                                  : `Created ${formatDate(draft.createdAt)}`}
-                              </p>
-                            </div>
-                            <div className="flex items-center gap-1.5">
-                              {isGenerated ? (
-                                <>
-                                  <button
-                                    onClick={() => handleDeletePacketDraft(draft.id, draft.name || 'Evidence Packet Draft')}
-                                    className="p-1.5 rounded-lg text-emerald-400 hover:text-red-500 hover:bg-red-50 transition-colors"
-                                    title="Delete draft"
-                                  >
-                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                      <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
-                                    </svg>
-                                  </button>
-                                  <button
-                                    onClick={() => onOpenPacketDraft(draft.id)}
-                                    className="px-2.5 py-1 text-xs font-medium bg-emerald-100 text-emerald-700 rounded-lg
-                                               hover:bg-emerald-200 transition-colors"
-                                  >
-                                    Edit
-                                  </button>
-                                  {draft.outputPath && onOpenFilePath && (
-                                    <button
-                                      onClick={() => { onOpenFilePath(draft.outputPath!); setActiveTab('view') }}
-                                      className="px-2.5 py-1 text-xs font-medium bg-emerald-600 text-white rounded-lg
-                                                 hover:bg-emerald-700 transition-colors"
-                                    >
-                                      View
-                                    </button>
-                                  )}
-                                </>
-                              ) : (
-                                <>
-                                  <button
-                                    onClick={() => handleDuplicatePacketDraft(draft.id)}
-                                    className="p-1.5 rounded-lg text-brand-400 hover:text-accent-600 hover:bg-accent-50 transition-colors"
-                                    title="Duplicate draft"
-                                  >
-                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 01-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 011.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 00-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 01-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 00-3.375-3.375h-1.5a1.125 1.125 0 01-1.125-1.125v-1.5a3.375 3.375 0 00-3.375-3.375H9.75" />
-                                    </svg>
-                                  </button>
-                                  <button
-                                    onClick={() => handleDeletePacketDraft(draft.id, draft.name || 'Evidence Packet Draft')}
-                                    className="p-1.5 rounded-lg text-brand-400 hover:text-red-500 hover:bg-red-50 transition-colors"
-                                    title="Delete draft"
-                                  >
-                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                      <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
-                                    </svg>
-                                  </button>
-                                  <button
-                                    onClick={() => onOpenPacketDraft(draft.id)}
-                                    className="px-2.5 py-1 text-xs font-medium bg-accent-100 text-accent-700 rounded-lg
-                                               hover:bg-accent-200 transition-colors"
-                                  >
-                                    Resume
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      )
-                    }
+                    if (isPacketDraft) return null
                     return (
                       <button
                         key={draft.id}
@@ -3047,7 +2968,7 @@ export default function Visualizer({
                           {isOpeningDraftWord ? 'Opening Word...' : 'Edit in Word'}
                         </button>
                       )}
-                      {selectedDraft.type === 'demand' && (
+                      {demandBundleEnabled && selectedDraft.type === 'demand' && (
                         <button
                           onClick={handleGeneratePackage}
                           disabled={isBundling || !canBundle}
@@ -3063,7 +2984,7 @@ export default function Visualizer({
                         onClick={() => handleApproveDraft(selectedDraft)}
                         disabled={isApprovingDraft}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium
-                                   bg-emerald-600 text-white hover:bg-emerald-700
+                                   bg-accent-600 text-white hover:bg-accent-700
                                    rounded-lg transition-colors disabled:opacity-50"
                       >
                         {isApprovingDraft ? 'Approving...' : 'Approve'}
@@ -3074,7 +2995,7 @@ export default function Visualizer({
                     <span className="text-xs text-brand-500 self-center">Refreshing preview...</span>
                   )}
                   {isViewingSelectedDraft && isWatchingDraftWordEdits && !isRefreshingDraftPreview && (
-                    <span className="text-xs text-emerald-600 self-center">Watching for Word saves...</span>
+                    <span className="text-xs text-accent-600 self-center">Watching for Word saves...</span>
                   )}
                   {isPdf ? (
                     <button
@@ -3349,8 +3270,17 @@ export default function Visualizer({
                           <Document
                             file={activeFileUrl}
                             onLoadSuccess={({ numPages }) => {
+                              console.log('[Visualizer.onLoadSuccess]', { numPages, pendingRef: pendingInitialPageRef.current })
                               setPdfNumPages(numPages)
-                              setPdfPageNumber((currentPage) => Math.min(numPages, Math.max(1, currentPage)))
+                              // If there's a pending initial page (virtual doc navigation), go there
+                              if (pendingInitialPageRef.current) {
+                                const target = pendingInitialPageRef.current
+                                pendingInitialPageRef.current = null
+                                console.log('[Visualizer.onLoadSuccess] applying pending page:', target)
+                                setPdfPageNumber(Math.min(numPages, Math.max(1, target)))
+                              } else {
+                                setPdfPageNumber((currentPage) => Math.min(numPages, Math.max(1, currentPage)))
+                              }
                             }}
                             loading={
                               <div className="flex items-center justify-center h-64">
@@ -3477,7 +3407,7 @@ export default function Visualizer({
                                 ))}
                                 {draftBoxStyle && (
                                   <div
-                                    className="absolute z-30 border-2 border-emerald-700 bg-emerald-300/35 pointer-events-none"
+                                    className="absolute z-30 border-2 border-accent-700 bg-accent-300/35 pointer-events-none"
                                     style={draftBoxStyle}
                                   />
                                 )}
@@ -3774,7 +3704,7 @@ export default function Visualizer({
                       <p className="text-sm text-red-700">{documentSummarySaveError}</p>
                     )}
                     {documentSummarySaveMessage && (
-                      <p className="text-sm text-emerald-700">{documentSummarySaveMessage}</p>
+                      <p className="text-sm text-accent-700">{documentSummarySaveMessage}</p>
                     )}
                   </div>
                 ) : (
@@ -3840,7 +3770,7 @@ export default function Visualizer({
             </div>
           ) : totalReviewItems === 0 ? (
             <div className="text-center py-12">
-              <div className="w-16 h-16 rounded-full bg-emerald-100 flex items-center justify-center mx-auto mb-4">
+              <div className="w-16 h-16 rounded-full bg-accent-100 flex items-center justify-center mx-auto mb-4">
                 <CheckCircleIcon />
               </div>
               <p className="text-lg font-medium text-brand-700">No decisions to review</p>
@@ -3915,7 +3845,7 @@ export default function Visualizer({
                     key={i}
                     className={`rounded-xl border p-4 transition-all ${
                       isVerified
-                        ? 'bg-emerald-50 border-emerald-200'
+                        ? 'bg-accent-50 border-accent-200'
                         : 'bg-white border-surface-200 hover:border-surface-300'
                     }`}
                   >
@@ -3925,7 +3855,7 @@ export default function Visualizer({
                           {String(field).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
                         </p>
                         <span className={`inline-block text-xs px-2 py-0.5 rounded-full mt-1 ${
-                          confidence === 'high' ? 'bg-emerald-100 text-emerald-700' :
+                          confidence === 'high' ? 'bg-accent-100 text-accent-700' :
                           confidence === 'medium' ? 'bg-amber-100 text-amber-700' :
                           'bg-red-100 text-red-700'
                         }`}>
@@ -3933,7 +3863,7 @@ export default function Visualizer({
                         </span>
                       </div>
                       {isVerified && (
-                        <span className="text-emerald-600">
+                        <span className="text-accent-600">
                           <CheckCircleIcon />
                         </span>
                       )}
@@ -3978,8 +3908,8 @@ export default function Visualizer({
                       <div className="flex gap-2 mt-3">
                         <button
                           onClick={() => handleVerify(field)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white
-                                     text-sm font-medium rounded-lg hover:bg-emerald-700 transition-colors"
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-accent-600 text-white
+                                     text-sm font-medium rounded-lg hover:bg-accent-700 transition-colors"
                         >
                           <CheckCircleIcon />
                           Correct

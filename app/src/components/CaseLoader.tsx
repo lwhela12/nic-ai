@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import type { DocumentIndex } from '../App'
+import nicLogo from '../assets/nic_logo.png'
 
 interface Props {
   caseFolder: string
@@ -8,10 +9,8 @@ interface Props {
 }
 
 // Icons
-const ScaleIcon = () => (
-  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v17.25m0 0c-1.472 0-2.882.265-4.185.75M12 20.25c1.472 0 2.882.265 4.185.75M18.75 4.97A48.416 48.416 0 0012 4.5c-2.291 0-4.545.16-6.75.47m13.5 0c1.01.143 2.01.317 3 .52m-3-.52l2.62 10.726c.122.499-.106 1.028-.589 1.202a5.988 5.988 0 01-2.031.352 5.988 5.988 0 01-2.031-.352c-.483-.174-.711-.703-.59-1.202L18.75 4.971zm-16.5.52c.99-.203 1.99-.377 3-.52m0 0l2.62 10.726c.122.499-.106 1.028-.589 1.202a5.989 5.989 0 01-2.031.352 5.989 5.989 0 01-2.031-.352c-.483-.174-.711-.703-.59-1.202L5.25 4.971z" />
-  </svg>
+const LeafIcon = () => (
+  <img src={nicLogo} alt="NIC Logo" className="w-8 h-8 object-contain" />
 )
 
 export default function CaseLoader({ caseFolder, apiUrl, onComplete }: Props) {
@@ -95,7 +94,7 @@ export default function CaseLoader({ caseFolder, apiUrl, onComplete }: Props) {
         {/* Header */}
         <div className="flex items-center gap-4 mb-6">
           <div className="w-12 h-12 rounded-xl bg-brand-900 flex items-center justify-center text-white">
-            <ScaleIcon />
+            <LeafIcon />
           </div>
           <div>
             <h2 className="text-xl font-semibold text-brand-900">Initializing Case</h2>
@@ -133,12 +132,12 @@ export default function CaseLoader({ caseFolder, apiUrl, onComplete }: Props) {
             {/* Log output */}
             <div className="bg-brand-950 rounded-xl p-4 h-56 overflow-y-auto font-mono text-xs">
               {progress.map((line, i) => (
-                <div key={i} className="text-emerald-400 py-0.5">
+                <div key={i} className="text-accent-400 py-0.5">
                   <span className="text-brand-500 mr-2 select-none">$</span>
                   {line}
                 </div>
               ))}
-              <div className="text-emerald-400 py-0.5">
+              <div className="text-accent-400 py-0.5">
                 <span className="text-brand-500 mr-2 select-none">$</span>
                 <span className="animate-pulse">_</span>
               </div>

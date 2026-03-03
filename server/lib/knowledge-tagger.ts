@@ -15,25 +15,20 @@ export interface SectionSemanticTags {
 }
 
 const APPLIES_TO_ENUM = [
-  "evidence_packet",
-  "demand_letter",
-  "case_memo",
-  "settlement",
+  "financial_review",
+  "medical_review",
+  "estate_plan",
+  "family_plan",
+  "business_admin",
+  "care_coordination",
   "general_reference",
-  "case_evaluation",
-  "indexing",
-  "case_management",
-  "medical_treatment",
-  "benefits_calculation",
-  "litigation",
-  "client_communication",
 ] as const;
 
 const MODEL_PRIMARY = "openai/gpt-oss-120b";
 const MODEL_FALLBACK = "openai/gpt-oss-20b";
 const CONCURRENCY = 5;
 
-const SYSTEM_PROMPT = `You are a classifier for law firm knowledge base sections.
+const SYSTEM_PROMPT = `You are a classifier for a general-purpose personal/family/business assistant knowledge base.
 
 Output only plain text in this exact format:
 
@@ -42,6 +37,7 @@ applies_to: <comma-separated workflow ids>
 summary: <single sentence summary>
 
 - topics must be 2-6 short lowercase kebab-case tags (e.g. document-ordering, hearing-procedures, medical-records)
+- topics must be 2-6 short lowercase kebab-case tags (e.g. care-coordination, estate-documents, financial-review)
 - applies_to must be one or more values from this list only:
   ${APPLIES_TO_ENUM.join(", ")}
 - summary is one short sentence (max 120 chars) explaining what this section is for
@@ -221,13 +217,13 @@ export async function generateSectionTags(
   }
 }
 
-const SUMMARY_SYSTEM_PROMPT = `You are a legal practice knowledge summarizer. Given the full text of all knowledge sections for a law firm, produce a concise, unified reference summary in markdown.
+const SUMMARY_SYSTEM_PROMPT = `You are a knowledge summarizer. Given the full text of all knowledge sections, produce a concise, unified reference summary in markdown.
 
 Requirements:
-- Summarize the most important rules, thresholds, deadlines, statutory references, and formulas across ALL sections
+- Summarize the most important rules, thresholds, deadlines, and formulas across ALL sections
 - Use markdown bullet points, organize by topic
 - No redundancy — state each fact exactly once
-- Include specific numbers, percentages, time limits, and statute citations
+- Include specific numbers, percentages, and time limits
 - After the summary, add a "### Definitive Sources" section mapping key topics to their source filenames so the agent knows where to read_file for full detail
 - Target approximately 600-700 words (~3000-4000 characters)
 - Output ready-to-render markdown — no JSON wrapping, no code fences, no explanation prefix`;

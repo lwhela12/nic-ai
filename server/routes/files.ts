@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { readdir, stat, readFile, writeFile, mkdir } from "fs/promises";
+import { getVfs } from "../lib/vfs";
 import { join, dirname, resolve, sep } from "path";
 import { homedir } from "os";
 import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
@@ -135,6 +136,12 @@ function joinRelativePath(folderName: string, fileName: string): string {
 }
 
 function resolveCasePath(caseFolder: string, relativePath: string): string {
+  if (getVfs().name !== 'local') {
+    let cleanFolder = caseFolder.replace(/\\/g, '/').replace(/\/$/, '');
+    let cleanRel = relativePath.replace(/\\/g, '/').replace(/^\//, '');
+    return `${cleanFolder}/${cleanRel}`;
+  }
+
   const base = resolve(caseFolder);
   const target = resolve(base, relativePath);
   // Use endsWith(sep) to avoid double-separator when base is a drive root (e.g. "C:\")
@@ -146,12 +153,8 @@ function resolveCasePath(caseFolder: string, relativePath: string): string {
 }
 
 async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
-  }
+  const vfs = getVfs();
+  return vfs.exists(path);
 }
 
 function buildIndexedPathMap(index: any): Map<string, string> {
@@ -228,8 +231,9 @@ async function resolveDocumentPath(
   }
 
   try {
+    const vfs = getVfs();
     const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
-    const indexContent = await readFile(indexPath, "utf-8");
+    const indexContent = await vfs.readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
     const pathMap = buildIndexedPathMap(index);
     const requestedComparablePath = normalizeComparablePath(normalizedRequestedPath);
@@ -299,11 +303,15 @@ async function resolveDocumentPath(
 // Browse directories for folder picker
 app.get("/browse", async (c) => {
   const dir = c.req.query("dir") || homedir();
+  const vfs = getVfs();
 
   try {
-    const entries = await readdir(dir, { withFileTypes: true });
+    const entries = await vfs.readdir(dir, { withFileTypes: true }) as any[];
     const folders = entries
-      .filter((e) => e.isDirectory() && e.name !== ".ai_tool")
+      .filter((e) => {
+        const isDir = typeof e.isDirectory === 'function' ? e.isDirectory() : e.isDirectory
+        return isDir && e.name !== ".ai_tool"
+      })
       .map((e) => ({
         name: e.name,
         path: join(dir, e.name),
@@ -334,9 +342,13 @@ app.get("/cases", async (c) => {
   }
 
   try {
-    const entries = await readdir(baseDir, { withFileTypes: true });
+    const vfs = getVfs();
+    const entries = await vfs.readdir(baseDir, { withFileTypes: true }) as any[];
     const folders = entries
-      .filter((e) => e.isDirectory() && e.name !== ".ai_tool")
+      .filter((e) => {
+        const isDir = typeof e.isDirectory === 'function' ? e.isDirectory() : e.isDirectory
+        return isDir && e.name !== ".ai_tool"
+      })
       .map((e) => ({
         name: e.name,
         path: join(baseDir, e.name),
@@ -362,9 +374,10 @@ app.get("/index", async (c) => {
   }
 
   const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+  const vfs = getVfs();
 
   try {
-    const content = await readFile(indexPath, "utf-8");
+    const content = await vfs.readFile(indexPath, "utf-8");
     const index = JSON.parse(content);
     if (Array.isArray(index.needs_review)) {
       index.needs_review = dedupeNeedsReviewEntries(index.needs_review);
@@ -455,8 +468,9 @@ app.post("/document-summary", async (c) => {
     return c.json({ error: "No valid update fields provided. Set approveOnly=true to mark reviewed without edits." }, 400);
   }
 
+  const vfs = getVfs();
   try {
-    const content = await readFile(indexPath, "utf-8");
+    const content = await vfs.readFile(indexPath, "utf-8");
     const index = JSON.parse(content);
     const reviewedAt = new Date().toISOString();
 
@@ -594,7 +608,7 @@ app.post("/document-summary", async (c) => {
       createdAt: new Date().toISOString(),
     });
 
-    await writeFile(indexPath, JSON.stringify(index, null, 2));
+    await vfs.writeFile(indexPath, JSON.stringify(index, null, 2));
     await writeIndexDerivedFiles(caseFolder, index);
 
     return c.json({
@@ -627,12 +641,13 @@ app.get("/index-status", async (c) => {
   }
 
   const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+  const vfs = getVfs();
 
   // Get all current files
   async function getAllFiles(dir: string, base: string = ""): Promise<{ path: string; mtime: number }[]> {
     const files: { path: string; mtime: number }[] = [];
     try {
-      const entries = await readdir(dir, { withFileTypes: true });
+      const entries = await vfs.readdir(dir, { withFileTypes: true }) as any[];
       for (const entry of entries) {
         if (entry.name === ".ai_tool" || shouldIgnoreFile(entry.name)) continue;
         const fullPath = join(dir, entry.name);
@@ -642,7 +657,7 @@ app.get("/index-status", async (c) => {
           const subFiles = await getAllFiles(fullPath, relativePath);
           files.push(...subFiles);
         } else {
-          const stats = await stat(fullPath);
+          const stats = await vfs.stat(fullPath);
           files.push({ path: relativePath, mtime: stats.mtimeMs });
         }
       }
@@ -707,12 +722,12 @@ app.get("/index-status", async (c) => {
   let indexedFiles: Set<string> = new Set();
 
   try {
-    const content = await readFile(indexPath, "utf-8");
+    const content = await vfs.readFile(indexPath, "utf-8");
     index = JSON.parse(content);
 
 
     // Use the index FILE's mtime as the reliable timestamp (not the JSON date which can be wrong)
-    const indexStats = await stat(indexPath);
+    const indexStats = await vfs.stat(indexPath);
     indexedAt = indexStats.mtimeMs;
 
     const addIndexedPath = (pathLike: unknown, folderName?: string) => {
@@ -812,9 +827,10 @@ app.get("/memo", async (c) => {
   }
 
   const memoPath = join(caseFolder, ".ai_tool", "case_memo.md");
+  const vfs = getVfs();
 
   try {
-    const content = await readFile(memoPath, "utf-8");
+    const content = await vfs.readFile(memoPath, "utf-8");
     return c.json({ content });
   } catch (error) {
     return c.json({ error: "No case memo found. Run /case-memo first." }, 404);
@@ -835,7 +851,8 @@ app.get("/list", async (c) => {
   }
 
   async function walkDir(dir: string, base: string = ""): Promise<any[]> {
-    const entries = await readdir(dir, { withFileTypes: true });
+    const vfs = getVfs();
+    const entries = await vfs.readdir(dir, { withFileTypes: true }) as any[];
     const results: any[] = [];
 
     for (const entry of entries) {
@@ -853,13 +870,13 @@ app.get("/list", async (c) => {
           children,
         });
       } else {
-        const stats = await stat(fullPath);
+        const stats = await vfs.stat(fullPath);
         results.push({
           name: entry.name,
           type: "file",
           path: relativePath,
           size: stats.size,
-          modified: stats.mtime,
+          modified: stats.mtimeMs,
         });
       }
     }
@@ -913,6 +930,8 @@ app.get("/view", async (c) => {
     return c.json({ error: "case and path query params required" }, 400);
   }
 
+  const vfs = getVfs();
+
   const access = await requireCaseAccess(c, caseFolder);
   if (!access.ok) {
     return access.response;
@@ -921,20 +940,46 @@ app.get("/view", async (c) => {
   try {
     const { fullPath, relativePath } = await resolveDocumentPath(caseFolder, filePath);
     const filename = relativePath.split("/").pop() || "file";
-    const file = Bun.file(fullPath);
 
-    const contentType = getContentType(filename, file.type);
-    const arrayBuffer = await file.arrayBuffer();
+    // We cannot use Bun.file for a virtual remote view without an intermediate buffer/stream
+    let contentType = getContentType(filename, undefined);
 
-    return new Response(arrayBuffer, {
-      headers: {
-        "Content-Type": contentType,
-        "Content-Disposition": `inline; filename="${filename}"`,
-        "Content-Length": String(file.size),
-        // Prevent browser from overriding inline display
-        "X-Content-Type-Options": "nosniff",
-      },
-    });
+    // For local files we can still use Bun.file for speed, or we can just always use the VFS
+    if (vfs.name === 'local') {
+      const file = Bun.file(fullPath);
+      contentType = getContentType(filename, file.type);
+      const arrayBuffer = await file.arrayBuffer();
+      return new Response(arrayBuffer, {
+        headers: {
+          "Content-Type": contentType,
+          "Content-Disposition": `inline; filename="${filename}"`,
+          "Content-Length": String(file.size),
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
+
+    // For GDrive (or others), use the stream response directly if possible
+    try {
+      const stream = await vfs.createReadStream(fullPath);
+      return new Response(stream as any, {
+        headers: {
+          "Content-Type": contentType,
+          "Content-Disposition": `inline; filename="${filename}"`,
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    } catch {
+      // fallback buffer
+      const buffer = await vfs.readFile(fullPath);
+      return new Response(buffer as any, {
+        headers: {
+          "Content-Type": contentType,
+          "Content-Disposition": `inline; filename="${filename}"`,
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
   } catch (error) {
     if (error instanceof Error && error.message === "File not found") {
       return c.json({ error: "File not found" }, 404);
@@ -954,10 +999,11 @@ app.post("/resolve", async (c) => {
   }
 
   const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+  const vfs = getVfs();
 
   try {
     // Read current index
-    const content = await readFile(indexPath, "utf-8");
+    const content = await vfs.readFile(indexPath, "utf-8");
     const index = JSON.parse(content);
 
     // Find the item in needs_review
@@ -1023,7 +1069,7 @@ app.post("/resolve", async (c) => {
           if (typeof prov === "object" && prov.name) {
             // Object format: { name, charges, ... }
             if (prov.name.toLowerCase().includes(providerName.toLowerCase()) ||
-                providerName.toLowerCase().includes(prov.name.toLowerCase())) {
+              providerName.toLowerCase().includes(prov.name.toLowerCase())) {
               const oldCharges = prov.charges;
               prov.charges = numericValue;
 
@@ -1100,7 +1146,7 @@ app.post("/resolve", async (c) => {
     summaryUpdated = applyResolvedFieldToSummary(index, resolvedField, resolvedValue) || summaryUpdated;
 
     // Write updated index
-    await writeFile(indexPath, JSON.stringify(index, null, 2));
+    await vfs.writeFile(indexPath, JSON.stringify(index, null, 2));
     await writeIndexDerivedFiles(caseFolder, index);
 
     return c.json({
@@ -1140,9 +1186,10 @@ app.patch("/contact-card", async (c) => {
   }
 
   const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+  const vfs = getVfs();
 
   try {
-    const content = await readFile(indexPath, "utf-8");
+    const content = await vfs.readFile(indexPath, "utf-8");
     const index = JSON.parse(content);
 
     if (!index.summary || typeof index.summary !== "object") {
@@ -1231,7 +1278,7 @@ app.patch("/contact-card", async (c) => {
       createdAt: new Date().toISOString(),
     });
 
-    await writeFile(indexPath, JSON.stringify(index, null, 2));
+    await vfs.writeFile(indexPath, JSON.stringify(index, null, 2));
     await writeIndexDerivedFiles(caseFolder, index);
 
     return c.json({
@@ -1257,9 +1304,10 @@ app.get("/needs-review", async (c) => {
   }
 
   const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+  const vfs = getVfs();
 
   try {
-    const content = await readFile(indexPath, "utf-8");
+    const content = await vfs.readFile(indexPath, "utf-8");
     const index = JSON.parse(content);
 
     const needsReview: any[] = index.needs_review || [];
@@ -1335,9 +1383,10 @@ app.get("/verified-items", async (c) => {
   }
 
   const verifiedPath = join(caseFolder, ".ai_tool", "verified_items.json");
+  const vfs = getVfs();
 
   try {
-    const content = await readFile(verifiedPath, "utf-8");
+    const content = await vfs.readFile(verifiedPath, "utf-8");
     return c.json(JSON.parse(content));
   } catch {
     // No verified items file exists yet, return empty
@@ -1361,11 +1410,12 @@ app.post("/verified-items", async (c) => {
   const piToolDir = join(caseFolder, ".ai_tool");
   const verifiedPath = join(piToolDir, "verified_items.json");
 
+  const vfs = getVfs();
   try {
     // Ensure .ai_tool directory exists
-    await mkdir(piToolDir, { recursive: true });
+    await vfs.mkdir(piToolDir, { recursive: true });
 
-    await writeFile(verifiedPath, JSON.stringify({ verified }, null, 2));
+    await vfs.writeFile(verifiedPath, JSON.stringify({ verified }, null, 2));
     return c.json({ success: true });
   } catch (error) {
     console.error("Failed to save verified items:", error);

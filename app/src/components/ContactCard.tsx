@@ -85,6 +85,7 @@ interface ContactCardProps {
   bodyParts?: string[]
   caseFolder?: string
   onIndexUpdated?: () => void
+  legacyMode?: boolean
 }
 
 // Edit data shape for the form
@@ -221,9 +222,11 @@ export default function ContactCard({
   bodyParts,
   caseFolder,
   onIndexUpdated,
+  legacyMode = false,
 }: ContactCardProps) {
   const cardRef = useRef<HTMLDivElement>(null)
-  const isWC = practiceArea === "Workers' Compensation"
+  const showLegacyFields = legacyMode === true
+  const isWC = showLegacyFields && practiceArea === "Workers' Compensation"
   const [isEditing, setIsEditing] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [editData, setEditData] = useState<EditData | null>(null)
@@ -342,7 +345,7 @@ export default function ContactCard({
   const hasContactData = !!(contact?.phone || contact?.email || address)
   const hasPIData = !!(thirdPartyLimit || firstPartyLimit || healthInsurance?.carrier)
   const hasWCData = !!(hasEmployer || hasWCCarrier || hasDisability || hasJobOrInjury)
-  const hasAnyData = hasContactData || (isWC ? hasWCData : hasPIData)
+  const hasAnyData = hasContactData || (showLegacyFields ? (isWC ? hasWCData : hasPIData) : false)
 
   const employerAddress = formatAddressObj(employer?.address)
 
@@ -351,7 +354,7 @@ export default function ContactCard({
   const has1PAdjuster = !!(p1?.adjuster_name || p1?.adjuster_phone || p1?.adjuster_email)
 
   // Editing helpers
-  const canEdit = !!caseFolder && !isWC // Edit mode for PI only for now
+  const canEdit = !!caseFolder && showLegacyFields && !isWC // Edit mode for legacy PI fields only
 
   const enterEditMode = () => {
     const addr = contact?.address && typeof contact.address === 'object' ? contact.address : {} as any
@@ -615,7 +618,7 @@ export default function ContactCard({
         )}
 
         {/* === PI Sections === */}
-        {!isWC && (
+        {showLegacyFields && !isWC && (
           <>
             {/* Insurance Section - 3rd Party */}
             {(thirdPartyLimit || p3?.carrier || has3PAdjuster || isEditing) && (
@@ -727,7 +730,7 @@ export default function ContactCard({
         )}
 
         {/* === WC Sections === */}
-        {isWC && (
+        {showLegacyFields && isWC && (
           <>
             {/* Employer Section */}
             {hasEmployer && (
@@ -858,9 +861,11 @@ export default function ContactCard({
         {/* Empty state if no data */}
         {!hasAnyData && !isEditing && (
           <div className="px-4 py-6 text-center text-sm text-brand-400">
-            No contact or {isWC ? 'employer' : 'insurance'} information available.
+            No contact information available.
             <br />
-            <span className="text-xs">Re-index the case to extract this data.</span>
+            <span className="text-xs">
+              {showLegacyFields ? 'Re-index the case to extract additional details.' : 'Legacy claim fields are hidden by default.'}
+            </span>
           </div>
         )}
       </div>

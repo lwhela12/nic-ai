@@ -13,7 +13,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { readFile, writeFile, mkdir, stat } from "fs/promises";
 import { join, dirname, resolve, sep } from "path";
 import { resolveFirmRoot } from "./year-mode";
-import { generateDocument, type DocumentType } from "./doc-agent";
+import { generateDocument, normalizeDocumentType, type DocumentType } from "./doc-agent";
 import { readDocument } from "./doc-reader";
 import { acquireCaseLock, releaseCaseLock } from "./case-lock";
 import {
@@ -31,6 +31,11 @@ import { generateMetaIndex, splitIndexToFolders, buildMetaIndexPromptView, write
 import { generateHypergraph } from "../routes/firm";
 import { buildDocumentId, buildDocumentIdFromPath } from "./document-id";
 import { generateTagsForAllSections, generateKnowledgeSummary, type SectionSemanticTags } from "./knowledge-tagger";
+import {
+  applyCaseTaskProposal,
+  getCaseTaskState,
+  type ProposedCaseTask,
+} from "./task-store";
 
 // Client creation - recreated when API key changes
 // Web shim (imported in server/index.ts) handles runtime selection
@@ -224,19 +229,76 @@ const TOOLS: Anthropic.Tool[] = [
     }
   },
   {
+    name: "get_case_task_state",
+    description: "Get current case task-generation state. Returns changed/new documents since last accepted scan plus pending case tasks. Use this before proposing a new case task list.",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "save_case_tasks",
+    description: "Save approved case tasks into the shared firm task list with dedupe memory. Only call after the user explicitly approves the proposed tasks.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        tasks: {
+          type: "array",
+          description: "Approved tasks to save.",
+          items: {
+            type: "object",
+            properties: {
+              text: { type: "string", description: "Task description." },
+              priority: {
+                type: "string",
+                enum: ["high", "medium", "low"],
+                description: "Task priority.",
+              },
+              source_documents: {
+                type: "array",
+                description: "Optional source document selectors (doc_id, path, or unique filename).",
+                items: { type: "string" },
+              },
+              task_key: {
+                type: "string",
+                description: "Optional stable task key. If omitted, one is derived deterministically.",
+              },
+            },
+            required: ["text"],
+          },
+        },
+        mark_all_documents_scanned: {
+          type: "boolean",
+          description: "Default true. Marks the current case document set as scanned so unchanged docs do not regenerate tasks next time.",
+        },
+      },
+      required: ["tasks"],
+    },
+  },
+  {
     name: "generate_document",
-    description: "Delegate to a specialized agent to draft a formal document. Use this when the user asks you to write, draft, create, or generate a document like a demand letter, case memo, settlement calculation, formal letter, or a hearing Decision & Order. The agent has access to templates and will create a complete, professional document.",
+    description: "Delegate to a specialized agent to draft a formal document for personal, family, or business support workflows.",
     input_schema: {
       type: "object" as const,
       properties: {
         document_type: {
           type: "string",
-          enum: ["demand_letter", "case_memo", "settlement", "general_letter", "decision_order"],
-          description: "Type of document to generate: demand_letter (to insurance), case_memo (internal summary), settlement (disbursement calc), general_letter (LOP, records request, etc.), decision_order (post-hearing Decision & Order draft)."
+          enum: [
+            "financial_summary",
+            "estate_checklist",
+            "medical_summary",
+            "care_plan",
+            "correspondence",
+            "meeting_minutes",
+            "action_plan",
+            "custom_document",
+          ],
+          description: "Type of document to generate for general support use cases."
         },
         instructions: {
           type: "string",
-          description: "Specific instructions for the document (e.g., 'Focus on the soft tissue injuries', 'Include future medical needs'). Pass along any specific requests from the user."
+          description: "Specific instructions for the document."
         }
       },
       required: ["document_type", "instructions"]
@@ -333,109 +395,6 @@ const TOOLS: Anthropic.Tool[] = [
     }
   },
   {
-    name: "create_evidence_packet",
-    description: "Plan an evidence packet for a workers' compensation hearing. Returns instructions to review documents with the user before building. Does NOT generate a PDF — use build_evidence_packet after the user confirms the document list.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        hearing_number: {
-          type: "string",
-          description: "Hearing number (examples: '2680509-RA' or 'HO-2680509-RA'). Optional if the case has exactly one hearing."
-        },
-      },
-      required: []
-    }
-  },
-  {
-    name: "build_evidence_packet",
-    description: "Open the Packet Creation UI with a curated, ordered document list. Use after planning/selecting order with the user.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        hearing_number: {
-          type: "string",
-          description: "Hearing number for caption/output naming (example: '2680509-RA')."
-        },
-        documents: {
-          type: "array",
-          description: "Explicit ordered list of indexed documents to include. Prefer doc_id values from create_evidence_packet output; path or filename+folder is accepted as a compatibility fallback.",
-          items: {
-            type: "object",
-            properties: {
-              doc_id: { type: "string" },
-              docId: { type: "string" },
-              document_id: { type: "string" },
-              documentId: { type: "string" },
-              id: { type: "string" },
-              path: { type: "string" },
-              folder: { type: "string" },
-              title: { type: "string" },
-              date: { type: "string" },
-              doc_type: { type: "string" },
-              docType: { type: "string" },
-              include: { type: "boolean" },
-              fileName: { type: "string" },
-              filename: { type: "string" },
-              file: { type: "string" },
-            },
-            required: [],
-          },
-        },
-        output_path: {
-          type: "string",
-          description: "Optional relative output path for packet PDF."
-        },
-        hearing_datetime: {
-          type: "string",
-          description: "Optional hearing date/time string for caption."
-        },
-        appearance: {
-          type: "string",
-          description: "Optional appearance line for caption."
-        },
-        redaction_mode: {
-          type: "string",
-          enum: ["off", "detect_only", "best_effort"],
-          description: "PII mode."
-        },
-        include_affirmation_page: {
-          type: "boolean",
-          description: "Optional override for affirmation/certificate page."
-        },
-        page_stamp_start: {
-          type: "number",
-          description: "Optional exhibit page start number."
-        },
-        claim_number: {
-          type: "string",
-          description: "The workers' compensation claim number (e.g. 'WC-2024-001234'). Extracted from the document index or case documents."
-        },
-        hearing_type: {
-          type: "string",
-          enum: ["HO", "AO"],
-          description: "Type of hearing: 'HO' for Hearing Officer (default), 'AO' for Appeals Officer (appeal of a previous decision)."
-        },
-        issue_on_appeal: {
-          type: "string",
-          description: "For Appeals Officer (AO) hearings: a 1-2 sentence summary of the issue on appeal. Leave empty for Hearing Officer (HO) hearings."
-        },
-        service: {
-          type: "object",
-          properties: {
-            service_date: { type: "string" },
-            service_method: { type: "string" },
-            recipients: { type: "array", items: { type: "string" } },
-            served_by: { type: "string" },
-            serviceDate: { type: "string" },
-            serviceMethod: { type: "string" },
-            servedBy: { type: "string" },
-          },
-        },
-      },
-      required: ["documents"]
-    }
-  },
-  {
     name: "get_conflicts",
     description: "Get document conflicts that need review. Returns a paged set of needs_review items with their conflicting values and sources. Use this when the user wants to review conflicts in batches.",
     input_schema: {
@@ -497,6 +456,47 @@ const TOOLS: Anthropic.Tool[] = [
       },
       required: ["field", "resolved_value"]
     }
+  },
+  {
+    name: "get_context_questions",
+    description: "Get documents that need user clarification. Returns a paged set of ambiguous documents with questions about their purpose. Use this when the user wants to review documents needing context.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        offset: {
+          type: "number",
+          description: "0-based offset to start paging from."
+        },
+        limit: {
+          type: "number",
+          description: "Maximum items in this batch. Default 25, max 80."
+        }
+      },
+      required: []
+    }
+  },
+  {
+    name: "resolve_context",
+    description: "Provide context for ambiguous documents. Takes an array of resolutions, each with folder, filename, and the user's explanation of what the document is.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        resolutions: {
+          type: "array",
+          description: "Array of context resolutions",
+          items: {
+            type: "object",
+            properties: {
+              folder: { type: "string", description: "The folder containing the file" },
+              filename: { type: "string", description: "The filename" },
+              context: { type: "string", description: "User's explanation of what this document is and how it relates to the case" }
+            },
+            required: ["folder", "filename", "context"]
+          }
+        }
+      },
+      required: ["resolutions"]
+    }
   }
 ];
 
@@ -506,9 +506,10 @@ const WRITE_TOOLS = new Set([
   "update_file_entry",
   "rerun_hypergraph",
   "generate_document",
-  "build_evidence_packet",
+  "save_case_tasks",
   "batch_resolve_conflicts",
   "resolve_conflict",
+  "resolve_context",
 ]);
 
 function getTools(readOnlyMode: boolean): Anthropic.Tool[] {
@@ -1150,8 +1151,10 @@ function buildMetaToolIndexText(): string {
     "read_index_slice — Bounded reads of .ai_tool/document_index.json for deep conflict/data review.",
     "rerun_hypergraph — Re-runs hypergraph from document_index.json and can refresh needs_review.",
     "update_index / update_case_summary / update_file_entry — Write into document_index.json fields and conflict decisions.",
+    "get_case_task_state / save_case_tasks — Propose and save case-level tasks with dedupe memory across scans.",
     "generate_document — Delegates formal document drafting to the doc agent.",
     "create_document_view / get_conflicts / batch_resolve_conflicts / resolve_conflict — Review/resolve needs_review items in the same session.",
+    "get_context_questions / resolve_context — Review/clarify ambiguous documents that need user context.",
   ];
 
   return [
@@ -1746,140 +1749,13 @@ export async function executeTool(
         });
       }
 
-      case "create_evidence_packet": {
-        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
-        const indexContent = await readFile(indexPath, "utf-8");
-        const indexData = JSON.parse(indexContent);
-
-        const hearingNumber = typeof toolInput.hearing_number === "string"
-          ? toolInput.hearing_number.trim()
-          : "";
-
-        const claimantName = indexData?.summary?.client || "";
-        const claimNumbers = indexData?.summary?.claim_numbers || {};
-        const firstClaimNumber = Object.values(claimNumbers).find((v: unknown) => typeof v === "string") as string || "";
-        const resolvedClaimNumber =
-          (typeof indexData?.summary?.wc_carrier?.claim_number === "string"
-            && indexData.summary.wc_carrier.claim_number.trim()) ||
-          firstClaimNumber;
-
-        // Count total documents for reference (without returning them all)
-        const folders = indexData?.folders || {};
-        let docCount = 0;
-        for (const [, folderData] of Object.entries(folders) as [string, any][]) {
-          const files = Array.isArray(folderData) ? folderData : folderData?.files || folderData?.documents || [];
-          docCount += files.length;
-        }
-
-        const result: Record<string, any> = {
-          success: true,
-          totalIndexedDocuments: docCount,
-          hearingNumber: hearingNumber || null,
-          caption: { claimantName, claimNumber: resolvedClaimNumber },
-          instruction: [
-            "This is a PLANNING step only — no PDF has been generated yet.",
-            "Use the meta-index already in your context to identify relevant documents for this packet:",
-            "1. If a hearing number was provided, find and read the hearing notice using read_file or read_document to understand what this hearing is for.",
-            "2. Determine the hearing type: Read the hearing notice to check if this is an AO (Appeals Officer) or HO (Hearing Officer) hearing. Also check the hearing number format — a suffix like '-RA' indicates a reconsideration/appeal (AO). Otherwise default to HO.",
-            "3. LOAD EVIDENCE PACKET RULES: Check the PRACTICE KNOWLEDGE meta-index in your context. Find the section tagged with 'Applies to: evidence_packet' and use read_file to load its full content. Follow those rules for document ordering, inclusion/exclusion, and packet structure.",
-            "4. Review the meta-index folders in your context — look at filenames, types, dates, and facts to identify which documents belong in the packet.",
-            "5. For folders with relevant documents, use read_file(\".ai_tool/indexes/{FolderName}.json\") to get doc_id values for the specific files you want to include.",
-            "6. Present the proposed ordered document list to the user for review. Show title, folder, and why each was included.",
-            "7. EXPLAIN YOUR REASONING: Before showing the document list, explain which evidence packet rules you found and how you applied them. Cite specific rules that influenced document ordering, inclusion, or exclusion. If no rules were found in the knowledge base, state that and explain the default ordering logic you used.",
-            "8. After the user confirms (or adjusts), call build_evidence_packet with the verified ordered list using doc_id for each document. Set hearing_type to 'AO' or 'HO' based on step 2.",
-            "Do NOT skip straight to build_evidence_packet without showing the user the proposed list first.",
-          ].join("\n"),
-        };
-
-        return JSON.stringify(result);
-      }
-
-      case "build_evidence_packet": {
-        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
-        const indexContent = await readFile(indexPath, "utf-8");
-        const indexData = JSON.parse(indexContent);
-
-        const requestedDocuments = normalizeDocumentsInput(toolInput.documents);
-        if (requestedDocuments.length === 0) {
-          return JSON.stringify({
-            success: false,
-            error: "build_evidence_packet requires a non-empty documents[] ordered list.",
-          });
-        }
-        const { documents, unresolvedSelectors } = canonicalizePacketDocumentsFromIndex(requestedDocuments, indexData);
-        if (documents.length === 0) {
-          return JSON.stringify({
-            success: false,
-            error: "None of the selected documents matched indexed files (doc_id or path).",
-            invalidSelectors: unresolvedSelectors,
-          });
-        }
-
-        const hearingInput = typeof toolInput.hearing_number === "string"
-          ? toolInput.hearing_number.trim()
-          : typeof toolInput.hearingNumber === "string"
-            ? toolInput.hearingNumber.trim()
-            : "";
-        const inferredHearing = hearingInput || inferHearingNumberFromDocs(
-          documents.map((doc) => ({
-            path: doc.path,
-            title: doc.title,
-            date: doc.date,
-            docType: doc.docType,
-          }))
-        );
-        const hearingNumber = inferredHearing ? extractHearingCore(inferredHearing) : undefined;
-        const inputService = normalizeServiceInput(toolInput.service);
-
-        const claimantName = indexData?.summary?.client || "";
-        const claimNumbers = indexData?.summary?.claim_numbers || {};
-        const firstClaimNumber = Object.values(claimNumbers).find((v: unknown) => typeof v === "string") as string || "";
-        const resolvedClaimNumber =
-          (typeof toolInput.claim_number === "string" && toolInput.claim_number.trim()) ||
-          (typeof indexData?.summary?.wc_carrier?.claim_number === "string" && indexData.summary.wc_carrier.claim_number.trim()) ||
-          firstClaimNumber;
-        const issueOnAppeal = typeof toolInput.issue_on_appeal === "string" ? toolInput.issue_on_appeal : "";
-
-        // Determine hearing type and derive templateId
-        let hearingType = typeof toolInput.hearing_type === "string"
-          ? toolInput.hearing_type.toUpperCase()
-          : "";
-        // Fallback: infer from hearing number if agent didn't specify
-        if (!hearingType && hearingNumber) {
-          const isAppealFormat = /-(RA|AP|APPEAL)/i.test(hearingNumber);
-          if (isAppealFormat) hearingType = "AO";
-        }
-        const templateId = (hearingType === "AO" || issueOnAppeal.trim())
-          ? "ao-standard"
-          : "ho-standard";
-
-        const proposedDocuments = documents.map((doc) => ({
-          docId: buildDocumentIdFromPath(doc.path),
-          path: doc.path,
-          title: doc.title,
-          date: doc.date,
-          docType: doc.docType,
-          fileName: doc.path.split("/").pop() || doc.path,
-        }));
-
+      case "create_evidence_packet":
+      case "build_evidence_packet":
         return JSON.stringify({
-          success: true,
-          packetModeOpened: true,
-          proposedDocuments,
-          invalidSelectors: unresolvedSelectors.length > 0 ? unresolvedSelectors : undefined,
-          caption: {
-            claimantName,
-            claimNumber: resolvedClaimNumber,
-            hearingNumber: hearingNumber || undefined,
-            hearingDateTime: typeof toolInput.hearing_datetime === "string" ? toolInput.hearing_datetime : undefined,
-            appearance: typeof toolInput.appearance === "string" ? toolInput.appearance : undefined,
-          },
-          issueOnAppeal,
-          templateId,
-          service: inputService,
-          instruction: "The Packet Creation UI has opened with the curated documents pre-loaded. Let the user know they can review the order, edit front matter, run a PII scan, and generate the final PDF from the interface.",
+          success: false,
+          error: "evidence_packet_workflow_removed",
+          message: "Evidence packet workflows have been deprecated in this release. Use document generation and document views instead.",
         });
-      }
 
       case "update_index": {
         const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
@@ -1949,6 +1825,57 @@ export async function executeTool(
 
         await saveIndexAndMap(caseFolder, indexPath, index);
         return `Updated summary.case_summary (${index.summary.case_summary.length} chars)${index.case_phase ? ` and case_phase=${index.case_phase}` : ""}`;
+      }
+
+      case "get_case_task_state": {
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+        const indexContent = await readFile(indexPath, "utf-8");
+        const index = JSON.parse(indexContent);
+
+        const state = await getCaseTaskState({
+          firmRoot: resolveFirmRoot(caseFolder),
+          caseFolder,
+          indexData: index,
+        });
+
+        return JSON.stringify(state);
+      }
+
+      case "save_case_tasks": {
+        const rawTasks = Array.isArray(toolInput.tasks) ? toolInput.tasks : [];
+        const tasks: ProposedCaseTask[] = rawTasks
+          .filter((task): task is Record<string, unknown> => !!task && typeof task === "object")
+          .map((task) => ({
+            text: typeof task.text === "string" ? task.text : "",
+            priority: typeof task.priority === "string"
+              ? task.priority.toLowerCase() as "high" | "medium" | "low"
+              : undefined,
+            source_documents: Array.isArray(task.source_documents)
+              ? task.source_documents.filter((entry): entry is string => typeof entry === "string")
+              : Array.isArray(task.sourceDocuments)
+                ? task.sourceDocuments.filter((entry): entry is string => typeof entry === "string")
+                : undefined,
+            task_key: typeof task.task_key === "string"
+              ? task.task_key
+              : typeof task.taskKey === "string"
+                ? task.taskKey
+                : undefined,
+          }))
+          .filter((task) => task.text.trim().length > 0);
+
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+        const indexContent = await readFile(indexPath, "utf-8");
+        const index = JSON.parse(indexContent);
+
+        const result = await applyCaseTaskProposal({
+          firmRoot: resolveFirmRoot(caseFolder),
+          caseFolder,
+          indexData: index,
+          tasks,
+          markAllDocumentsScanned: toolInput.mark_all_documents_scanned !== false,
+        });
+
+        return JSON.stringify(result);
       }
 
       case "update_file_entry": {
@@ -2342,12 +2269,131 @@ export async function executeTool(
         });
       }
 
+      case "get_context_questions": {
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+        const indexContent = await readFile(indexPath, "utf-8");
+        const index = JSON.parse(indexContent);
+
+        const needsContext: any[] = index.needs_context || [];
+        const offsetRaw = Number(toolInput.offset);
+        const limitRaw = Number(toolInput.limit);
+        const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0
+          ? Math.floor(offsetRaw)
+          : 0;
+        const limit = Number.isFinite(limitRaw) && limitRaw > 0
+          ? Math.min(Math.floor(limitRaw), CONFLICT_BATCH_MAX)
+          : CONFLICT_BATCH_DEFAULT;
+        const clampedOffset = Math.min(offset, needsContext.length);
+        const end = Math.min(clampedOffset + limit, needsContext.length);
+
+        if (needsContext.length === 0) {
+          return JSON.stringify({
+            status: "all_done",
+            message: "All documents have been clarified! No more items needing context.",
+            count: 0,
+            returned: 0,
+            offset: 0,
+            limit: 0,
+            has_more: false,
+            next_offset: null,
+            items: []
+          });
+        }
+
+        const items = needsContext.slice(clampedOffset, end).map((item: any, batchIndex: number) => ({
+          index: clampedOffset + batchIndex + 1,
+          folder: item.folder,
+          filename: item.filename,
+          type: item.type,
+          key_info: item.key_info,
+          question: item.question,
+        }));
+
+        return JSON.stringify({
+          status: "context_needed",
+          count: needsContext.length,
+          returned: items.length,
+          offset: clampedOffset,
+          limit,
+          has_more: end < needsContext.length,
+          next_offset: end < needsContext.length ? end : null,
+          items
+        });
+      }
+
+      case "resolve_context": {
+        const { resolutions } = toolInput;
+        if (!Array.isArray(resolutions) || resolutions.length === 0) {
+          return JSON.stringify({ success: false, error: "No resolutions provided" });
+        }
+
+        const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
+        const indexContent = await readFile(indexPath, "utf-8");
+        const index = JSON.parse(indexContent);
+
+        let needsContext: any[] = index.needs_context || [];
+        const resolved: string[] = [];
+        const failed: string[] = [];
+
+        for (const resolution of resolutions) {
+          const { folder, filename, context } = resolution;
+          if (!folder || !filename || !context) {
+            failed.push(`${folder}/${filename}`);
+            continue;
+          }
+
+          // Find and update the file entry in the index
+          const folderData = index.folders?.[folder];
+          if (!folderData?.files) {
+            failed.push(`${folder}/${filename}`);
+            continue;
+          }
+
+          const fileEntry = folderData.files.find((f: any) => f.filename === filename);
+          if (!fileEntry) {
+            failed.push(`${folder}/${filename}`);
+            continue;
+          }
+
+          // Set user_context on the file entry
+          fileEntry.user_context = context;
+          fileEntry.user_context_at = new Date().toISOString();
+
+          // Remove from needs_context
+          needsContext = needsContext.filter(
+            (nc: any) => !(nc.folder === folder && nc.filename === filename)
+          );
+
+          resolved.push(`${folder}/${filename}`);
+        }
+
+        index.needs_context = needsContext;
+
+        // Also update per-folder index files
+        await saveIndexAndMap(caseFolder, indexPath, index);
+
+        return JSON.stringify({
+          success: resolved.length > 0,
+          resolved: resolved.length,
+          failed: failed.length,
+          remaining: needsContext.length,
+          resolved_files: resolved,
+          failed_files: failed,
+          message: failed.length > 0
+            ? `WARNING: ${failed.length} file(s) not found. Make sure folder and filename match exactly.`
+            : `Successfully provided context for ${resolved.length} document(s)`,
+          ...(needsContext.length > 0 ? {
+            action_required: `${needsContext.length} document(s) still need clarification. Call get_context_questions to continue.`
+          } : {})
+        });
+      }
+
       default:
         return `Unknown tool: ${toolName}`;
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (toolName === "build_evidence_packet" || toolName === "create_evidence_packet" || toolName === "create_document_view") {
+    if (toolName === "create_document_view") {
       return JSON.stringify({
         success: false,
         error: `Error executing ${toolName}: ${message}`,
@@ -2431,15 +2477,18 @@ async function buildContext(caseFolder: string): Promise<string> {
 
 // Document type descriptions for user feedback
 const DOC_TYPE_NAMES: Record<DocumentType, string> = {
-  demand_letter: "demand letter",
-  case_memo: "case memo",
-  settlement: "settlement calculation",
-  general_letter: "letter",
-  decision_order: "Decision & Order"
+  financial_summary: "financial summary",
+  estate_checklist: "estate checklist",
+  medical_summary: "medical summary",
+  care_plan: "care plan",
+  correspondence: "correspondence",
+  meeting_minutes: "meeting minutes",
+  action_plan: "action plan",
+  custom_document: "custom document",
 };
 
 // System prompt for direct chat (context gets appended)
-const BASE_SYSTEM_PROMPT = `You are a helpful legal assistant for a Nevada injury law firm (Personal Injury and Workers' Compensation). You help attorneys and staff with case management, document review, answering questions, and drafting documents.
+const BASE_SYSTEM_PROMPT = `You are a helpful assistant for personal, family, and business support workflows. You help users with document review, knowledge retrieval, structured updates, and document drafting.
 
 ## NAVIGATING THE CASE
 
@@ -2478,16 +2527,32 @@ Start broad, zoom in as needed.
 
 4. **Re-Extract File Data**: Use update_file_entry when the user asks you to re-read a document and update its entry in the index. This updates a specific file within a folder — its key_info, type, date, extracted_data, and issues.
 
-5. **Generate Documents**: When the user asks you to draft, write, create, or generate a formal document (demand letter, case memo, settlement calculation, letter, or Decision & Order), use the generate_document tool. This delegates to a specialized agent with access to firm templates that will create a complete, professional document.
+5. **Generate Case Tasks**: For case-level task generation, use get_case_task_state to identify changed/new documents, propose tasks in chat, and only call save_case_tasks after explicit user approval.
+
+6. **Generate Documents**: When the user asks you to draft, write, create, or generate a formal document (financial summary, estate checklist, medical summary, care plan, correspondence, meeting minutes, action plan, or custom document), use the generate_document tool.
+
+## WHEN TO USE case task tools
+
+When the user asks what tasks should be done for this specific case:
+1. Call get_case_task_state first.
+2. If changed_documents_count is 0, explain there are no new documents to generate fresh tasks from.
+3. If there are changed/new documents, propose a concise prioritized task list and cite the relevant source documents.
+4. Ask for approval before saving.
+5. Only after user approval, call save_case_tasks with the approved tasks.
+
+Rules:
+- Do not call save_case_tasks before explicit user approval.
+- Prefer source_documents values using exact document paths or doc_id values from get_case_task_state.
+- If user asks to revise the proposed tasks, revise first and save only after approval.
 
 ## WHEN TO USE generate_document
 
 Use this tool when the user wants a NEW document created:
-- "Draft a demand letter"
-- "Write up a case memo"
-- "Create a settlement breakdown"
-- "Prepare a letter of protection"
-- "Draft an Appeals Officer Decision & Order"
+- "Draft a financial summary"
+- "Create an estate checklist"
+- "Write meeting minutes"
+- "Prepare a care plan"
+- "Draft a correspondence letter"
 
 Do NOT use it for:
 - Questions about what should go in a document
@@ -2495,11 +2560,11 @@ Do NOT use it for:
 - Simple notes or quick responses
 
 Critical safety rules for formal documents:
-- Never use write_file to create demand letters, case memos, settlement docs, letters, or Decision & Orders.
+- Never use write_file to create formal generated documents.
 - Never claim a document was saved unless generate_document returned a saved path.
 - If generate_document fails or reports no saved file, report that failure explicitly instead of writing a manual fallback file.
 
-5. **Read Documents with Vision**: Use read_document for PDFs in detail, especially scanned or layout-heavy PDFs. This spawns a vision-capable reader that sees rendered pages — form layouts, tables, handwriting, checkboxes, images — not just extracted text. Much better than read_file for PDFs with complex formatting.
+7. **Read Documents with Vision**: Use read_document for PDFs in detail, especially scanned or layout-heavy PDFs. This spawns a vision-capable reader that sees rendered pages — form layouts, tables, handwriting, checkboxes, images — not just extracted text. Much better than read_file for PDFs with complex formatting.
 
 ## WHEN TO USE read_document
 
@@ -2525,7 +2590,7 @@ Use rerun_hypergraph when:
 
 Use this tool when the user asks you to re-read a document and update the index with the new extraction. The typical flow:
 
-1. User says "read DWC D-8 Wages.pdf" or "re-extract the intake form"
+1. User says "read this financial statement.pdf" or "re-extract the intake form"
 2. If it's a PDF, call read_document to read the file with vision; otherwise call read_file.
 3. You present what you found to the user
 4. User says "update the file", "looks good, save it", or "update the index"
@@ -2564,29 +2629,6 @@ Requirements:
 - After creating the view, explain what you selected and why in normal chat text.
 
 7. **Review Document Conflicts**: When the user wants to review conflicts, use get_conflicts in paginated batches and resolve one batch at a time.
-
-8. **Build Hearing Evidence Packets**: Use create_evidence_packet to plan, then build_evidence_packet to generate. Always review the document list with the user before building.
-
-## WHEN TO USE HEARING PACKET TOOLS
-
-Use these tools when the user asks for an "evidence packet", "hearing packet", "document index packet", or "H.O. packet".
-
-Two-step flow:
-1. **create_evidence_packet** (planning step): Call this first. It returns instructions telling you to review the document index, check knowledge rules, and present a proposed document list to the user. No PDF is generated.
-2. **build_evidence_packet** (execution step): Call this AFTER the user has reviewed and confirmed the document list. This opens the Packet Creation UI where the user can make final adjustments and generate the PDF.
-
-Requirements:
-- ALWAYS start with create_evidence_packet — never skip straight to build_evidence_packet.
-- Use the PRACTICE KNOWLEDGE meta-index to find the section tagged with "Applies to: evidence_packet", then read_file it to get the full evidence packet rules. Follow those rules for document ordering, inclusion/exclusion, and packet structure.
-- Present the proposed document list to the user and wait for confirmation before building.
-- Pass \`doc_id\` values into build_evidence_packet documents[].
-- If \`doc_id\` is unavailable, pass exact \`filename\` + \`folder\` from the index.
-- Compatibility: exact indexed \`path\` is accepted, but do not invent/synthesize paths.
-- When calling build_evidence_packet, include \`claim_number\` from the document index (check \`wc_carrier.claim_number\` first, then \`claim_numbers\`).
-- When calling build_evidence_packet, set \`hearing_type\` to "AO" for Appeals Officer hearings or "HO" for Hearing Officer hearings.
-- For AO hearings, also include \`issue_on_appeal\` with a 1-2 sentence summary of the contested issue based on case documents. Leave both empty for HO hearings.
-- Do NOT claim the Packet Creation UI opened unless build_evidence_packet returns \`success: true\`.
-- After build_evidence_packet succeeds, let the user know the Packet Creation interface has opened with their documents pre-loaded.
 
 ## DOCUMENT REVIEW MODE
 
@@ -2668,6 +2710,50 @@ User: "Yes, apply them"
 You: [call batch_resolve_conflicts with the 15 resolutions]
 
 You: "Done! 15 resolved. Now let's look at the remaining 8..."
+
+## DOCUMENT CLARIFICATION MODE
+
+Use this when the user says things like:
+- "Clarify the documents"
+- "What documents need context?"
+- "Review the unclear documents"
+
+### How to conduct a clarification review:
+
+1. **Get first batch** - Call get_context_questions with defaults (offset 0, limit 25) to retrieve ambiguous documents.
+
+2. **Present clearly** - For each document, show:
+   - Folder and filename
+   - Current type and key_info
+   - The specific question about what context is needed
+
+3. **Collect answers** - Ask the user to explain each document. Group them for efficient review.
+
+4. **Batch resolve** - Call resolve_context with all user-provided explanations at once.
+
+5. **Verify and continue** - If more documents remain, call get_context_questions again with the next offset.
+
+### Example flow:
+
+User: "Review the documents that need clarification"
+
+You: [call get_context_questions]
+
+You: "I found 5 documents that need clarification. Here they are:
+
+1. **receipts/walmart_receipt.pdf** (type: other)
+   Currently extracted as: "retail receipt $47.23"
+   → What is this receipt for and how does it relate to your case?
+
+2. **general/scan001.pdf** (type: other)
+   Currently extracted as: "scanned document"
+   → What is this document?
+
+Please tell me about each one."
+
+User: "1 is a receipt for medical supplies I bought after surgery. 2 is a note from my employer about light duty."
+
+You: [call resolve_context with both answers]
 
 ## GUIDELINES
 
@@ -2802,9 +2888,10 @@ export async function* directChat(
     for (const toolUse of toolUseBlocks) {
       // Handle generate_document specially - it's an async generator
       if (toolUse.name === "generate_document") {
-        const docType = toolUse.input.document_type as DocumentType;
+        const rawDocType = String(toolUse.input.document_type || "");
+        const docType = normalizeDocumentType(rawDocType);
         const instructions = toolUse.input.instructions as string;
-        const docTypeName = DOC_TYPE_NAMES[docType];
+        const docTypeName = DOC_TYPE_NAMES[docType] || "document";
 
         yield { type: "delegating", content: `Generating ${docTypeName}...` };
 
@@ -2892,36 +2979,6 @@ export async function* directChat(
           const parsed = safeJsonParse<{ success?: boolean; view?: AgentDocumentView }>(result);
           if (parsed?.success && parsed.view) {
             yield { type: "document_view", view: parsed.view };
-          }
-        }
-        if (toolUse.name === "build_evidence_packet") {
-          const parsed = safeJsonParse<{
-            success?: boolean;
-            packetModeOpened?: boolean;
-            proposedDocuments?: Array<{
-              docId: string;
-              path?: string;
-              title: string;
-              date: string | null;
-              docType: string;
-              fileName: string;
-            }>;
-            caption?: { claimantName: string; claimNumber: string; hearingNumber?: string; hearingDateTime?: string; appearance?: string };
-            issueOnAppeal?: string;
-            templateId?: string;
-            service?: EvidencePacketServiceInfo;
-          }>(result);
-          if ((parsed?.success || parsed?.packetModeOpened) && Array.isArray(parsed.proposedDocuments)) {
-            yield {
-              type: "evidence_packet_plan",
-              plan: {
-                proposedDocuments: parsed.proposedDocuments,
-                caption: parsed.caption,
-                issueOnAppeal: parsed.issueOnAppeal || "",
-                templateId: parsed.templateId,
-                service: parsed.service,
-              },
-            };
           }
         }
         toolResults.push({

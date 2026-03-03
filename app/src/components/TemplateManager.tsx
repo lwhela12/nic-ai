@@ -350,7 +350,7 @@ export default function TemplateManager({ firmRoot, apiUrl }: Props) {
     switch (status) {
       case 'parsed':
         return (
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700">
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-accent-100 text-accent-700">
             Parsed
           </span>
         )
@@ -417,8 +417,8 @@ export default function TemplateManager({ firmRoot, apiUrl }: Props) {
                 <button
                   onClick={handleSaveMetadata}
                   disabled={saving}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white
-                             text-sm font-medium rounded-lg hover:bg-emerald-700 transition-colors
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-accent-600 text-white
+                             text-sm font-medium rounded-lg hover:bg-accent-700 transition-colors
                              disabled:opacity-50"
                 >
                   <CheckIcon />
@@ -573,8 +573,8 @@ export default function TemplateManager({ firmRoot, apiUrl }: Props) {
         <div className="flex items-center gap-2">
           <button
             onClick={() => setShowUploadModal(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white
-                       text-sm font-medium rounded-lg hover:bg-emerald-700 transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent-600 text-white
+                       text-sm font-medium rounded-lg hover:bg-accent-700 transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />

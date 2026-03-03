@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import type {
   AgentDocumentView,
   DocumentFile,
@@ -19,7 +19,7 @@ interface Props {
   caseFolder: string
   apiUrl: string
   onDocSelect: (content: string, docPath?: string, filePath?: string) => void
-  onFileView: (url: string, filename: string, filePath: string) => void
+  onFileView: (url: string, filename: string, filePath: string, startPage?: number) => void
   indexStatus?: IndexStatus | null
   agentView?: AgentDocumentView | null
   onClearAgentView?: () => void
@@ -51,6 +51,16 @@ type FilterOption =
 
 type FileDataObject = Exclude<DocumentFile, string>
 
+interface VirtualDocRow {
+  vdoc_id: string
+  parent_filename: string
+  start_page: number
+  end_page: number
+  type: string
+  key_info: string
+  date?: string
+}
+
 interface FileRow {
   path: string
   folder: string
@@ -68,6 +78,7 @@ interface FileRow {
   extractionIssue?: string
   needsReview: boolean
   reindexStatus?: 'NEW' | 'MOD'
+  virtualDocuments?: VirtualDocRow[]
 }
 
 interface FilterDefinition {
@@ -455,6 +466,25 @@ export default function FileViewer({
             ? fileData.issues.trim()
             : undefined
 
+        // Parse virtual documents if present
+        let virtualDocuments: VirtualDocRow[] | undefined
+        if (fileData && Array.isArray((fileData as any).virtual_documents)) {
+          const vdocs = (fileData as any).virtual_documents as any[]
+          if (vdocs.length > 0) {
+            virtualDocuments = vdocs
+              .filter((vd: any) => vd && typeof vd === 'object' && vd.vdoc_id)
+              .map((vd: any) => ({
+                vdoc_id: String(vd.vdoc_id),
+                parent_filename: String(vd.parent_filename || fileName),
+                start_page: Number(vd.start_page) || 1,
+                end_page: Number(vd.end_page) || 1,
+                type: String(vd.type || 'other'),
+                key_info: String(vd.key_info || ''),
+                date: typeof vd.date === 'string' ? vd.date : undefined,
+              }))
+          }
+        }
+
         rows.push({
           path,
           folder,
@@ -472,6 +502,7 @@ export default function FileViewer({
           extractionIssue,
           needsReview: (hasHandwrittenData || !!extractionIssue) && !isUserReviewed,
           reindexStatus: filesNeedingReindex.get(lowerFileName),
+          virtualDocuments,
         })
       }
     }
@@ -663,7 +694,7 @@ export default function FileViewer({
       <div className="flex-1 overflow-y-auto px-3 py-3">
         {packetMode && (
           <div className="mb-3 px-2 py-2 bg-accent-50 border border-accent-200 rounded-lg">
-            <p className="text-xs font-medium text-accent-700">Select files for evidence packet</p>
+            <p className="text-xs font-medium text-accent-700">Select files for this review set</p>
             {packetSelectedPaths && packetSelectedPaths.size > 0 && (
               <p className="text-[11px] text-accent-600 mt-0.5">{packetSelectedPaths.size} selected</p>
             )}
@@ -719,8 +750,8 @@ export default function FileViewer({
                   const filePath = row.path
 
                   return (
+                  <React.Fragment key={`${folder}/${fileName}-${i}`}>
                     <div
-                      key={`${folder}/${fileName}-${i}`}
                       className={`flex items-center gap-1 group rounded-lg border px-1 focus-within:bg-surface-100 ${
                         hasWarning
                           ? 'bg-amber-50 border-amber-200'
@@ -751,7 +782,7 @@ export default function FileViewer({
                             )
                           }}
                           className="flex-shrink-0 p-0.5"
-                          title={packetSelectedPaths?.has(filePath) ? 'Remove from packet' : 'Add to packet'}
+                          title={packetSelectedPaths?.has(filePath) ? 'Remove from set' : 'Add to set'}
                         >
                           <div className={`w-4 h-4 rounded border-2 flex items-center justify-center transition-colors ${
                             packetSelectedPaths?.has(filePath)
@@ -775,7 +806,7 @@ export default function FileViewer({
                               </div>`
                             : ''
                           const reviewedBlock = isUserReviewed
-                            ? `<div class="mt-4 bg-emerald-50 border border-emerald-200 rounded-xl p-4 text-sm text-emerald-800">
+                            ? `<div class="mt-4 bg-accent-50 border border-accent-200 rounded-xl p-4 text-sm text-accent-800">
                                 <span class="font-medium">✅ User Reviewed</span>
                                 ${reviewedAt ? `<div class="mt-2 text-xs">Reviewed at: ${reviewedAt}</div>` : ''}
                                 ${reviewNotes ? `<div class="mt-2 text-xs">${reviewNotes}</div>` : ''}
@@ -783,12 +814,12 @@ export default function FileViewer({
                             : ''
                           const content = `
 <div class="p-6">
-  <h2 class="text-lg font-semibold text-gray-900 mb-1">${title}</h2>
-  <p class="text-sm text-gray-500 mb-4">${fileName}</p>
-  ${date ? `<div class="text-sm mb-3"><span class="font-medium text-gray-700">Date:</span> <span class="text-gray-600">${date}</span></div>` : ''}
-  <div class="bg-gray-50 rounded-xl p-4">
-    <p class="text-sm font-medium text-gray-900 mb-2">Key Information</p>
-    <p class="text-sm text-gray-600 leading-relaxed">${keyInfo}</p>
+  <h2 class="text-lg font-semibold text-brand-900 mb-1">${title}</h2>
+  <p class="text-sm text-brand-500 mb-4">${fileName}</p>
+  ${date ? `<div class="text-sm mb-3"><span class="font-medium text-brand-700">Date:</span> <span class="text-brand-600">${date}</span></div>` : ''}
+  <div class="bg-surface-50 rounded-xl p-4">
+    <p class="text-sm font-medium text-brand-900 mb-2">Key Information</p>
+    <p class="text-sm text-brand-600 leading-relaxed">${keyInfo}</p>
   </div>
   ${issues ? `<div class="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800"><span class="font-medium">Issue:</span> ${issues}</div>` : ''}
   ${handwrittenWarning}
@@ -813,7 +844,7 @@ export default function FileViewer({
                         <span className="truncate">{fileName}</span>
                         {isUserReviewed && (
                           <span
-                            className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-emerald-100 text-emerald-700"
+                            className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent-100 text-accent-700"
                             title={reviewedAt ? `Reviewed at ${reviewedAt}` : 'User reviewed'}
                           >
                             REVIEWED
@@ -823,7 +854,7 @@ export default function FileViewer({
                           <span
                             className={`flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded ${
                               reindexStatus === 'NEW'
-                                ? 'bg-emerald-100 text-emerald-700'
+                                ? 'bg-accent-100 text-accent-700'
                                 : 'bg-amber-100 text-amber-700'
                             }`}
                           >
@@ -841,6 +872,50 @@ export default function FileViewer({
                         <EyeIcon />
                       </button>
                     </div>
+                    {row.virtualDocuments && row.virtualDocuments.length > 0 && (
+                      <div className="ml-6 pl-3 border-l border-surface-200 space-y-0.5">
+                        {row.virtualDocuments.map((vdoc) => (
+                          <div
+                            key={vdoc.vdoc_id}
+                            className="flex items-center gap-1 group rounded-lg bg-transparent border border-transparent"
+                          >
+                            <button
+                              onClick={() => {
+                                // Navigate the PDF viewer to this virtual document's start page
+                                onFileView(getFileUrl(filePath, fileName), fileName, filePath, vdoc.start_page)
+                              }}
+                              className="flex-1 flex items-center gap-2 text-left px-2 py-1 text-xs
+                                         text-brand-500 hover:bg-surface-100 hover:text-brand-700
+                                         rounded-lg truncate transition-colors"
+                              title={`${vdoc.type} — Pages ${vdoc.start_page}–${vdoc.end_page}${vdoc.date ? `\nDate: ${vdoc.date}` : ''}`}
+                            >
+                              <span className="text-brand-300">
+                                <DocumentIcon />
+                              </span>
+                              <span className="truncate">{vdoc.type}</span>
+                              <span className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-surface-100 text-brand-400">
+                                p.{vdoc.start_page}{vdoc.start_page !== vdoc.end_page ? `–${vdoc.end_page}` : ''}
+                              </span>
+                              {vdoc.date && (
+                                <span className="flex-shrink-0 text-[10px] text-brand-400">{vdoc.date}</span>
+                              )}
+                            </button>
+                            <button
+                              onClick={() => {
+                                console.log('[FileViewer.vdoc] clicking vdoc eye:', { filePath, fileName, startPage: vdoc.start_page })
+                                onFileView(getFileUrl(filePath, fileName), fileName, filePath, vdoc.start_page)
+                              }}
+                              className="p-1 text-brand-300 hover:text-accent-600 hover:bg-accent-50
+                                         rounded-md opacity-70 group-hover:opacity-100 transition-all"
+                              title={`View page ${vdoc.start_page}`}
+                            >
+                              <EyeIcon />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </React.Fragment>
                   )
                 })}
               </div>
@@ -874,7 +949,7 @@ export default function FileViewer({
                     <DocumentIcon />
                   </span>
                   <span className="truncate">{file.filename}</span>
-                  <span className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-emerald-100 text-emerald-700">
+                  <span className="flex-shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent-100 text-accent-700">
                     NEW
                   </span>
                 </div>
@@ -923,10 +998,10 @@ export default function FileViewer({
                     onDocSelect(`Error loading ${doc.name}`, undefined, undefined)
                   }
                 }}
-                className="w-full flex items-center gap-2 px-2 py-2 text-sm text-emerald-700
-                           hover:bg-emerald-50 rounded-lg truncate transition-colors"
+                className="w-full flex items-center gap-2 px-2 py-2 text-sm text-accent-700
+                           hover:bg-accent-50 rounded-lg truncate transition-colors"
               >
-                <span className="text-emerald-500">
+                <span className="text-accent-500">
                   <DocumentTextIcon />
                 </span>
                 <span className="truncate">{doc.name}</span>

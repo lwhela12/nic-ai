@@ -2,6 +2,7 @@ import { execFile } from "child_process";
 import { existsSync } from "fs";
 import { join, dirname } from "path";
 import { promisify } from "util";
+import { withLocalVfsFile } from "./vfs";
 
 const execFileAsync = promisify(execFile);
 
@@ -52,9 +53,32 @@ export async function extractPdfText(
   filePath: string,
   options: PdftotextOptions & { layout?: boolean } = {}
 ): Promise<string> {
-  const args = options.layout === false
-    ? [filePath, "-"]
-    : ["-layout", filePath, "-"];
-  const output = await runPdftotext(args, options);
-  return output.trim();
+  return withLocalVfsFile(filePath, async (localPath) => {
+    const args = options.layout === false
+      ? [localPath, "-"]
+      : ["-layout", localPath, "-"];
+    const output = await runPdftotext(args, options);
+    return output.trim();
+  });
+}
+
+/**
+ * Extract text from a single page of a PDF using pdftotext -f N -l N.
+ */
+export async function extractPdfTextByPage(
+  filePath: string,
+  page: number,
+  options: PdftotextOptions & { layout?: boolean } = {}
+): Promise<string> {
+  return withLocalVfsFile(filePath, async (localPath) => {
+    const args = [
+      "-f", String(page),
+      "-l", String(page),
+      ...(options.layout === false ? [] : ["-layout"]),
+      localPath,
+      "-",
+    ];
+    const output = await runPdftotext(args, options);
+    return output.trim();
+  });
 }

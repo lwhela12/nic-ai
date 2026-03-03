@@ -29,6 +29,7 @@ import { WC_DOC_TYPES, WC_PHASES } from "../practice-areas/workers-comp/config";
 export const PRACTICE_AREAS = {
   PI: "Personal Injury",
   WC: "Workers' Compensation",
+  EC: "Elder Care",
 } as const;
 
 export type PracticeAreaCode = keyof typeof PRACTICE_AREAS;
@@ -37,6 +38,7 @@ export type PracticeAreaName = (typeof PRACTICE_AREAS)[PracticeAreaCode];
 export const PracticeAreaSchema = z.enum([
   PRACTICE_AREAS.PI,
   PRACTICE_AREAS.WC,
+  PRACTICE_AREAS.EC,
 ]);
 
 // =============================================================================
@@ -138,6 +140,28 @@ export const SummarySchema = z.object({
   body_parts: z.array(z.string()).optional(), // Affected body parts
 });
 
+export const PageExtractionSchema = z.object({
+  page: z.number(),
+  type: z.string(),
+  key_info: z.string(),
+  has_handwritten_data: z.boolean().optional(),
+  handwritten_fields: z.array(z.string()).optional(),
+  extracted_data: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const VirtualDocumentSchema = z.object({
+  vdoc_id: z.string(),
+  parent_filename: z.string(),
+  start_page: z.number(),
+  end_page: z.number(),
+  type: z.string(),
+  key_info: z.string(),
+  date: z.string().optional(),
+  extracted_data: z.record(z.string(), z.unknown()).optional(),
+  has_handwritten_data: z.boolean().optional(),
+  handwritten_fields: z.array(z.string()).optional(),
+});
+
 export const FileEntrySchema = z.object({
   filename: z.string(),
   type: z.string(),
@@ -150,6 +174,11 @@ export const FileEntrySchema = z.object({
   reviewed_at: z.string().optional(),
   review_notes: z.string().optional(),
   extracted_data: z.record(z.string(), z.unknown()).optional(),
+  user_context: z.string().optional(),
+  user_context_at: z.string().optional(),
+  page_count: z.number().optional(),
+  page_extractions: z.array(PageExtractionSchema).optional(),
+  virtual_documents: z.array(VirtualDocumentSchema).optional(),
 });
 
 export const FolderSchema = z.object({
@@ -161,6 +190,14 @@ export const NeedsReviewSchema = z.object({
   conflicting_values: z.array(z.string()),
   sources: z.array(z.string()),
   reason: z.string(),
+});
+
+export const NeedsContextSchema = z.object({
+  folder: z.string(),
+  filename: z.string(),
+  type: z.string(),
+  key_info: z.string(),
+  question: z.string(),
 });
 
 export const ErrataSchema = z.object({
@@ -283,6 +320,7 @@ export const DocumentIndexSchema = z.object({
     .optional(),
   issues_found: z.array(z.string()).optional(),
   needs_review: z.array(NeedsReviewSchema).optional(),
+  needs_context: z.array(NeedsContextSchema).optional(),
   errata: z.array(ErrataSchema).optional(),
   reconciled_values: z.record(z.string(), z.unknown()).optional(),
   case_analysis: z.string().optional(),
@@ -339,6 +377,7 @@ export type ContainerInfo = z.infer<typeof ContainerInfoSchema>;
 export type Employer = z.infer<typeof EmployerSchema>;
 export type WCCarrier = z.infer<typeof WCCarrierSchema>;
 export type DisabilityStatus = z.infer<typeof DisabilityStatusSchema>;
+export type NeedsContext = z.infer<typeof NeedsContextSchema>;
 
 // =============================================================================
 // PRACTICE AREA HELPERS
@@ -964,6 +1003,16 @@ function normalizeFileEntry(value: unknown): FileEntry {
       typeof obj.extracted_data === "object" && obj.extracted_data !== null
         ? (obj.extracted_data as Record<string, unknown>)
         : undefined,
+    user_context: typeof obj.user_context === "string" && obj.user_context.trim()
+      ? obj.user_context.trim() : undefined,
+    user_context_at: typeof obj.user_context_at === "string" && obj.user_context_at.trim()
+      ? obj.user_context_at.trim() : undefined,
+    page_count: typeof obj.page_count === "number" && Number.isFinite(obj.page_count)
+      ? obj.page_count : undefined,
+    page_extractions: Array.isArray(obj.page_extractions)
+      ? obj.page_extractions : undefined,
+    virtual_documents: Array.isArray(obj.virtual_documents)
+      ? obj.virtual_documents : undefined,
   };
 }
 
@@ -1403,6 +1452,9 @@ export function normalizeIndex(raw: unknown, practiceArea?: string): DocumentInd
   }
   if (Array.isArray(input.needs_review) && input.needs_review.length > 0) {
     normalized.needs_review = input.needs_review as DocumentIndex["needs_review"];
+  }
+  if (Array.isArray(input.needs_context) && input.needs_context.length > 0) {
+    normalized.needs_context = input.needs_context as DocumentIndex["needs_context"];
   }
   if (Array.isArray(input.errata) && input.errata.length > 0) {
     normalized.errata = input.errata as DocumentIndex["errata"];

@@ -1,0 +1,20 @@
+{
+  "practiceArea": "Elder Care",
+  "jurisdiction": "Washington",
+  "sections": [
+    { "id": "wa-estate-planning-fundamentals", "title": "WA Estate Planning Fundamentals", "filename": "01-wa-estate-planning-fundamentals.md", "order": 1 },
+    { "id": "wa-powers-of-attorney", "title": "Powers of Attorney & Healthcare Directives", "filename": "02-wa-powers-of-attorney.md", "order": 2 },
+    { "id": "wa-guardianship-conservatorship", "title": "Guardianship & Conservatorship", "filename": "03-wa-guardianship-conservatorship.md", "order": 3 },
+    { "id": "wa-estate-tax", "title": "WA Estate Tax", "filename": "04-wa-estate-tax.md", "order": 4 },
+    { "id": "beneficiary-designations", "title": "Beneficiary Designations & Nonprobate Transfers", "filename": "05-beneficiary-designations.md", "order": 5 },
+    { "id": "dementia-types-and-stages", "title": "Dementia Types & Stages", "filename": "06-dementia-types-and-stages.md", "order": 6 },
+    { "id": "dementia-care-and-treatment", "title": "Dementia Care & Treatment", "filename": "07-dementia-care-and-treatment.md", "order": 7 },
+    { "id": "medicare-fundamentals", "title": "Medicare Fundamentals", "filename": "08-medicare-fundamentals.md", "order": 8 },
+    { "id": "medicare-long-term-care", "title": "Medicare & Long-Term Care", "filename": "09-medicare-long-term-care.md", "order": 9 },
+    { "id": "medical-billing-navigation", "title": "Medical Billing Navigation", "filename": "10-medical-billing-navigation.md", "order": 10 },
+    { "id": "wa-medicaid-long-term-care", "title": "WA Medicaid & Long-Term Care", "filename": "11-wa-medicaid-long-term-care.md", "order": 11 },
+    { "id": "elder-financial-planning", "title": "Elder Financial Planning", "filename": "12-elder-financial-planning.md", "order": 12 },
+    { "id": "elder-tax-planning", "title": "Elder Tax Planning", "filename": "13-elder-tax-planning.md", "order": 13 },
+    { "id": "wa-elder-care-resources", "title": "WA Elder Care Resources", "filename": "14-wa-elder-care-resources.md", "order": 14 }
+  ]
+}

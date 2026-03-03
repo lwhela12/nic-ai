@@ -5,8 +5,8 @@ import { homedir } from "os";
 import {
   createTeamInvite,
   listTeamForUser,
+  normalizeTeamRole,
   revokeInvite,
-  type TeamRole,
   updateMemberRole,
 } from "../lib/team";
 
@@ -52,7 +52,11 @@ function getAuthEmail(c: any): string | null {
   return typeof email === "string" && email.trim() ? email : null;
 }
 
-const VALID_ROLES: TeamRole[] = [
+const VALID_ROLES: string[] = [
+  "owner",
+  "admin",
+  "member",
+  "viewer",
   "attorney",
   "case_manager_lead",
   "case_manager",
@@ -108,7 +112,7 @@ app.post("/invite", async (c) => {
   const { root, inviteEmail, role } = body as {
     root?: string;
     inviteEmail?: string;
-    role?: TeamRole;
+    role?: string;
   };
 
   if (!root || !inviteEmail || !role) {
@@ -123,7 +127,7 @@ app.post("/invite", async (c) => {
     return c.json({ error: remoteInvite.error }, 403);
   }
 
-  const result = await createTeamInvite(root, email, inviteEmail, role);
+  const result = await createTeamInvite(root, email, inviteEmail, normalizeTeamRole(role));
   if (!result.ok) {
     return c.json({ error: result.error }, 403);
   }
@@ -162,7 +166,7 @@ app.put("/member/:id/role", async (c) => {
   }
 
   const body = await c.req.json();
-  const { root, role } = body as { root?: string; role?: TeamRole };
+  const { root, role } = body as { root?: string; role?: string };
 
   if (!root || !memberId || !role) {
     return c.json({ error: "root and role are required" }, 400);
@@ -171,7 +175,7 @@ app.put("/member/:id/role", async (c) => {
     return c.json({ error: "invalid_role" }, 400);
   }
 
-  const result = await updateMemberRole(root, email, memberId, role);
+  const result = await updateMemberRole(root, email, memberId, normalizeTeamRole(role));
   if (!result.ok) {
     return c.json({ error: result.error }, 403);
   }

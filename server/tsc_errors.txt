@@ -1,0 +1,212 @@
+lib/direct-chat.ts(1368,46): error TS2339: Property 'city' does not exist on type 'FirmInfo'.
+lib/direct-chat.ts(1368,68): error TS2339: Property 'city' does not exist on type 'FirmInfo'.
+lib/direct-chat.ts(1368,85): error TS2339: Property 'state' does not exist on type 'FirmInfo'.
+lib/direct-chat.ts(1368,114): error TS2339: Property 'state' does not exist on type 'FirmInfo'.
+lib/direct-chat.ts(1368,138): error TS2339: Property 'zip' does not exist on type 'FirmInfo'.
+lib/direct-chat.ts(1373,36): error TS2339: Property 'firmName' does not exist on type 'FirmInfo'.
+lib/doc-agent.ts(87,5): error TS2322: Type '(string & {}) | "correspondence" | "financial_summary" | "estate_checklist" | "medical_summary" | "care_plan" | "meeting_minutes" | "action_plan" | "custom_document"' is not assignable to type 'DocumentType'.
+  Type 'string & {}' is not assignable to type 'DocumentType'.
+lib/doc-agent.ts(1240,20): error TS2867: Cannot find name 'Bun'. Do you need to install type definitions for Bun? Try `npm i --save-dev @types/bun`.
+lib/doc-agent.ts(1358,26): error TS2867: Cannot find name 'Bun'. Do you need to install type definitions for Bun? Try `npm i --save-dev @types/bun`.
+lib/doc-reader.ts(118,15): error TS2367: This comparison appears to be unintentional because the types '"user" | "assistant" | "system" | "auth_status" | "stream_event" | "result" | "tool_progress"' and '"tool_use"' have no overlap.
+lib/evidence-packet.ts(158,64): error TS1343: The 'import.meta' meta-property is only allowed when the '--module' option is 'es2020', 'es2022', 'esnext', 'system', 'node16', 'node18', 'node20', or 'nodenext'.
+lib/evidence-packet.ts(161,64): error TS1343: The 'import.meta' meta-property is only allowed when the '--module' option is 'es2020', 'es2022', 'esnext', 'system', 'node16', 'node18', 'node20', or 'nodenext'.
+lib/evidence-packet.ts(260,24): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/evidence-packet.ts(303,33): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/evidence-packet.ts(357,18): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/evidence-packet.ts(453,18): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/evidence-packet.ts(1055,29): error TS2802: Type 'Set<number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/evidence-packet.ts(3201,37): error TS2749: 'PizZip' refers to a value, but is being used as a type here. Did you mean 'typeof PizZip'?
+lib/evidence-packet.ts(3505,21): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/evidence-packet.ts(3511,26): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/evidence-packet.ts(3512,22): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/evidence-packet.ts(3513,55): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/evidence-packet.ts(3514,49): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/evidence-packet.ts(3532,21): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/export.ts(54,69): error TS1343: The 'import.meta' meta-property is only allowed when the '--module' option is 'es2020', 'es2022', 'esnext', 'system', 'node16', 'node18', 'node20', or 'nodenext'.
+lib/export.ts(1191,34): error TS2749: 'AlignmentType' refers to a value, but is being used as a type here. Did you mean 'typeof AlignmentType'?
+lib/export.ts(2225,37): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/extract.ts(1,8): error TS1259: Module '"/Users/lucaswhelan/nic-ai/server/node_modules/mammoth/lib/index"' can only be default-imported using the 'esModuleInterop' flag
+lib/extract.ts(2,8): error TS1259: Module '"/Users/lucaswhelan/nic-ai/server/node_modules/jszip/index"' can only be default-imported using the 'esModuleInterop' flag
+lib/extract.ts(41,6): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/extract.ts(746,23): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/extract.ts(984,32): error TS2802: Type 'MapIterator<number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/extract.ts(1058,23): error TS2802: Type 'RegExpStringIterator<RegExpExecArray>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/index-schema.ts(179,31): error TS2802: Type 'Set<"Intake" | "Investigation" | "Treatment" | "Demand" | "Negotiation" | "Settlement" | "Complete" | "MMI Evaluation" | "Benefits Resolution" | "Settlement/Hearing" | "Closed">' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/index-schema.ts(185,13): error TS2300: Duplicate identifier 'CasePhase'.
+lib/index-schema.ts(335,13): error TS2300: Duplicate identifier 'CasePhase'.
+lib/merge-index.ts(306,22): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/merge-index.ts(840,35): error TS2802: Type 'Map<string, string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/merge-index.ts(844,35): error TS2802: Type 'Map<string, string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/team-access.ts(37,7): error TS2769: No overload matches this call.
+  Overload 1 of 2, '(object: { error: string; reason: string; message: string; }, status?: ContentfulStatusCode, headers?: HeaderRecord): JSONRespondReturn<{ error: string; reason: string; message: string; }, ContentfulStatusCode>', gave the following error.
+    Argument of type 'number' is not assignable to parameter of type 'ContentfulStatusCode'.
+  Overload 2 of 2, '(object: { error: string; reason: string; message: string; }, init?: ResponseOrInit<ContentfulStatusCode>): JSONRespondReturn<{ error: string; reason: string; message: string; }, ContentfulStatusCode>', gave the following error.
+    Argument of type 'number' is not assignable to parameter of type 'ResponseOrInit<ContentfulStatusCode>'.
+lib/team-access.ts(53,27): error TS2339: Property 'reason' does not exist on type '{ ok: true; team: TeamState; context: TeamContext; } | { ok: false; reason: string; team: TeamState; }'.
+  Property 'reason' does not exist on type '{ ok: true; team: TeamState; context: TeamContext; }'.
+lib/team-access.ts(59,5): error TS2322: Type 'TeamState' is not assignable to type 'never'.
+lib/team-access.ts(60,5): error TS2322: Type 'TeamContext' is not assignable to type 'never'.
+lib/team.ts(513,44): error TS2339: Property 'reason' does not exist on type '{ ok: true; team: TeamState; context: TeamContext; } | { ok: false; reason: string; team: TeamState; }'.
+  Property 'reason' does not exist on type '{ ok: true; team: TeamState; context: TeamContext; }'.
+lib/year-mode.ts(128,5): error TS2322: Type 'Dirent<string>[]' is not assignable to type 'Dirent<Buffer<ArrayBufferLike>>[]'.
+  Type 'Dirent<string>' is not assignable to type 'Dirent<Buffer<ArrayBufferLike>>'.
+    Type 'string' is not assignable to type 'Buffer<ArrayBufferLike>'.
+lib/year-mode.ts(133,9): error TS2367: This comparison appears to be unintentional because the types 'Buffer<ArrayBufferLike>' and 'string' have no overlap.
+lib/year-mode.ts(133,42): error TS2339: Property 'startsWith' does not exist on type 'Buffer<ArrayBufferLike>'.
+lib/year-mode.ts(135,46): error TS2345: Argument of type 'Buffer<ArrayBufferLike>' is not assignable to parameter of type 'string'.
+lib/year-mode.ts(167,9): error TS2322: Type 'Dirent<string>[]' is not assignable to type 'Dirent<Buffer<ArrayBufferLike>>[]'.
+  Type 'Dirent<string>' is not assignable to type 'Dirent<Buffer<ArrayBufferLike>>'.
+    Type 'string' is not assignable to type 'Buffer<ArrayBufferLike>'.
+lib/year-mode.ts(172,51): error TS2339: Property 'startsWith' does not exist on type 'Buffer<ArrayBufferLike>'.
+lib/year-mode.ts(180,28): error TS2345: Argument of type 'Buffer<ArrayBufferLike>' is not assignable to parameter of type 'string'.
+lib/year-mode.ts(185,11): error TS2322: Type 'Buffer<ArrayBufferLike>' is not assignable to type 'string'.
+lib/year-mode.ts(259,22): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/year-mode.ts(291,9): error TS2322: Type 'Dirent<string>[]' is not assignable to type 'Dirent<Buffer<ArrayBufferLike>>[]'.
+  Type 'Dirent<string>' is not assignable to type 'Dirent<Buffer<ArrayBufferLike>>'.
+    Type 'string' is not assignable to type 'Buffer<ArrayBufferLike>'.
+lib/year-mode.ts(296,51): error TS2339: Property 'startsWith' does not exist on type 'Buffer<ArrayBufferLike>'.
+lib/year-mode.ts(303,28): error TS2345: Argument of type 'Buffer<ArrayBufferLike>' is not assignable to parameter of type 'string'.
+lib/year-mode.ts(308,11): error TS2322: Type 'Buffer<ArrayBufferLike>' is not assignable to type 'string'.
+lib/year-mode.ts(329,32): error TS2345: Argument of type 'Buffer<ArrayBufferLike>' is not assignable to parameter of type 'string'.
+lib/year-mode.ts(334,9): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+lib/year-mode.ts(486,20): error TS1252: Function declarations are not allowed inside blocks in strict mode when targeting 'ES5'. Modules are automatically in strict mode.
+lib/year-mode.ts(489,9): error TS2322: Type 'Dirent<string>[]' is not assignable to type 'Dirent<Buffer<ArrayBufferLike>>[]'.
+  Type 'Dirent<string>' is not assignable to type 'Dirent<Buffer<ArrayBufferLike>>'.
+    Type 'string' is not assignable to type 'Buffer<ArrayBufferLike>'.
+lib/year-mode.ts(494,13): error TS2367: This comparison appears to be unintentional because the types 'Buffer<ArrayBufferLike>' and 'string' have no overlap.
+lib/year-mode.ts(494,53): error TS2339: Property 'startsWith' does not exist on type 'Buffer<ArrayBufferLike>'.
+lib/year-mode.ts(495,36): error TS2345: Argument of type 'Buffer<ArrayBufferLike>' is not assignable to parameter of type 'string'.
+lib/year-mode.ts(499,35): error TS2345: Argument of type 'string | Buffer<ArrayBufferLike>' is not assignable to parameter of type 'string'.
+  Type 'Buffer<ArrayBufferLike>' is not assignable to type 'string'.
+lib/year-mode.ts(531,20): error TS1252: Function declarations are not allowed inside blocks in strict mode when targeting 'ES5'. Modules are automatically in strict mode.
+lib/year-mode.ts(535,9): error TS2322: Type 'Dirent<string>[]' is not assignable to type 'Dirent<Buffer<ArrayBufferLike>>[]'.
+  Type 'Dirent<string>' is not assignable to type 'Dirent<Buffer<ArrayBufferLike>>'.
+    Type 'string' is not assignable to type 'Buffer<ArrayBufferLike>'.
+lib/year-mode.ts(541,13): error TS2367: This comparison appears to be unintentional because the types 'Buffer<ArrayBufferLike>' and 'string' have no overlap.
+lib/year-mode.ts(541,59): error TS2339: Property 'startsWith' does not exist on type 'Buffer<ArrayBufferLike>'.
+lib/year-mode.ts(545,11): error TS2367: This comparison appears to be unintentional because the types 'Buffer<ArrayBufferLike>' and 'string' have no overlap.
+lib/year-mode.ts(546,11): error TS2367: This comparison appears to be unintentional because the types 'Buffer<ArrayBufferLike>' and 'string' have no overlap.
+lib/year-mode.ts(547,25): error TS2339: Property 'startsWith' does not exist on type 'Buffer<ArrayBufferLike>'.
+lib/year-mode.ts(551,36): error TS2345: Argument of type 'Buffer<ArrayBufferLike>' is not assignable to parameter of type 'string'.
+lib/year-mode.ts(557,52): error TS2345: Argument of type 'string | Buffer<ArrayBufferLike>' is not assignable to parameter of type 'string'.
+  Type 'Buffer<ArrayBufferLike>' is not assignable to type 'string'.
+node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts(4,37): error TS2307: Cannot find module '@modelcontextprotocol/sdk/types.js' or its corresponding type declarations.
+node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts(5,37): error TS2307: Cannot find module '@modelcontextprotocol/sdk/types.js' or its corresponding type declarations.
+node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts(6,32): error TS2307: Cannot find module '@modelcontextprotocol/sdk/server/mcp.js' or its corresponding type declarations.
+node_modules/@anthropic-ai/sdk/core.d.ts(148,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/@anthropic-ai/sdk/internal/decoders/line.d.ts(10,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/@anthropic-ai/sdk/lib/BetaMessageStream.d.ts(22,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/@anthropic-ai/sdk/lib/MessageStream.d.ts(22,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/docx/dist/index.d.ts(3,21): error TS1259: Module '"/Users/lucaswhelan/nic-ai/server/node_modules/jszip/index"' can only be default-imported using the 'esModuleInterop' flag
+node_modules/gaxios/build/cjs/src/gaxios.d.ts(16,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/google-auth-library/build/src/auth/awsclient.d.ts(83,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/google-auth-library/build/src/auth/baseexternalclient.d.ts(173,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/google-auth-library/build/src/auth/googleauth.d.ts(159,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/google-auth-library/build/src/auth/oauth2common.d.ts(50,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/google-auth-library/build/src/auth/stscredentials.d.ts(99,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/google-auth-library/build/src/util.d.ts(125,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/googleapis-common/node_modules/gaxios/build/cjs/src/gaxios.d.ts(16,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/groq-sdk/core.d.ts(74,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/groq-sdk/core.d.ts(155,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/groq-sdk/index.d.ts(79,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(33,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(578,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(816,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(1122,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(1275,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(1586,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(1680,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(1726,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(1885,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(1985,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(2488,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(2584,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(2616,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(2752,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(3775,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(4270,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(4811,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(7000,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(7358,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(7656,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(7743,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(8076,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+node_modules/puppeteer-core/lib/types.d.ts(8318,5): error TS18028: Private identifiers are only available when targeting ECMAScript 2015 and higher.
+practice-areas/index.ts(18,41): error TS1343: The 'import.meta' meta-property is only allowed when the '--module' option is 'es2020', 'es2022', 'esnext', 'system', 'node16', 'node18', 'node20', or 'nodenext'.
+routes/firm.ts(32,37): error TS2440: Import declaration conflicts with local declaration of 'HypergraphResult'.
+routes/firm.ts(138,27): error TS1343: The 'import.meta' meta-property is only allowed when the '--module' option is 'es2020', 'es2022', 'esnext', 'system', 'node16', 'node18', 'node20', or 'nodenext'.
+routes/firm.ts(138,39): error TS2339: Property 'dir' does not exist on type 'ImportMeta'.
+routes/firm.ts(686,22): error TS1252: Function declarations are not allowed inside blocks in strict mode when targeting 'ES5'. Modules are automatically in strict mode.
+routes/firm.ts(784,19): error TS2339: Property 'response' does not exist on type 'AccessResult'.
+  Property 'response' does not exist on type 'AccessResultOk'.
+routes/firm.ts(969,19): error TS2339: Property 'response' does not exist on type 'AccessResult'.
+  Property 'response' does not exist on type 'AccessResultOk'.
+routes/firm.ts(1017,19): error TS2339: Property 'response' does not exist on type 'AccessResult'.
+  Property 'response' does not exist on type 'AccessResultOk'.
+routes/firm.ts(2180,22): error TS1252: Function declarations are not allowed inside blocks in strict mode when targeting 'ES5'. Modules are automatically in strict mode.
+routes/firm.ts(2715,48): error TS2867: Cannot find name 'Bun'. Do you need to install type definitions for Bun? Try `npm i --save-dev @types/bun`.
+routes/firm.ts(2715,71): error TS2867: Cannot find name 'Bun'. Do you need to install type definitions for Bun? Try `npm i --save-dev @types/bun`.
+routes/firm.ts(2716,11): error TS2867: Cannot find name 'Bun'. Do you need to install type definitions for Bun? Try `npm i --save-dev @types/bun`.
+routes/firm.ts(3064,19): error TS2339: Property 'response' does not exist on type 'AccessResult'.
+  Property 'response' does not exist on type 'AccessResultOk'.
+routes/firm.ts(3413,31): error TS2802: Type 'Map<string, { value: boolean; checkedAt: number; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+routes/firm.ts(3633,37): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+routes/firm.ts(3754,35): error TS2802: Type 'Map<string, Map<string, { canonical: string; canonicalCount: Map<string, number>; sources: Set<string>; }>>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+routes/firm.ts(3756,20): error TS2339: Property 'canonical' does not exist on type 'unknown'.
+routes/firm.ts(3757,33): error TS2339: Property 'sources' does not exist on type 'unknown'.
+routes/firm.ts(3758,20): error TS2339: Property 'sources' does not exist on type 'unknown'.
+routes/firm.ts(3773,7): error TS2322: Type '{ value: any; sources: unknown[]; count: any; }[]' is not assignable to type '{ value: string; sources: string[]; count: number; }[]'.
+  Type '{ value: any; sources: unknown[]; count: any; }' is not assignable to type '{ value: string; sources: string[]; count: number; }'.
+    Types of property 'sources' are incompatible.
+      Type 'unknown[]' is not assignable to type 'string[]'.
+        Type 'unknown' is not assignable to type 'string'.
+routes/firm.ts(3787,13): error TS2322: Type 'unknown[]' is not assignable to type 'string[]'.
+  Type 'unknown' is not assignable to type 'string'.
+routes/firm.ts(3789,13): error TS2322: Type 'unknown[]' is not assignable to type 'string[]'.
+  Type 'unknown' is not assignable to type 'string'.
+routes/firm.ts(3836,26): error TS2802: Type 'MapIterator<{ field: string; consensus_value: string; consensus_sources: string[]; outlier_value: string; outlier_sources: string[]; likely_reason?: string; }>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+routes/firm.ts(3915,39): error TS2802: Type 'Map<string, number>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+routes/firm.ts(3927,37): error TS2802: Type 'Map<string, Map<string, { canonical: string; canonicalCount: Map<string, number>; sources: Set<string>; }>>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.
+routes/firm.ts(4596,19): error TS2339: Property 'response' does not exist on type 'AccessResult'.
+  Property 'response' does not exist on type 'AccessResultOk'.
+routes/firm.ts(4599,37): error TS2339: Property 'members' does not exist on type 'never'.
+routes/firm.ts(4605,70): error TS2345: Argument of type 'Set<unknown>' is not assignable to parameter of type 'Set<string>'.
+  Type 'unknown' is not assignable to type 'string'.
+routes/firm.ts(4607,40): error TS2339: Property 'error' does not exist on type '{ ok: true; scope: FirmChatScope; } | { ok: false; error: string; }'.
+  Property 'error' does not exist on type '{ ok: true; scope: FirmChatScope; }'.
+routes/firm.ts(4618,74): error TS2339: Property 'userId' does not exist on type 'never'.
+routes/firm.ts(4618,82): error TS2345: Argument of type 'Map<unknown, unknown>' is not assignable to parameter of type 'Map<string, { id: string; email: string; name?: string; }>'.
+  Type 'unknown' is not assignable to type 'string'.
+routes/firm.ts(4623,44): error TS2339: Property 'name' does not exist on type 'unknown'.
+routes/firm.ts(4623,84): error TS2339: Property 'email' does not exist on type 'unknown'.
+routes/firm.ts(4739,19): error TS2339: Property 'response' does not exist on type 'AccessResult'.
+  Property 'response' does not exist on type 'AccessResultOk'.
+routes/firm.ts(4742,37): error TS2339: Property 'members' does not exist on type 'never'.
+routes/firm.ts(4748,70): error TS2345: Argument of type 'Set<unknown>' is not assignable to parameter of type 'Set<string>'.
+  Type 'unknown' is not assignable to type 'string'.
+routes/firm.ts(4750,40): error TS2339: Property 'error' does not exist on type '{ ok: true; scope: FirmChatScope; } | { ok: false; error: string; }'.
+  Property 'error' does not exist on type '{ ok: true; scope: FirmChatScope; }'.
+routes/firm.ts(4757,37): error TS2339: Property 'userId' does not exist on type 'never'.
+routes/firm.ts(4795,19): error TS2339: Property 'response' does not exist on type 'AccessResult'.
+  Property 'response' does not exist on type 'AccessResultOk'.
+routes/firm.ts(4828,19): error TS2339: Property 'response' does not exist on type 'AccessResult'.
+  Property 'response' does not exist on type 'AccessResultOk'.
+routes/firm.ts(4853,19): error TS2339: Property 'response' does not exist on type 'AccessResult'.
+  Property 'response' does not exist on type 'AccessResultOk'.
+routes/firm.ts(4896,19): error TS2339: Property 'response' does not exist on type 'AccessResult'.
+  Property 'response' does not exist on type 'AccessResultOk'.
+routes/firm.ts(4898,23): error TS2339: Property 'permissions' does not exist on type 'never'.
+routes/firm.ts(4955,19): error TS2339: Property 'response' does not exist on type 'AccessResult'.
+  Property 'response' does not exist on type 'AccessResultOk'.
+routes/firm.ts(4957,23): error TS2339: Property 'permissions' does not exist on type 'never'.
+routes/knowledge.ts(55,19): error TS2339: Property 'response' does not exist on type 'AccessResult'.
+  Property 'response' does not exist on type 'AccessResultOk'.
+routes/knowledge.ts(58,49): error TS2339: Property 'permissions' does not exist on type 'never'.
+routes/knowledge.ts(66,57): error TS1343: The 'import.meta' meta-property is only allowed when the '--module' option is 'es2020', 'es2022', 'esnext', 'system', 'node16', 'node18', 'node20', or 'nodenext'.
+routes/knowledge.ts(66,69): error TS2339: Property 'dir' does not exist on type 'ImportMeta'.
+routes/knowledge.ts(608,29): error TS2345: Argument of type 'Buffer<ArrayBufferLike>' is not assignable to parameter of type 'BodyInit'.
+  Type 'Buffer<ArrayBufferLike>' is missing the following properties from type 'URLSearchParams': size, append, delete, get, and 2 more.
+routes/knowledge.ts(775,26): error TS1343: The 'import.meta' meta-property is only allowed when the '--module' option is 'es2020', 'es2022', 'esnext', 'system', 'node16', 'node18', 'node20', or 'nodenext'.
+routes/knowledge.ts(775,38): error TS2339: Property 'dir' does not exist on type 'ImportMeta'.
+routes/knowledge.ts(1871,40): error TS2802: Type 'Set<string>' can only be iterated through when using the '--downlevelIteration' flag or with a '--target' of 'es2015' or higher.

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-type TeamRole = 'attorney' | 'case_manager_lead' | 'case_manager' | 'case_manager_assistant'
+type TeamRole = 'owner' | 'admin' | 'member' | 'viewer'
 
 interface TeamMember {
   id: string
@@ -35,10 +35,10 @@ interface TeamManagerProps {
 }
 
 const roleOptions: Array<{ value: TeamRole; label: string }> = [
-  { value: 'attorney', label: 'Attorney' },
-  { value: 'case_manager_lead', label: 'Case Manager Lead' },
-  { value: 'case_manager', label: 'Case Manager' },
-  { value: 'case_manager_assistant', label: 'Case Manager Assistant' },
+  { value: 'owner', label: 'Owner' },
+  { value: 'admin', label: 'Admin' },
+  { value: 'member', label: 'Member' },
+  { value: 'viewer', label: 'Viewer' },
 ]
 
 export default function TeamManager({
@@ -55,7 +55,7 @@ export default function TeamManager({
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [inviteEmail, setInviteEmail] = useState('')
-  const [inviteRole, setInviteRole] = useState<TeamRole>('case_manager')
+  const [inviteRole, setInviteRole] = useState<TeamRole>('member')
   const [isInviting, setIsInviting] = useState(false)
 
   const mapError = (raw: string): string => {
@@ -213,7 +213,7 @@ export default function TeamManager({
                 type="email"
                 value={inviteEmail}
                 onChange={(e) => setInviteEmail(e.target.value)}
-                placeholder="user@firm.com"
+                placeholder="user@example.com"
                 className="flex-1 min-w-[220px] border border-surface-300 rounded-md px-3 py-2 text-sm"
               />
               <select

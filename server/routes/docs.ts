@@ -616,6 +616,28 @@ async function appendPiiScanHints(
 
 const app = new Hono();
 
+function deprecatedPacketResponse(c: any) {
+  return c.json(
+    {
+      error: "endpoint_deprecated",
+      message:
+        "Evidence packet workflows are no longer supported in this release. Existing packet artifacts are read-only archives.",
+    },
+    410
+  );
+}
+
+app.post("/bundle-demand", (c) => deprecatedPacketResponse(c));
+app.get("/bundle-status", (c) => deprecatedPacketResponse(c));
+app.post("/packet-draft", (c) => deprecatedPacketResponse(c));
+app.get("/packet-draft/:id", (c) => deprecatedPacketResponse(c));
+app.post("/packet-draft/duplicate", (c) => deprecatedPacketResponse(c));
+app.delete("/packet-draft/:id", (c) => deprecatedPacketResponse(c));
+app.post("/document-page-counts", (c) => deprecatedPacketResponse(c));
+app.post("/preview-front-matter", (c) => deprecatedPacketResponse(c));
+app.post("/preview-front-matter-from-docx", (c) => deprecatedPacketResponse(c));
+app.post("/generate-packet", (c) => deprecatedPacketResponse(c));
+
 // Draft type definition
 interface Draft {
   id: string;
@@ -1151,40 +1173,6 @@ app.get("/drafts", async (c) => {
           workingDocxMtimeMs,
           previewPdfPath,
         });
-      } else if (entry.endsWith(".json") && entry.startsWith("packet-")) {
-        // Packet creation mode drafts
-        const filePath = join(draftsPath, entry);
-        const fileStat = await stat(filePath);
-        const id = entry.replace(/\.json$/, "");
-
-        // Try to read draftName, generatedAt, outputPath from the JSON
-        let draftName = "Evidence Packet Draft";
-        let generatedAt: string | undefined;
-        let outputPath: string | undefined;
-        try {
-          const jsonContent = await readFile(filePath, "utf-8");
-          const parsed = JSON.parse(jsonContent);
-          if (typeof parsed.draftName === "string" && parsed.draftName.trim()) {
-            draftName = parsed.draftName;
-          }
-          if (typeof parsed.generatedAt === "string" && parsed.generatedAt.trim()) {
-            generatedAt = parsed.generatedAt;
-          }
-          if (typeof parsed.outputPath === "string" && parsed.outputPath.trim()) {
-            outputPath = parsed.outputPath;
-          }
-        } catch { /* ignore parse errors */ }
-
-        drafts.push({
-          id,
-          name: draftName,
-          path: `.ai_tool/drafts/${entry}`,
-          type: "packet",
-          createdAt: fileStat.mtime.toISOString(),
-          targetPath: outputPath || "Hearing/Evidence Packet.pdf",
-          generatedAt,
-          outputPath,
-        });
       }
     }
   } catch {
@@ -1648,6 +1636,7 @@ app.post("/save-redacted-copies", async (c) => {
 
 // Bundle demand letter with exhibits into a single PDF package
 app.post("/bundle-demand", async (c) => {
+  if (process.env.ENABLE_LEGACY_PACKET_WORKFLOWS !== "true") return deprecatedPacketResponse(c);
   const { caseFolder, firmRoot } = await c.req.json();
 
   if (!caseFolder) {
@@ -1815,6 +1804,7 @@ app.post("/bundle-demand", async (c) => {
 
 // Get bundle status - check if manifest and demand letter exist
 app.get("/bundle-status", async (c) => {
+  if (process.env.ENABLE_LEGACY_PACKET_WORKFLOWS !== "true") return deprecatedPacketResponse(c);
   const caseFolder = c.req.query("case");
 
   if (!caseFolder) {
@@ -1889,6 +1879,7 @@ app.get("/bundle-status", async (c) => {
 
 // Save packet draft
 app.post("/packet-draft", async (c) => {
+  if (process.env.ENABLE_LEGACY_PACKET_WORKFLOWS !== "true") return deprecatedPacketResponse(c);
   const { caseFolder, state } = await c.req.json();
 
   if (!caseFolder || !state) {
@@ -1917,6 +1908,7 @@ app.post("/packet-draft", async (c) => {
 
 // Load packet draft
 app.get("/packet-draft/:id", async (c) => {
+  if (process.env.ENABLE_LEGACY_PACKET_WORKFLOWS !== "true") return deprecatedPacketResponse(c);
   const caseFolder = c.req.query("case");
   const draftId = c.req.param("id");
 
@@ -1940,6 +1932,7 @@ app.get("/packet-draft/:id", async (c) => {
 
 // Duplicate a packet draft
 app.post("/packet-draft/duplicate", async (c) => {
+  if (process.env.ENABLE_LEGACY_PACKET_WORKFLOWS !== "true") return deprecatedPacketResponse(c);
   const { caseFolder, draftId } = await c.req.json();
 
   if (!caseFolder || !draftId) {
@@ -1980,6 +1973,7 @@ app.post("/packet-draft/duplicate", async (c) => {
 
 // Delete a packet draft
 app.delete("/packet-draft/:id", async (c) => {
+  if (process.env.ENABLE_LEGACY_PACKET_WORKFLOWS !== "true") return deprecatedPacketResponse(c);
   const caseFolder = c.req.query("case");
   const draftId = c.req.param("id");
 
@@ -2003,6 +1997,7 @@ app.delete("/packet-draft/:id", async (c) => {
 
 // Get document page counts for packet documents
 app.post("/document-page-counts", async (c) => {
+  if (process.env.ENABLE_LEGACY_PACKET_WORKFLOWS !== "true") return deprecatedPacketResponse(c);
   const { caseFolder, paths } = await c.req.json();
 
   if (!caseFolder || !Array.isArray(paths)) {
@@ -2072,6 +2067,7 @@ app.post("/document-page-counts", async (c) => {
 
 // Preview front matter PDF
 app.post("/preview-front-matter", async (c) => {
+  if (process.env.ENABLE_LEGACY_PACKET_WORKFLOWS !== "true") return deprecatedPacketResponse(c);
   const {
     caseFolder,
     frontMatter,
@@ -2344,6 +2340,7 @@ app.post("/preview-front-matter", async (c) => {
 
 // Re-render front matter preview from an existing working DOCX
 app.post("/preview-front-matter-from-docx", async (c) => {
+  if (process.env.ENABLE_LEGACY_PACKET_WORKFLOWS !== "true") return deprecatedPacketResponse(c);
   const { caseFolder, docxPath } = await c.req.json();
 
   if (!caseFolder || !docxPath) {
@@ -2594,6 +2591,7 @@ app.get("/file-mtime", async (c) => {
 
 // Generate final evidence packet
 app.post("/generate-packet", async (c) => {
+  if (process.env.ENABLE_LEGACY_PACKET_WORKFLOWS !== "true") return deprecatedPacketResponse(c);
   const { caseFolder, documents, frontMatter, redactionMode, manualRedactions, firmRoot, templateId } = await c.req.json();
 
   if (!caseFolder || !documents || !frontMatter) {

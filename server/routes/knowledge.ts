@@ -9,7 +9,7 @@ import { readdir, readFile, writeFile, mkdir, copyFile, unlink, stat } from "fs/
 import { join, dirname, basename, extname } from "path";
 import { extractTextFromPdf, extractTextFromDocx, extractFullTextFromDocx, extractStylesFromDocx, extractHtmlFromDocx, DocxStyles, DocxHtmlExtract } from "../lib/extract";
 import { requireFirmAccess } from "../lib/team-access";
-import { BUILT_IN_TEMPLATES, type PacketTemplate } from "../lib/evidence-packet";
+import { type PacketTemplate } from "../lib/evidence-packet";
 import { generateSectionTags, generateTagsForAllSections, generateKnowledgeSummary } from "../lib/knowledge-tagger";
 import { updateMetaIndexSectionTags } from "../lib/direct-chat";
 
@@ -141,17 +141,17 @@ app.post("/init", async (c) => {
       await stat(firmConfigPath);
     } catch {
       const defaultConfig = {
+        assistantName: "",
+        officeName: "",
+        contactPerson: "",
+        credentials: "",
         firmName: "",
-        attorneyName: "",
-        nevadaBarNo: "",
         address: "",
-        cityStateZip: "",
         phone: "",
-        fax: "",
         email: "",
+        website: "",
         practiceArea: manifest.practiceArea,
         jurisdiction: manifest.jurisdiction,
-        feeStructure: "",
       };
       await writeFile(firmConfigPath, JSON.stringify(defaultConfig, null, 2));
     }
@@ -433,7 +433,7 @@ app.post("/chat", async (c) => {
     return c.json({ error: "No knowledge base found" }, 404);
   }
 
-  const systemPrompt = `You are a practice knowledge assistant for a law firm. You have access to the firm's practice knowledge base.
+  const systemPrompt = `You are a practice knowledge assistant. You have access to the workspace knowledge base.
 
 Your role:
 1. Answer questions about the practice knowledge
@@ -654,24 +654,37 @@ app.get("/firm-config", async (c) => {
 
   try {
     const configPath = join(root, ".ai_tool", "firm-config.json");
-    const config = JSON.parse(await readFile(configPath, "utf-8"));
-    // Synthesize attorneys[] from legacy attorneyName/nevadaBarNo if missing
-    if (!Array.isArray(config.attorneys) && config.attorneyName) {
-      config.attorneys = [{ name: config.attorneyName, barLabel: "NV Bar No.", barNo: config.nevadaBarNo || "" }];
+    const config = JSON.parse(await readFile(configPath, "utf-8")) as Record<string, any>;
+
+    if (!config.officeName && typeof config.firmName === "string" && config.firmName.trim()) {
+      config.officeName = config.firmName;
+    }
+    if (!config.contactPerson && typeof config.attorneyName === "string" && config.attorneyName.trim()) {
+      config.contactPerson = config.attorneyName;
+    }
+    if (!config.credentials && typeof config.nevadaBarNo === "string" && config.nevadaBarNo.trim()) {
+      config.credentials = config.nevadaBarNo;
+    }
+
+    // Synthesize attorneys[] from legacy data if missing.
+    if (!Array.isArray(config.attorneys) && config.contactPerson) {
+      config.attorneys = [{ name: config.contactPerson, barLabel: "Credentials", barNo: config.credentials || "" }];
     }
     return c.json(config);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return c.json({
+        assistantName: "",
+        officeName: "",
+        contactPerson: "",
+        credentials: "",
         firmName: "",
-        attorneyName: "",
-        nevadaBarNo: "",
         address: "",
-        cityStateZip: "",
         phone: "",
+        email: "",
+        website: "",
         practiceArea: "",
         jurisdiction: "",
-        feeStructure: "",
         attorneys: [],
       });
     }
@@ -683,11 +696,29 @@ app.put("/firm-config", async (c) => {
   const { root, ...config } = await c.req.json();
   if (!root) return c.json({ error: "root required" }, 400);
 
-  // Sync attorneys[0] back to legacy attorneyName/nevadaBarNo for backward compat
+  if (!config.officeName && typeof config.firmName === "string" && config.firmName.trim()) {
+    config.officeName = config.firmName;
+  }
+  if (!config.contactPerson && typeof config.attorneyName === "string" && config.attorneyName.trim()) {
+    config.contactPerson = config.attorneyName;
+  }
+  if (!config.credentials && typeof config.nevadaBarNo === "string" && config.nevadaBarNo.trim()) {
+    config.credentials = config.nevadaBarNo;
+  }
+
+  // Back-compat for older payloads that still send attorneys[].
   if (Array.isArray(config.attorneys) && config.attorneys.length > 0) {
     const primary = config.attorneys[0];
-    if (primary?.name) config.attorneyName = primary.name;
-    if (primary?.barNo !== undefined) config.nevadaBarNo = primary.barNo;
+    if (primary?.name && !config.contactPerson) config.contactPerson = primary.name;
+    if (primary?.barNo !== undefined && !config.credentials) config.credentials = primary.barNo;
+  }
+
+  // Preserve legacy fields for compatibility during rollout.
+  if (config.contactPerson && !config.attorneyName) {
+    config.attorneyName = config.contactPerson;
+  }
+  if (config.credentials !== undefined && !config.nevadaBarNo) {
+    config.nevadaBarNo = config.credentials;
   }
 
   try {
@@ -1660,7 +1691,7 @@ interface TemplateAnalysis {
 }
 
 async function analyzeTemplateWithAI(rawText: string, templateName: string): Promise<TemplateAnalysis> {
-  const prompt = `You are analyzing a legal document template to make it useful for an AI agent that will generate similar documents.
+  const prompt = `You are analyzing a document template to make it useful for an AI agent that will generate similar documents.
 
 TEMPLATE NAME: ${templateName}
 
@@ -1712,7 +1743,7 @@ Produce a well-structured markdown document that includes:
      - Do NOT add --- horizontal rules between sections
      - Preserve the continuous flowing letter format
      - Keep the business letter style with natural paragraph breaks
-   - If this is a FORMAL DOCUMENT (demand letter, memo, legal brief):
+   - If this is a FORMAL DOCUMENT (formal summary, memo, structured report):
      - Use ## headers for major sections
      - Horizontal rules are acceptable between major sections
 
@@ -2181,31 +2212,11 @@ app.post("/reindex-meta", async (c) => {
 // PACKET TEMPLATE LISTING (unified with doc-templates)
 // ============================================================================
 
-// List packet templates: built-in + auto-detected from doc-templates index
 app.get("/packet-templates", async (c) => {
-  const root = c.req.query("root");
-  if (!root) return c.json({ error: "root query param required" }, 400);
-
-  try {
-    const indexPath = join(root, ".ai_tool", "templates", "templates.json");
-    let customPackets: PacketTemplate[] = [];
-
-    try {
-      const indexContent = await readFile(indexPath, "utf-8");
-      const index: TemplatesIndex = JSON.parse(indexContent);
-      customPackets = index.templates
-        .filter((t) => t.type === "packet" && t.packetConfig)
-        .map((t) => t.packetConfig!);
-    } catch {
-      // No index yet
-    }
-
-    const all = [...BUILT_IN_TEMPLATES, ...customPackets];
-    return c.json({ templates: all });
-  } catch (error) {
-    console.error("List packet templates error:", error);
-    return c.json({ error: "Failed to list packet templates" }, 500);
-  }
+  return c.json({
+    error: "endpoint_deprecated",
+    message: "Packet templates have been removed from this release.",
+  }, 410);
 });
 
 /**

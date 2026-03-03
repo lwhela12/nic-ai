@@ -8,9 +8,10 @@
  * - generateCaseSummaryWithGptOss: Case summary generation via GPT-OSS 120B
  */
 
-import { readFile } from "fs/promises";
+import { getVfs } from "./vfs";
 import { getGroqClient } from "./groq-client";
 import { pdfToImages, getPdfPageCount, type PdfPageImage } from "./pdftoppm";
+import { extractPdfTextByPage } from "./pdftotext";
 import { FILE_EXTRACTION_TOOL_SCHEMA } from "./index-schema";
 import { getImageMimeType } from "./extract";
 
@@ -29,6 +30,10 @@ interface ExtractionResult {
   has_handwritten_data: boolean;
   handwritten_fields: string[];
   extracted_data: Record<string, unknown>;
+}
+
+export interface PageExtractionResult extends ExtractionResult {
+  page: number;
 }
 
 // ============================================================================
@@ -425,6 +430,15 @@ function isImageTooLargeError(error: unknown): boolean {
   return message.toLowerCase().includes("image too large");
 }
 
+export function pickVisionDpi(sizeMB: number, pages: number): number {
+  if (pages <= 2 && sizeMB <= 6) return VISION_DPI_HIGH;
+  if (!Number.isFinite(sizeMB) || sizeMB <= 0) return VISION_DPI_MEDIUM;
+  for (const tier of SIZE_BASED_DPI_SAMPLES) {
+    if (sizeMB <= tier.maxFileMB) return tier.dpi;
+  }
+  return VISION_DPI_LOW;
+}
+
 async function extractVisionRangeWithAdaptiveRetry(
   pdfPath: string,
   filename: string,
@@ -567,15 +581,6 @@ export async function extractWithVision(
     pageCount = 1;
   }
 
-  const pickVisionDpi = (sizeMB: number, pages: number): number => {
-    if (pages <= 2 && sizeMB <= 6) return VISION_DPI_HIGH;
-    if (!Number.isFinite(sizeMB) || sizeMB <= 0) return VISION_DPI_MEDIUM;
-    for (const tier of SIZE_BASED_DPI_SAMPLES) {
-      if (sizeMB <= tier.maxFileMB) return tier.dpi;
-    }
-    return VISION_DPI_LOW;
-  };
-
   // Single API call per PDF, up to 5 pages
   const maxPages = Math.min(pageCount, MAX_VISION_PAGES);
   const PAGES_PER_BATCH = maxPages; // keep batching loop structure but this forces one batch per PDF
@@ -624,7 +629,7 @@ export async function extractImageFileWithVision(
 ): Promise<{ result: ExtractionResult; usage: GroqUsage }> {
   const totalUsage: GroqUsage = { inputTokens: 0, outputTokens: 0 };
 
-  const imageBuffer = await readFile(imagePath);
+  const imageBuffer = await getVfs().readFile(imagePath);
   const base64 = imageBuffer.toString("base64");
   const mimeType = getImageMimeType(filename);
 
@@ -730,6 +735,186 @@ function mergeExtractions(results: ExtractionResult[], filename: string): Extrac
     extracted_data: mergedData,
   };
 }
+
+// ============================================================================
+// Per-Page Extraction Functions
+// ============================================================================
+
+/**
+ * Extract structured data from each page of a PDF individually using text extraction.
+ * Returns per-page results with page numbers, plus aggregated usage.
+ */
+export async function extractTextPerPage(
+  pdfPath: string,
+  filename: string,
+  folder: string,
+  systemPrompt: string
+): Promise<{ results: PageExtractionResult[]; usage: GroqUsage }> {
+  const totalUsage: GroqUsage = { inputTokens: 0, outputTokens: 0 };
+
+  let pageCount: number;
+  try {
+    pageCount = await getPdfPageCount(pdfPath);
+  } catch {
+    pageCount = 1;
+  }
+
+  const results: PageExtractionResult[] = [];
+
+  for (let page = 1; page <= pageCount; page++) {
+    let pageText: string;
+    try {
+      pageText = await extractPdfTextByPage(pdfPath, page);
+    } catch {
+      pageText = "";
+    }
+
+    if (pageText.length < 20) {
+      results.push({
+        page,
+        type: "blank_page",
+        key_info: "",
+        has_handwritten_data: false,
+        handwritten_fields: [],
+        extracted_data: {},
+      });
+      continue;
+    }
+
+    try {
+      const schemaDesc = buildExtractionSchemaDescription();
+      const messages = [
+        {
+          role: "system" as const,
+          content: `${systemPrompt}
+
+## OUTPUT FORMAT
+
+You must respond with a single JSON object. No markdown, no explanation, no text outside the JSON.
+
+${schemaDesc}`,
+        },
+        {
+          role: "user" as const,
+          content: `Extract information from page ${page} of ${pageCount} of this document.
+
+FILENAME: ${filename}
+FOLDER: ${folder}
+
+DOCUMENT TEXT (page ${page}):
+${pageText}
+
+CRITICAL:
+- Include extracted_data.document_date for this specific document's own date.
+- If multiple dates appear, include extracted_data.document_date_confidence and extracted_data.document_date_reason.
+- Set has_handwritten_data to true only for substantive handwritten extracted values (exclude signature/initial-only markings).
+- Include handwritten_fields as non-signature extracted field names that are handwritten (use [] when none).
+
+Return the JSON extraction now.`,
+        },
+      ];
+
+      const { content, usage } = await callTextWithFallback(messages, `${filename}:p${page}`);
+      const parsed = JSON.parse(content);
+
+      totalUsage.inputTokens += usage.inputTokens;
+      totalUsage.outputTokens += usage.outputTokens;
+
+      results.push({
+        page,
+        type: parsed.type || "other",
+        key_info: parsed.key_info || "",
+        has_handwritten_data: parsed.has_handwritten_data === true,
+        handwritten_fields: Array.isArray(parsed.handwritten_fields) ? parsed.handwritten_fields : [],
+        extracted_data: parsed.extracted_data || {},
+      });
+    } catch (err) {
+      console.error(`[PerPage-Text] ${filename} page ${page} failed:`, err);
+      results.push({
+        page,
+        type: "other",
+        key_info: `Extraction failed for page ${page}`,
+        has_handwritten_data: false,
+        handwritten_fields: [],
+        extracted_data: {},
+      });
+    }
+  }
+
+  return { results, usage: totalUsage };
+}
+
+/**
+ * Extract structured data from each page of a PDF individually using vision extraction.
+ * Returns per-page results with page numbers, plus aggregated usage.
+ */
+export async function extractVisionPerPage(
+  pdfPath: string,
+  filename: string,
+  folder: string,
+  fileSizeMB: number,
+  systemPrompt: string
+): Promise<{ results: PageExtractionResult[]; usage: GroqUsage }> {
+  const totalUsage: GroqUsage = { inputTokens: 0, outputTokens: 0 };
+
+  let pageCount: number;
+  try {
+    pageCount = await getPdfPageCount(pdfPath);
+  } catch {
+    pageCount = 1;
+  }
+
+  const results: PageExtractionResult[] = [];
+  const dpi = pickVisionDpi(fileSizeMB, pageCount);
+
+  for (let page = 1; page <= pageCount; page++) {
+    const batchLabel = `page ${page}/${pageCount}`;
+    try {
+      const pageResults = await extractVisionRangeWithAdaptiveRetry(
+        pdfPath,
+        filename,
+        folder,
+        systemPrompt,
+        page,
+        page,
+        dpi,
+        batchLabel,
+        totalUsage
+      );
+
+      if (pageResults.length > 0) {
+        results.push({
+          page,
+          ...pageResults[0],
+        });
+      } else {
+        results.push({
+          page,
+          type: "blank_page",
+          key_info: "",
+          has_handwritten_data: false,
+          handwritten_fields: [],
+          extracted_data: {},
+        });
+      }
+    } catch (err) {
+      console.error(`[PerPage-Vision] ${filename} page ${page} failed:`, err);
+      results.push({
+        page,
+        type: "other",
+        key_info: `Vision extraction failed for page ${page}`,
+        has_handwritten_data: false,
+        handwritten_fields: [],
+        extracted_data: {},
+      });
+    }
+  }
+
+  return { results, usage: totalUsage };
+}
+
+// Also export mergeExtractions so it can be used externally for per-page merging
+export { mergeExtractions };
 
 // ============================================================================
 // Hypergraph Generation with GPT-OSS 120B → 20B Fallback

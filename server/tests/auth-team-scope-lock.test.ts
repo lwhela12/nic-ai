@@ -81,7 +81,7 @@ describe("auth/team/scope/lock integration", () => {
     const context = await requireTeamContext(firmRoot, "cm1@firm.com");
     expect(context.ok).toBe(true);
     if (!context.ok) return;
-    expect(context.context.role).toBe("case_manager");
+    expect(context.context.role).toBe("member");
 
     const team = await loadTeamState(firmRoot);
     const accepted = team.invites.find((invite) => invite.email === "cm1@firm.com");
@@ -89,7 +89,7 @@ describe("auth/team/scope/lock integration", () => {
   });
 
   it("blocks auth login when email has no active invite for configured firm", async () => {
-    process.env.DEV_MODE = "true";
+    process.env.DEV_MODE = "false";
     process.env.NODE_ENV = "development";
     process.env.CLAUDE_PI_AUTO_BOOTSTRAP = "false";
     process.env.CLAUDE_PI_APPROVED_FOUNDERS = "";
@@ -113,7 +113,7 @@ describe("auth/team/scope/lock integration", () => {
         firmRoot,
       }),
     });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.error).toBe("invite_required");
   });

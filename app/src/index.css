@@ -4,43 +4,43 @@
 @plugin "@tailwindcss/typography";
 
 @theme {
-  /* Brand colors - Deep slate for authority */
-  --color-brand-50: #f8fafc;
-  --color-brand-100: #f1f5f9;
-  --color-brand-200: #e2e8f0;
-  --color-brand-300: #cbd5e1;
-  --color-brand-400: #94a3b8;
-  --color-brand-500: #64748b;
-  --color-brand-600: #475569;
-  --color-brand-700: #334155;
-  --color-brand-800: #1e293b;
-  --color-brand-900: #0f172a;
-  --color-brand-950: #020617;
+  /* Brand colors - Brown/Wood */
+  --color-brand-50: #faf8f6;
+  --color-brand-100: #f3efe9;
+  --color-brand-200: #e5ddd3;
+  --color-brand-300: #d1c4b4;
+  --color-brand-400: #a89279;
+  --color-brand-500: #7d6654;
+  --color-brand-600: #5e4b3b;
+  --color-brand-700: #4a3a2e;
+  --color-brand-800: #352a21;
+  --color-brand-900: #231c16;
+  --color-brand-950: #150f0a;
 
-  /* Accent colors - Warm amber */
-  --color-accent-50: #fffbeb;
-  --color-accent-100: #fef3c7;
-  --color-accent-200: #fde68a;
-  --color-accent-300: #fcd34d;
-  --color-accent-400: #fbbf24;
-  --color-accent-500: #f59e0b;
-  --color-accent-600: #d97706;
-  --color-accent-700: #b45309;
-  --color-accent-800: #92400e;
-  --color-accent-900: #78350f;
+  /* Accent colors - Leaf Green */
+  --color-accent-50: #f3f8f0;
+  --color-accent-100: #e1eeda;
+  --color-accent-200: #c3ddb6;
+  --color-accent-300: #9ec48b;
+  --color-accent-400: #7aad63;
+  --color-accent-500: #5a9341;
+  --color-accent-600: #467832;
+  --color-accent-700: #375f28;
+  --color-accent-800: #2c4c22;
+  --color-accent-900: #213a1a;
 
-  /* Surface colors - Warm neutrals */
-  --color-surface-50: #fafaf9;
-  --color-surface-100: #f5f5f4;
-  --color-surface-200: #e7e5e4;
-  --color-surface-300: #d6d3d1;
-  --color-surface-400: #a8a29e;
+  /* Surface colors - Cream/Marble */
+  --color-surface-50: #fdfcfa;
+  --color-surface-100: #f7f4ef;
+  --color-surface-200: #ede8e0;
+  --color-surface-300: #ddd5c9;
+  --color-surface-400: #b5aa9a;
 
   /* Semantic status colors */
-  --color-success-50: #ecfdf3;
-  --color-success-100: #d1fae5;
-  --color-success-500: #10b981;
-  --color-success-700: #047857;
+  --color-success-50: #f0f7ed;
+  --color-success-100: #dcedcf;
+  --color-success-500: #5a9341;
+  --color-success-700: #375f28;
 
   --color-warning-50: #fffbeb;
   --color-warning-100: #fef3c7;
@@ -61,10 +61,10 @@
   --font-serif: 'Instrument Serif', Georgia, serif;
   --font-sans: 'Inter', system-ui, sans-serif;
 
-  /* Shadows */
-  --shadow-subtle: 0 1px 2px 0 rgb(0 0 0 / 0.03), 0 1px 3px 0 rgb(0 0 0 / 0.05);
-  --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.04), 0 2px 8px 0 rgb(0 0 0 / 0.04);
-  --shadow-elevated: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 10px 15px -3px rgb(0 0 0 / 0.08);
+  /* Shadows - warm-tinted */
+  --shadow-subtle: 0 1px 2px 0 rgb(35 28 22 / 0.04), 0 1px 3px 0 rgb(35 28 22 / 0.06);
+  --shadow-card: 0 1px 3px 0 rgb(35 28 22 / 0.05), 0 2px 8px 0 rgb(35 28 22 / 0.05);
+  --shadow-elevated: 0 4px 6px -1px rgb(35 28 22 / 0.06), 0 10px 15px -3px rgb(35 28 22 / 0.10);
 }
 
 :root {

@@ -53,7 +53,7 @@ const getPriorityBadge = (priority: 'high' | 'medium' | 'low') => {
   const config = {
     high: 'bg-red-100 text-red-700 ring-1 ring-red-200',
     medium: 'bg-amber-100 text-amber-700 ring-1 ring-amber-200',
-    low: 'bg-gray-100 text-gray-600 ring-1 ring-gray-200',
+    low: 'bg-surface-100 text-brand-500 ring-1 ring-surface-200',
   }
   const labels = { high: 'HIGH', medium: 'MED', low: 'LOW' }
 
@@ -70,6 +70,17 @@ export default function TodoDrawer({
 }: Props) {
   const pendingCount = todos.filter(t => t.status === 'pending').length
   const hasCompleted = todos.some(t => t.status === 'completed')
+  const groupedTodos = (() => {
+    const groups = new Map<string, FirmTodo[]>()
+    for (const todo of todos) {
+      const label = todo.caseRef?.trim() || 'General'
+      if (!groups.has(label)) {
+        groups.set(label, [])
+      }
+      groups.get(label)!.push(todo)
+    }
+    return Array.from(groups.entries())
+  })()
 
   return (
     <>
@@ -130,10 +141,10 @@ export default function TodoDrawer({
               ) : hasAttemptedGenerate ? (
                 // All caught up state (after generation attempted)
                 <>
-                  <div className="w-20 h-20 rounded-full bg-emerald-50 flex items-center justify-center mb-4 text-emerald-500">
+                  <div className="w-20 h-20 rounded-full bg-accent-50 flex items-center justify-center mb-4 text-accent-500">
                     <CheckCircleIcon />
                   </div>
-                  <p className="text-emerald-600 font-medium">All Caught Up!</p>
+                  <p className="text-accent-600 font-medium">All Caught Up!</p>
                   <p className="text-sm text-brand-400 mt-1">
                     No pending tasks for your portfolio
                   </p>
@@ -175,49 +186,58 @@ export default function TodoDrawer({
             </div>
           ) : (
             <div className="divide-y divide-surface-100">
-              {todos.map((todo) => (
-                <div
-                  key={todo.id}
-                  className={`px-6 py-4 hover:bg-surface-50 transition-colors ${
-                    todo.status === 'completed' ? 'bg-surface-50/50' : ''
-                  }`}
-                >
-                  <div className="flex items-start gap-3">
-                    {/* Checkbox */}
-                    <button
-                      onClick={() => onToggleTodo(todo.id)}
-                      className={`mt-0.5 w-5 h-5 rounded border-2 flex-shrink-0 flex items-center justify-center
-                                  transition-colors ${
-                        todo.status === 'completed'
-                          ? 'bg-accent-600 border-accent-600 text-white'
-                          : 'border-surface-300 hover:border-accent-500'
+              {groupedTodos.map(([groupLabel, groupItems]) => (
+                <div key={groupLabel}>
+                  <div className="px-6 py-2 bg-surface-50 border-b border-surface-100">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-brand-500">
+                      {groupLabel}
+                    </p>
+                  </div>
+                  {groupItems.map((todo) => (
+                    <div
+                      key={todo.id}
+                      className={`px-6 py-4 hover:bg-surface-50 transition-colors ${
+                        todo.status === 'completed' ? 'bg-surface-50/50' : ''
                       }`}
                     >
-                      {todo.status === 'completed' && <CheckIcon />}
-                    </button>
+                      <div className="flex items-start gap-3">
+                        {/* Checkbox */}
+                        <button
+                          onClick={() => onToggleTodo(todo.id)}
+                          className={`mt-0.5 w-5 h-5 rounded border-2 flex-shrink-0 flex items-center justify-center
+                                      transition-colors ${
+                            todo.status === 'completed'
+                              ? 'bg-accent-600 border-accent-600 text-white'
+                              : 'border-surface-300 hover:border-accent-500'
+                          }`}
+                        >
+                          {todo.status === 'completed' && <CheckIcon />}
+                        </button>
 
-                    {/* Content */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        {getPriorityBadge(todo.priority)}
+                        {/* Content */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            {getPriorityBadge(todo.priority)}
+                          </div>
+                          <p
+                            className={`text-sm leading-snug ${
+                              todo.status === 'completed'
+                                ? 'text-brand-400 line-through'
+                                : 'text-brand-800'
+                            }`}
+                          >
+                            {todo.text}
+                          </p>
+                          {todo.caseRef && (
+                            <p className="text-xs text-accent-600 mt-1.5 flex items-center gap-1">
+                              <span className="text-brand-400">↳</span>
+                              {todo.caseRef}
+                            </p>
+                          )}
+                        </div>
                       </div>
-                      <p
-                        className={`text-sm leading-snug ${
-                          todo.status === 'completed'
-                            ? 'text-brand-400 line-through'
-                            : 'text-brand-800'
-                        }`}
-                      >
-                        {todo.text}
-                      </p>
-                      {todo.caseRef && (
-                        <p className="text-xs text-accent-600 mt-1.5 flex items-center gap-1">
-                          <span className="text-brand-400">↳</span>
-                          {todo.caseRef}
-                        </p>
-                      )}
                     </div>
-                  </div>
+                  ))}
                 </div>
               ))}
             </div>

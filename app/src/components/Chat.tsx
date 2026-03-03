@@ -2,20 +2,6 @@ import { useState, useRef, useEffect, useMemo, memo, useCallback } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
-interface EvidencePacketPlanData {
-  documents: Array<{
-    docId?: string
-    path?: string
-    title?: string
-  }>
-  frontMatter: Partial<{
-    claimantName: string
-    claimNumber: string
-    issueOnAppeal: string
-    extraSectionValues: Record<string, string>
-  }>
-}
-
 interface Props {
   caseFolder: string
   apiUrl: string
@@ -24,13 +10,13 @@ interface Props {
   onInitialPromptUsed?: () => void
   onIndexMayHaveChanged?: () => void
   onDraftsMayHaveChanged?: () => void
+  onTodosMayHaveChanged?: () => void
   onEvidencePacketGenerated?: (filePath: string) => void
   onShowFile?: (filePath: string) => void
   onDocumentView?: (view: AgentDocumentViewPayload) => void
   onIndexStatusChange?: (status: IndexStatus | null) => void
   onStartReindex?: (forceFullReindex?: boolean) => void
   isReindexing?: boolean
-  onEvidencePacketPlanned?: (data: EvidencePacketPlanData) => void
 }
 
 interface AgentDocumentViewPayload {
@@ -225,7 +211,7 @@ const KEEP_RECENT = 2
 // Context usage thresholds
 const CONTEXT_DANGER_PERCENT = 55   // Red warning, trigger auto-summarize
 
-export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onEvidencePacketGenerated, onShowFile, onDocumentView, onIndexStatusChange, onStartReindex, isReindexing, onEvidencePacketPlanned }: Props) {
+export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onTodosMayHaveChanged, onEvidencePacketGenerated, onShowFile, onDocumentView, onIndexStatusChange, onStartReindex, isReindexing }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -694,35 +680,6 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                 onDocumentView?.(data.view)
               }
 
-              if (data.type === 'evidence_packet_plan' && data.plan && onEvidencePacketPlanned) {
-                const proposed = data.plan.proposedDocuments || []
-                const caption = data.plan.caption || {}
-                const service = data.plan.service || {}
-                const issueOnAppeal = data.plan.issueOnAppeal || ''
-                const templateId = data.plan.templateId || ''
-                onEvidencePacketPlanned({
-                  documents: proposed
-                    .map((d: { docId?: string; doc_id?: string; path?: string; title?: string }) => ({
-                      docId: (d.docId || d.doc_id || '').trim() || undefined,
-                      path: (d.path || '').trim() || undefined,
-                      title: d.title,
-                    }))
-                    .filter((d: { docId?: string; path?: string }) => Boolean(d.docId || d.path)),
-                  frontMatter: {
-                    ...caption,
-                    hearingNumber: caption.hearingNumber,
-                    hearingDateTime: caption.hearingDateTime,
-                    appearance: caption.appearance,
-                    serviceDate: service.serviceDate,
-                    serviceMethod: service.serviceMethod,
-                    recipients: service.recipients,
-                    issueOnAppeal,
-                    ...(templateId ? { templateId } : {}),
-                    ...(issueOnAppeal ? { extraSectionValues: { issueOnAppeal } } : {}),
-                  },
-                })
-              }
-
               if (data.type === 'usage') {
                 setContextUsage({
                   inputTokens: data.inputTokens,
@@ -787,11 +744,15 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                   onIndexMayHaveChanged()
                 }
                 // Check if file-writing tools were used or document agent created a file
-                const writeTools = ['Write', 'write_file', 'build_evidence_packet', 'create_evidence_packet']
+                const writeTools = ['Write', 'write_file']
                 const hasWriteTools = toolsUsed.some(t => writeTools.some(wt => t.includes(wt)))
                 const hasDocGenFile = !!data.filePath
                 if ((hasWriteTools || hasDocGenFile) && onDraftsMayHaveChanged) {
                   onDraftsMayHaveChanged()
+                }
+
+                if (toolsUsed.some(t => t.includes('save_case_tasks'))) {
+                  onTodosMayHaveChanged?.()
                 }
 
                 const generatedPreviewPath = typeof data.previewPath === 'string' ? data.previewPath.trim() : ''
@@ -799,12 +760,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
                   onShowFile(generatedPreviewPath)
                 }
 
-                // Trigger Drafts takeover flow when evidence packet tools create a file.
-                const evidencePacketTools = ['build_evidence_packet', 'create_evidence_packet']
-                const hasEvidencePacketWrite = toolsUsed.some(t => evidencePacketTools.some(tool => t.includes(tool)))
-                if (hasEvidencePacketWrite && typeof data.filePath === 'string' && data.filePath.trim() && onEvidencePacketGenerated) {
-                  onEvidencePacketGenerated(data.filePath.trim())
-                }
+                void onEvidencePacketGenerated
               }
 
               if (data.type === 'error') {
@@ -920,7 +876,7 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
             <div className="mt-2 ml-11 space-y-1">
               {indexStatus.newFiles.map((f, i) => (
                 <div key={`new-${i}`} className="flex items-center gap-2 text-xs text-amber-700">
-                  <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-700 rounded font-medium">NEW</span>
+                  <span className="px-1.5 py-0.5 bg-accent-100 text-accent-700 rounded font-medium">NEW</span>
                   <span className="truncate">{f.split('/').pop()}</span>
                 </div>
               ))}

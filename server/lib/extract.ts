@@ -1,8 +1,12 @@
 import mammoth from "mammoth";
-import { readFile } from "fs/promises";
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
-import { extractPdfText } from "./pdftotext";
+import { runPdftotext } from "./pdftotext";
+import { getVfs } from "./vfs";
+import { join } from "path";
+import { randomUUID } from "crypto";
+import { existsSync, unlinkSync } from "fs";
+import { writeFile, mkdir } from "fs/promises";
 
 export const IMAGE_EXTENSIONS = new Set([
   "jpg",
@@ -124,12 +128,23 @@ export interface DocxHtmlExtract {
  * (which uses Claude's vision for better accuracy than OCR).
  */
 export async function extractTextFromPdf(filePath: string): Promise<string> {
+  const vfs = getVfs();
+  let localPdfPath = filePath;
+  let isTemp = false;
+
+  if (vfs.name !== "local") {
+    // Download to temp
+    const tmpDir = join(process.cwd(), "tmp");
+    if (!existsSync(tmpDir)) await mkdir(tmpDir, { recursive: true });
+    localPdfPath = join(tmpDir, `${randomUUID()}.pdf`);
+    const buffer = await vfs.readFile(filePath);
+    await writeFile(localPdfPath, buffer);
+    isTemp = true;
+  }
+
   try {
-    const text = await extractPdfText(filePath, {
-      layout: true,
-      timeout: 30000,
-      maxBuffer: 10 * 1024 * 1024,
-    });
+    const args = ["-layout", localPdfPath, "-"];
+    const text = (await runPdftotext(args, { timeout: 30000, maxBuffer: 10 * 1024 * 1024 })).trim();
 
     if (text.length > 50) {
       return text;
@@ -142,6 +157,10 @@ export async function extractTextFromPdf(filePath: string): Promise<string> {
     const errorMsg = e instanceof Error ? e.message : String(e);
     console.log(`[Extract] pdftotext failed for ${filePath}: ${errorMsg.slice(0, 100)}`);
     return '';
+  } finally {
+    if (isTemp && existsSync(localPdfPath)) {
+      unlinkSync(localPdfPath);
+    }
   }
 }
 
@@ -150,7 +169,8 @@ export async function extractTextFromPdf(filePath: string): Promise<string> {
  * Returns the extracted text as markdown-formatted string.
  */
 export async function extractTextFromDocx(filePath: string): Promise<string> {
-  const dataBuffer = await readFile(filePath);
+  const vfs = getVfs();
+  const dataBuffer = await vfs.readFile(filePath);
   const result = await mammoth.extractRawText({ buffer: dataBuffer });
   return result.value;
 }
@@ -162,7 +182,9 @@ export async function extractTextFromDocx(filePath: string): Promise<string> {
  */
 export async function extractFullTextFromDocx(filePath: string): Promise<string> {
   const bodyText = await extractTextFromDocx(filePath);
-  const zip = await JSZip.loadAsync(await readFile(filePath));
+  const vfs = getVfs();
+  const dataBuffer = await vfs.readFile(filePath);
+  const zip = await JSZip.loadAsync(dataBuffer);
   const extraParts = [
     "word/header1.xml", "word/header2.xml", "word/header3.xml",
     "word/footer1.xml", "word/footer2.xml", "word/footer3.xml",
@@ -189,7 +211,8 @@ export async function extractFullTextFromDocx(filePath: string): Promise<string>
  * Extract rendered HTML and embedded CSS from a DOCX file.
  */
 export async function extractHtmlFromDocx(filePath: string): Promise<DocxHtmlExtract> {
-  const dataBuffer = await readFile(filePath);
+  const vfs = getVfs();
+  const dataBuffer = await vfs.readFile(filePath);
   const result = await mammoth.convertToHtml(
     { buffer: dataBuffer },
     {
@@ -228,6 +251,8 @@ export async function extractTextFromFile(filePath: string): Promise<string> {
     return `[Binary file: ${ext}]`;
   }
 
+  const vfs = getVfs();
+
   switch (ext) {
     case "pdf":
       return extractTextFromPdf(filePath);
@@ -238,13 +263,13 @@ export async function extractTextFromFile(filePath: string): Promise<string> {
     case "json":
     case "csv":
       // Plain text files - read directly
-      return readFile(filePath, "utf-8");
+      return vfs.readFile(filePath, "utf-8");
     default:
       // Try to read as text, return empty if binary
       try {
-        const content = await readFile(filePath, "utf-8");
+        const content = await vfs.readFile(filePath, "utf-8");
         // Check if content looks like binary (high ratio of non-printable chars)
-        const nonPrintable = content.split('').filter(c => {
+        const nonPrintable = content.split('').filter((c: string) => {
           const code = c.charCodeAt(0);
           return code < 32 && code !== 9 && code !== 10 && code !== 13;
         }).length;
@@ -263,7 +288,8 @@ export async function extractTextFromFile(filePath: string): Promise<string> {
  * Returns font, color, and margin settings.
  */
 export async function extractStylesFromDocx(filePath: string): Promise<DocxStyles> {
-  const dataBuffer = await readFile(filePath);
+  const vfs = getVfs();
+  const dataBuffer = await vfs.readFile(filePath);
   const zip = await JSZip.loadAsync(dataBuffer);
 
   const parser = new XMLParser({

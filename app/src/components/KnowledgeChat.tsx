@@ -200,7 +200,7 @@ export default function KnowledgeChat({ apiUrl, firmRoot }: Props) {
           return (
             <div key={i} className="flex justify-start">
               <div className="flex gap-3 max-w-[85%]">
-                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-600 to-emerald-800
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-accent-600 to-accent-800
                                 flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">
                   KB
                 </div>
@@ -217,7 +217,7 @@ export default function KnowledgeChat({ apiUrl, firmRoot }: Props) {
         {isLoading && (
           <div className="flex justify-start">
             <div className="flex gap-3">
-              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-600 to-emerald-800
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-accent-600 to-accent-800
                               flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">
                 KB
               </div>
@@ -255,8 +255,8 @@ export default function KnowledgeChat({ apiUrl, firmRoot }: Props) {
                       </div>
                     </div>
                     <div className="flex-1">
-                      <div className="text-emerald-600 font-medium mb-1">Add:</div>
-                      <div className="bg-emerald-50 p-2 rounded text-emerald-800 whitespace-pre-wrap">
+                      <div className="text-accent-600 font-medium mb-1">Add:</div>
+                      <div className="bg-accent-50 p-2 rounded text-accent-800 whitespace-pre-wrap">
                         {s.new_text.slice(0, 200)}{s.new_text.length > 200 ? '...' : ''}
                       </div>
                     </div>
@@ -271,7 +271,7 @@ export default function KnowledgeChat({ apiUrl, firmRoot }: Props) {
                     <button
                       onClick={() => applyEdit(i)}
                       disabled={applyingIdx === i}
-                      className="text-xs px-3 py-1 bg-emerald-600 text-white rounded hover:bg-emerald-700
+                      className="text-xs px-3 py-1 bg-accent-600 text-white rounded hover:bg-accent-700
                                  disabled:opacity-50 transition-colors"
                     >
                       {applyingIdx === i ? 'Applying...' : 'Apply'}

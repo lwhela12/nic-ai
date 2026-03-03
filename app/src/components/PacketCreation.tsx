@@ -177,9 +177,9 @@ const SparklesPenIcon = () => (
     <path d="M3 17l1.5-4.5L14 3l3 3-9.5 9.5L3 17z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     <path d="M11 6l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     {/* Sparkles */}
-    <path d="M16 2l.5 1.5L18 4l-1.5.5L16 6l-.5-1.5L14 4l1.5-.5L16 2z" fill="#d97706" />
-    <path d="M7 1l.35 1.05L8.4 2.4l-1.05.35L7 3.8l-.35-1.05L5.6 2.4l1.05-.35L7 1z" fill="#7c3aed" />
-    <path d="M18 10l.35 1.05 1.05.35-1.05.35L18 12.8l-.35-1.05-1.05-.35 1.05-.35L18 10z" fill="#3b82f6" />
+    <path d="M16 2l.5 1.5L18 4l-1.5.5L16 6l-.5-1.5L14 4l1.5-.5L16 2z" fill="#5a9341" />
+    <path d="M7 1l.35 1.05L8.4 2.4l-1.05.35L7 3.8l-.35-1.05L5.6 2.4l1.05-.35L7 1z" fill="#7d6654" />
+    <path d="M18 10l.35 1.05 1.05.35-1.05.35L18 12.8l-.35-1.05-1.05-.35 1.05-.35L18 10z" fill="#467832" />
   </svg>
 )
 
@@ -1036,7 +1036,7 @@ export default function PacketCreation({
           <p className="text-xs text-amber-700 flex-1">{generateWarning}</p>
         )}
         {packetState.generatedAt && !generateError && (
-          <div className="text-xs text-emerald-600 flex-1 flex items-center gap-3">
+          <div className="text-xs text-accent-600 flex-1 flex items-center gap-3">
             <span>Packet generated {packetState.outputPath ? `at ${packetState.outputPath}` : ''}</span>
             {packetState.frontMatterDocxPath && (
               <button
@@ -1646,7 +1646,7 @@ function FrontMatterTab({
           <span className="text-xs text-brand-500">Refreshing preview...</span>
         )}
         {isWatchingWordEdits && !isRefreshingPreview && (
-          <span className="text-xs text-emerald-600">Watching for Word saves...</span>
+          <span className="text-xs text-accent-600">Watching for Word saves...</span>
         )}
       </div>
       {frontMatterError && (
@@ -1725,7 +1725,7 @@ function PiiScanTab({
           <div className="mb-4 p-3 rounded-lg border bg-surface-50 border-surface-200">
             <div className="flex items-center gap-4">
               <div className="text-center">
-                <p className={`text-lg font-semibold ${totalFindings > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>
+                <p className={`text-lg font-semibold ${totalFindings > 0 ? 'text-amber-600' : 'text-accent-600'}`}>
                   {totalFindings}
                 </p>
                 <p className="text-[10px] text-brand-500 uppercase">Potential</p>
@@ -1759,7 +1759,7 @@ function PiiScanTab({
                 </button>
               )}
               {allApproved && (
-                <span className="px-3 py-1.5 text-xs font-medium bg-emerald-100 text-emerald-700 rounded-lg">
+                <span className="px-3 py-1.5 text-xs font-medium bg-accent-100 text-accent-700 rounded-lg">
                   All Approved
                 </span>
               )}
@@ -1793,7 +1793,7 @@ function PiiScanTab({
                           {warnings[0] || 'PII scan did not complete for this file.'}
                         </span>
                       ) : candidateCount === 0 ? (
-                        <span className="text-[11px] text-emerald-600">No PII detected</span>
+                        <span className="text-[11px] text-accent-600">No PII detected</span>
                       ) : (
                         <>
                           <span className="text-[11px] text-amber-600 font-medium">
@@ -1817,7 +1817,7 @@ function PiiScanTab({
                     onClick={() => onApproveDoc(result.path)}
                     className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
                       result.approved
-                        ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+                        ? 'bg-accent-100 text-accent-700 hover:bg-accent-200'
                         : 'bg-surface-100 text-brand-600 hover:bg-surface-200'
                     }`}
                   >

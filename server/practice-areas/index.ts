@@ -21,8 +21,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * Load a markdown prompt file for a practice area.
  * Returns empty string if file doesn't exist.
  */
+const EC_METADATA = { code: "EC", name: "Elder Care" };
+
 function loadPrompt(areaCode: string, filename: string): string {
-  const areaDir = areaCode === "PI" ? "personal-injury" : "workers-comp";
+  const areaDirMap: Record<string, string> = { PI: "personal-injury", WC: "workers-comp" };
+  const areaDir = areaDirMap[areaCode];
+  if (!areaDir) return "";
   const promptPath = join(__dirname, areaDir, filename);
 
   if (!existsSync(promptPath)) {
@@ -60,6 +64,7 @@ function buildConfig(
 // Build configs (prompts loaded lazily on first access)
 let _piConfig: PracticeAreaConfig | null = null;
 let _wcConfig: PracticeAreaConfig | null = null;
+let _ecConfig: PracticeAreaConfig | null = null;
 
 function getPIConfig(): PracticeAreaConfig {
   if (!_piConfig) {
@@ -75,6 +80,13 @@ function getWCConfig(): PracticeAreaConfig {
   return _wcConfig;
 }
 
+function getECConfig(): PracticeAreaConfig {
+  if (!_ecConfig) {
+    _ecConfig = buildConfig(EC_METADATA, SHARED_DOC_TYPES, []);
+  }
+  return _ecConfig;
+}
+
 /**
  * Practice area registry implementation.
  */
@@ -83,6 +95,7 @@ export const practiceAreaRegistry: PracticeAreaRegistry = {
     const upperCode = code.toUpperCase();
     if (upperCode === "PI") return getPIConfig();
     if (upperCode === "WC") return getWCConfig();
+    if (upperCode === "EC") return getECConfig();
     return undefined;
   },
 
@@ -94,15 +107,18 @@ export const practiceAreaRegistry: PracticeAreaRegistry = {
     if (lowerName.includes("worker") || lowerName.includes("compensation")) {
       return getWCConfig();
     }
+    if (lowerName.includes("elder") || lowerName.includes("care")) {
+      return getECConfig();
+    }
     return undefined;
   },
 
   getDefault(): PracticeAreaConfig {
-    return getPIConfig();
+    return getECConfig();
   },
 
   list(): PracticeAreaConfig[] {
-    return [getPIConfig(), getWCConfig()];
+    return [getPIConfig(), getWCConfig(), getECConfig()];
   },
 
   getAllDocumentTypes(): readonly string[] {
@@ -134,4 +150,5 @@ export { WC_DOC_TYPES, WC_PHASES } from "./workers-comp/config";
 export const PRACTICE_AREAS = {
   PI: "Personal Injury",
   WC: "Workers' Compensation",
+  EC: "Elder Care",
 } as const;

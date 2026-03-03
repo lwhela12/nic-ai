@@ -44,13 +44,61 @@ export function getClient(): Anthropic {
   return _anthropic;
 }
 
-// Document types we can generate
+// Canonical document types for personal/family/business assistance.
 export type DocumentType =
+  | "financial_summary"
+  | "estate_checklist"
+  | "medical_summary"
+  | "care_plan"
+  | "correspondence"
+  | "meeting_minutes"
+  | "action_plan"
+  | "custom_document";
+
+export type LegacyDocumentType =
   | "demand_letter"
   | "case_memo"
   | "settlement"
   | "general_letter"
   | "decision_order";
+
+export type DocumentTypeInput = DocumentType | LegacyDocumentType | (string & {});
+
+const LEGACY_DOCUMENT_TYPE_MAP: Record<LegacyDocumentType, DocumentType> = {
+  demand_letter: "correspondence",
+  case_memo: "action_plan",
+  settlement: "financial_summary",
+  general_letter: "correspondence",
+  decision_order: "custom_document",
+};
+
+export function normalizeDocumentType(input: DocumentTypeInput): DocumentType {
+  const normalized = String(input || "").trim().toLowerCase() as DocumentTypeInput;
+  if (
+    normalized === "financial_summary" ||
+    normalized === "estate_checklist" ||
+    normalized === "medical_summary" ||
+    normalized === "care_plan" ||
+    normalized === "correspondence" ||
+    normalized === "meeting_minutes" ||
+    normalized === "action_plan" ||
+    normalized === "custom_document"
+  ) {
+    return normalized;
+  }
+
+  if (
+    normalized === "demand_letter" ||
+    normalized === "case_memo" ||
+    normalized === "settlement" ||
+    normalized === "general_letter" ||
+    normalized === "decision_order"
+  ) {
+    return LEGACY_DOCUMENT_TYPE_MAP[normalized];
+  }
+
+  return "custom_document";
+}
 
 export interface DocGenResult {
   success: boolean;
@@ -133,11 +181,14 @@ export const DEFAULT_COMPOSE_BUDGET: ComposeBudget = {
 const RESEARCH_TOOL_NAMES = new Set(["read_file", "read_index_slice", "glob", "grep", "list_folder"]);
 
 const DEFAULT_DRAFT_FILENAME: Record<DocumentType, string> = {
-  demand_letter: "demand_letter.md",
-  case_memo: "case_memo.md",
-  settlement: "settlement_calculation.md",
-  general_letter: "letter.md",
-  decision_order: "decision_and_order.md",
+  financial_summary: "financial_summary.md",
+  estate_checklist: "estate_checklist.md",
+  medical_summary: "medical_summary.md",
+  care_plan: "care_plan.md",
+  correspondence: "correspondence.md",
+  meeting_minutes: "meeting_minutes.md",
+  action_plan: "action_plan.md",
+  custom_document: "custom_document.md",
 };
 
 function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
@@ -150,49 +201,52 @@ function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean 
 
 function getDocTypeDescription(docType: DocumentType): string {
   const docTypeDescriptions: Record<DocumentType, string> = {
-    demand_letter: "a demand letter to the at-fault party's insurance carrier",
-    case_memo: "an internal case memorandum summarizing the case",
-    settlement: "a settlement calculation and disbursement breakdown",
-    general_letter: "a professional letter related to the case",
-    decision_order: "a workers' compensation hearing Decision & Order for filing",
+    financial_summary: "a financial summary document",
+    estate_checklist: "an estate planning checklist",
+    medical_summary: "a medical summary",
+    care_plan: "a care coordination plan",
+    correspondence: "a professional correspondence document",
+    meeting_minutes: "meeting minutes",
+    action_plan: "an action plan",
+    custom_document: "a custom structured document",
   };
   return docTypeDescriptions[docType];
 }
 
 function getDocTypeSpecificInstructions(docType: DocumentType): string {
   const instructions: Record<DocumentType, string> = {
-    demand_letter: `
-Demand-letter specific requirements:
-- Follow demand template language closely when available.
-- Include provider-by-provider specials with totals.
-- Make sure demand amount/policy-limits framing is explicitly stated.`,
-    case_memo: `
-Case-memo specific requirements:
-- Include case posture, major facts, treatment summary, financial snapshot, and open issues.
-- Keep it internal-facing and analytical.`,
-    settlement: `
-Settlement specific requirements:
-- Show clear arithmetic for all inflows/outflows.
-- Include assumptions and flags where figures are uncertain.`,
-    general_letter: `
-General-letter specific requirements:
-- Keep formal business-letter formatting.
-- Keep requests, deadlines, and asks explicit.`,
-    decision_order: `
-Decision & Order specific requirements:
-- This is a post-hearing legal filing style document, not a letter.
-- Use this core structure:
-  1) Caption / case heading
-  2) Introductory hearing/procedural paragraph(s)
-  3) Exhibits admitted (if known)
-  4) FINDINGS OF FACT (numbered)
-  5) CONCLUSIONS OF LAW (numbered, statute/case citations when supported)
-  6) ORDER (numbered decretal rulings tied to appealed issues)
-  7) Signature / submission block (if requested)
-- Ground every finding and legal conclusion in case documents/index data; do not invent facts, holdings, dates, or citations.
-- If critical filing detail is missing (appeal no., claim no., hearing date, AO name), insert a clear [VERIFY: ...] placeholder rather than guessing.
-- A post-save layout safety pass will normalize missing section numbering and add Claim/Hearing/DOI placeholders if omitted, but still draft these explicitly when known.
-- Default draft filename for this type: decision_and_order.md`,
+    financial_summary: `
+Financial-summary requirements:
+- Show clear arithmetic, assumptions, and unresolved values.
+- Group by income, expenses, obligations, and outstanding actions.`,
+    estate_checklist: `
+Estate-checklist requirements:
+- Use a practical checklist format with status and owner fields.
+- Include missing-documents and follow-up sections.`,
+    medical_summary: `
+Medical-summary requirements:
+- Organize by date/provider and include diagnoses, treatment, and next steps.
+- Flag uncertainty with [VERIFY: ...] placeholders.`,
+    care_plan: `
+Care-plan requirements:
+- Provide goals, care tasks, owners, and due dates.
+- Keep language practical and coordination-oriented.`,
+    correspondence: `
+Correspondence requirements:
+- Keep formal letter/email structure with clear asks and deadlines.
+- Keep tone professional and concise.`,
+    meeting_minutes: `
+Meeting-minutes requirements:
+- Capture attendees, decisions, open questions, and action items.
+- Use clear bullets and timestamps when available.`,
+    action_plan: `
+Action-plan requirements:
+- Prioritize tasks, owners, target dates, and dependencies.
+- Include a short status summary and risks section.`,
+    custom_document: `
+Custom-document requirements:
+- Follow any selected template structure.
+- Keep sections explicit and use [VERIFY: ...] placeholders for unknown details.`,
   };
   return instructions[docType];
 }
@@ -205,16 +259,22 @@ function formatDraftName(id: string): string {
 
 function inferDraftMetadata(docType: DocumentType): { type: string; targetPath: string } {
   switch (docType) {
-    case "demand_letter":
-      return { type: "demand", targetPath: "3P/3P Demand.pdf" };
-    case "case_memo":
-      return { type: "memo", targetPath: ".ai_tool/case_memo.pdf" };
-    case "settlement":
-      return { type: "settlement", targetPath: "Settlement/Settlement Memo.pdf" };
-    case "general_letter":
-      return { type: "letter", targetPath: "letter.pdf" };
-    case "decision_order":
-      return { type: "hearing_decision", targetPath: "Litigation/Decision and Order.pdf" };
+    case "financial_summary":
+      return { type: "financial_summary", targetPath: ".ai_tool/financial_summary.pdf" };
+    case "estate_checklist":
+      return { type: "estate_checklist", targetPath: ".ai_tool/estate_checklist.pdf" };
+    case "medical_summary":
+      return { type: "medical_summary", targetPath: ".ai_tool/medical_summary.pdf" };
+    case "care_plan":
+      return { type: "care_plan", targetPath: ".ai_tool/care_plan.pdf" };
+    case "correspondence":
+      return { type: "correspondence", targetPath: ".ai_tool/correspondence.pdf" };
+    case "meeting_minutes":
+      return { type: "meeting_minutes", targetPath: ".ai_tool/meeting_minutes.pdf" };
+    case "action_plan":
+      return { type: "action_plan", targetPath: ".ai_tool/action_plan.pdf" };
+    case "custom_document":
+      return { type: "custom_document", targetPath: ".ai_tool/custom_document.pdf" };
     default:
       return { type: "document", targetPath: "document.pdf" };
   }
@@ -222,16 +282,17 @@ function inferDraftMetadata(docType: DocumentType): { type: string; targetPath: 
 
 function mapDocTypeToExportType(docType: DocumentType): ExportOptions["documentType"] {
   switch (docType) {
-    case "demand_letter":
-      return "demand";
-    case "case_memo":
+    case "financial_summary":
+    case "medical_summary":
+    case "meeting_minutes":
+    case "action_plan":
       return "memo";
-    case "settlement":
-      return "settlement";
-    case "general_letter":
+    case "correspondence":
       return "letter";
-    case "decision_order":
-      return "hearing_decision";
+    case "estate_checklist":
+    case "care_plan":
+    case "custom_document":
+      return "generic";
     default:
       return "generic";
   }
@@ -371,11 +432,7 @@ function applyDraftSafetyChecks(content: string, docType: DocumentType): { conte
     notes.push("Removed outer markdown code fence.");
   }
 
-  if (docType === "decision_order") {
-    const normalized = normalizeDecisionOrderMarkdown(working);
-    working = normalized.content;
-    notes.push(...normalized.notes);
-  }
+  void docType;
 
   return { content: working, notes };
 }
@@ -496,11 +553,14 @@ function extractToolResultHighlights(
     .filter((line) => line.length > 0 && !/^error[:\s]/i.test(line));
 
   const docKeywords: Record<DocumentType, RegExp> = {
-    demand_letter: /(policy|carrier|demand|settlement|medical|specials|liability|limits?)/i,
-    case_memo: /(summary|history|treatment|damages|issue|status|fact)/i,
-    settlement: /(amount|lien|paid|balance|settlement|cost|fee|distribution)/i,
-    general_letter: /(request|notice|deadline|correspondence|client|insurer)/i,
-    decision_order: /(hearing|appeal|issue|finding|conclusion|order|claim\s*no|hearing\s*no|date of injury|exhibit|nrs|decision)/i,
+    financial_summary: /(income|expense|balance|budget|payment|cash|asset|debt|total)/i,
+    estate_checklist: /(will|trust|beneficiary|executor|power of attorney|estate|checklist)/i,
+    medical_summary: /(diagnosis|treatment|provider|visit|symptom|medication|care)/i,
+    care_plan: /(care|schedule|coordination|task|support|goal|follow-up)/i,
+    correspondence: /(request|notice|deadline|correspondence|contact|recipient|response)/i,
+    meeting_minutes: /(meeting|attendees|agenda|decision|notes|action item|follow-up)/i,
+    action_plan: /(priority|owner|deadline|task|milestone|dependency|risk)/i,
+    custom_document: /(summary|plan|notes|document|details|action|review)/i,
   };
   const datePattern = /\b(?:19|20)\d{2}[-/](?:0?[1-9]|1[0-2])[-/](?:0?[1-9]|[12]\d|3[01])\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2},\s+(?:19|20)\d{2}\b/i;
   const moneyPattern = /\$\s?\d[\d,]*(?:\.\d{2})?/;
@@ -1545,14 +1605,14 @@ function buildSystemPrompt(
   templates: string,
   firmConfig: Record<string, any>
 ): string {
-  return `You are a legal document drafting assistant for a Personal Injury law firm. Your task is to generate ${getDocTypeDescription(docType)}.
+  return `You are a document drafting assistant for personal, family, and small-business support workflows. Your task is to generate ${getDocTypeDescription(docType)}.
 
 ## FIRM INFORMATION
 
 ${firmConfig.firmName ? `Firm: ${firmConfig.firmName}` : ""}
 ${firmConfig.address ? `Address: ${firmConfig.address}` : ""}
 ${firmConfig.phone ? `Phone: ${firmConfig.phone}` : ""}
-${firmConfig.feeStructure ? `Fee Structure: ${firmConfig.feeStructure}` : ""}
+${firmConfig.email ? `Email: ${firmConfig.email}` : ""}
 
 ## PRACTICE KNOWLEDGE
 
@@ -1579,7 +1639,7 @@ ${getDocTypeSpecificInstructions(docType)}
 
 IMPORTANT:
 - Follow the template structure closely
-- Use professional legal language
+- Use clear professional language
 - Ensure all facts are accurate based on the case documents
 - Include proper dates, amounts, and details
 - Write the complete document - do not leave placeholders unfilled
@@ -1603,13 +1663,13 @@ function buildResearchSystemPrompt(
   firmConfig: Record<string, any>,
   maxTurns: number
 ): string {
-  return `You are the research phase for legal document drafting.
+  return `You are the research phase for document drafting.
 Your sole task is to gather verified facts and citations for ${getDocTypeDescription(docType)}.
 Do NOT draft the final document.
 
 Firm context:
 ${firmConfig.firmName ? `Firm: ${firmConfig.firmName}` : ""}
-${firmConfig.jurisdiction ? `Jurisdiction: ${firmConfig.jurisdiction}` : ""}
+${firmConfig.officeName ? `Office: ${firmConfig.officeName}` : ""}
 
 Practice knowledge:
 ${trimContentToBudget(knowledge, 22000, "research knowledge")}
@@ -1638,7 +1698,7 @@ export function buildComposeSystemPrompt(
   knowledge: string,
   firmConfig: Record<string, any>
 ): string {
-  return `You are the composition phase for legal document drafting.
+  return `You are the composition phase for document drafting.
 Draft ${getDocTypeDescription(docType)} from the provided research packet and template excerpts.
 Do not use tools.
 Output markdown only (no code fences, no JSON).
@@ -1668,16 +1728,22 @@ interface NarrowedTemplateContext {
 
 function getTemplateKeywords(docType: DocumentType): string[] {
   switch (docType) {
-    case "decision_order":
-      return ["decision", "order", "hearing", "appeal", "appeals officer", "hearing officer", "dao", "d&o"];
-    case "demand_letter":
-      return ["demand", "policy limits", "insurer", "carrier", "settlement"];
-    case "case_memo":
-      return ["memo", "memorandum", "case summary", "posture"];
-    case "settlement":
-      return ["settlement", "disbursement", "distribution", "lien", "calculation"];
-    case "general_letter":
-      return ["letter", "request", "notice", "correspondence"];
+    case "financial_summary":
+      return ["financial", "budget", "summary", "cashflow", "assets", "debts"];
+    case "estate_checklist":
+      return ["estate", "checklist", "will", "trust", "beneficiary", "planning"];
+    case "medical_summary":
+      return ["medical", "treatment", "provider", "clinical", "summary", "care"];
+    case "care_plan":
+      return ["care plan", "care coordination", "support plan", "tasks", "timeline"];
+    case "correspondence":
+      return ["letter", "email", "request", "notice", "correspondence"];
+    case "meeting_minutes":
+      return ["meeting", "minutes", "agenda", "notes", "attendees", "decisions"];
+    case "action_plan":
+      return ["action plan", "next steps", "tasks", "owners", "deadlines"];
+    case "custom_document":
+      return ["custom", "document", "summary", "plan"];
     default:
       return ["document"];
   }
@@ -1702,10 +1768,6 @@ function scoreTemplateCandidate(
     .filter((term) => term.length >= 5);
   for (const term of promptTerms) {
     if (haystack.includes(term)) score += 2;
-  }
-
-  if (docType === "decision_order" && /(decision|order|hearing|appeal)/i.test(haystack)) {
-    score += 6;
   }
 
   return score;
@@ -1840,20 +1902,7 @@ export function isDraftTooThin(content: string, docType: DocumentType): { thin: 
   if (trimmed.length === 0) {
     return { thin: true, reason: "Compose returned empty content." };
   }
-
-  if (docType === "decision_order") {
-    const requiredHeadings = ["findings of fact", "conclusions of law", "order"];
-    const lower = trimmed.toLowerCase();
-    for (const heading of requiredHeadings) {
-      if (!lower.includes(heading)) {
-        return { thin: true, reason: `Compose output missing required section: ${heading}.` };
-      }
-    }
-    if (trimmed.length < 1200) {
-      return { thin: true, reason: "Compose output is too short for a filing-ready Decision & Order." };
-    }
-    return { thin: false };
-  }
+  void docType;
 
   if (trimmed.length < 450) {
     return { thin: true, reason: "Compose output is too short for a complete draft." };
@@ -1870,51 +1919,7 @@ export function buildFallbackDraftContent(
   const reasonLine = composeReason
     ? `Auto-saved fallback scaffold because compose was incomplete: ${composeReason}`
     : "Auto-saved fallback scaffold because compose was incomplete.";
-
-  if (docType === "decision_order") {
-    return `Claim No.: [VERIFY]
-Hearing No.: [VERIFY]
-Date of Injury: [VERIFY]
-Appeal No.: [VERIFY]
-
-# DECISION AND ORDER
-
-### I. PROCEDURAL HISTORY
-[VERIFY: Provide procedural posture, hearing date, appearances, and appeal identifier.]
-
-### II. ISSUE PRESENTED
-1. [VERIFY: Identify each issue on appeal.]
-
-### III. EXHIBITS ADMITTED
-1. [VERIFY: List admitted exhibits and references.]
-
-### IV. FINDINGS OF FACT
-1. [VERIFY: Add fact findings supported by record citations.]
-2. [VERIFY]
-
-### V. CONCLUSIONS OF LAW
-1. [VERIFY: Add legal conclusions tied to findings and controlling law.]
-2. [VERIFY]
-
-### VI. ORDER
-1. [VERIFY: Add decretal ruling for each appealed issue.]
-2. [VERIFY]
-
-### VII. NOTICE OF APPEAL RIGHTS
-[VERIFY: Insert applicable statutory appeal-rights language.]
-
-### VIII. CERTIFICATE OF SERVICE
-[VERIFY: Insert date, method, recipients, and signature block.]
-
----
-${reasonLine}
-
-## User Request Context
-${truncateForTrace(userPrompt, 800)}
-
-## Research Packet Snapshot
-${trimContentToBudget(researchPacketMarkdown, 3000, "research packet snapshot")}`;
-  }
+  void docType;
 
   return `# ${formatDraftName(DEFAULT_DRAFT_FILENAME[docType].replace(/\.md$/i, ""))}
 
@@ -2681,11 +2686,13 @@ export function detectDocGenIntent(message: string): { type: DocumentType; promp
 
   // Check for specific document types
   const patterns: Array<{ keywords: string[]; type: DocumentType }> = [
-    { keywords: ["demand letter", "demand"], type: "demand_letter" },
-    { keywords: ["case memo", "memo", "memorandum"], type: "case_memo" },
-    { keywords: ["decision and order", "decision & order", "appeals officer decision", "hearing decision", "dao"], type: "decision_order" },
-    { keywords: ["settlement", "disbursement", "calculation"], type: "settlement" },
-    { keywords: ["letter"], type: "general_letter" }
+    { keywords: ["financial summary", "budget summary", "expense summary", "settlement"], type: "financial_summary" },
+    { keywords: ["estate checklist", "estate plan checklist", "will checklist", "trust checklist"], type: "estate_checklist" },
+    { keywords: ["medical summary", "treatment summary", "clinical summary"], type: "medical_summary" },
+    { keywords: ["care plan", "care coordination plan"], type: "care_plan" },
+    { keywords: ["meeting minutes", "minutes"], type: "meeting_minutes" },
+    { keywords: ["action plan", "next steps plan", "plan of action", "case memo", "memo", "memorandum"], type: "action_plan" },
+    { keywords: ["correspondence", "letter", "email", "demand letter", "general letter"], type: "correspondence" }
   ];
 
   for (const pattern of patterns) {

@@ -14,6 +14,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { promisify } from "util";
 import { resolvePoppler } from "./pdftotext";
+import { withLocalVfsFile } from "./vfs";
 
 const execFileAsync = promisify(execFile);
 
@@ -40,16 +41,18 @@ function resolvePdfinfoCommand(): string {
  * Get the page count of a PDF via pdfinfo.
  */
 export async function getPdfPageCount(pdfPath: string): Promise<number> {
-  const { stdout } = await execFileAsync(resolvePdfinfoCommand(), [pdfPath], {
-    timeout: 15000,
-    windowsHide: true,
-  });
+  return withLocalVfsFile(pdfPath, async (localPath) => {
+    const { stdout } = await execFileAsync(resolvePdfinfoCommand(), [localPath], {
+      timeout: 15000,
+      windowsHide: true,
+    });
 
-  const match = stdout.match(/Pages:\s+(\d+)/);
-  if (!match) {
-    throw new Error(`Could not determine page count for ${pdfPath}`);
-  }
-  return parseInt(match[1], 10);
+    const match = stdout.match(/Pages:\s+(\d+)/);
+    if (!match) {
+      throw new Error(`Could not determine page count for ${pdfPath}`);
+    }
+    return parseInt(match[1], 10);
+  });
 }
 
 /**
@@ -68,71 +71,73 @@ export async function pdfToImages(
   dpi: number = 200,
   options: PdfToImagesOptions = {}
 ): Promise<PdfPageImage[]> {
-  const prefix = join(tmpdir(), `groq-pi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  return withLocalVfsFile(pdfPath, async (localPath) => {
+    const prefix = join(tmpdir(), `groq-pi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
 
-  try {
-    const commandArgs = [
-      "-jpeg",
-      "-r", String(dpi),
-      "-f", String(firstPage),
-      "-l", String(lastPage),
-      ...(options.cropBox ? ["-cropbox"] : []),
-      ...(options.hideAnnotations ? ["-hide-annotations"] : []),
-      pdfPath,
-      prefix,
-    ];
-    await execFileAsync(
-      resolvePdftoppmCommand(),
-      commandArgs,
-      {
-        timeout: 60000,
-        maxBuffer: 5 * 1024 * 1024,
-        windowsHide: true,
-      }
-    );
-
-    const images: PdfPageImage[] = [];
-    for (let page = firstPage; page <= lastPage; page++) {
-      // pdftoppm names files like prefix-01.jpg, prefix-02.jpg, etc.
-      // The number of digits depends on total pages: could be -1.jpg, -01.jpg, -001.jpg
-      const candidates = [
-        `${prefix}-${page}.jpg`,
-        `${prefix}-${String(page).padStart(2, "0")}.jpg`,
-        `${prefix}-${String(page).padStart(3, "0")}.jpg`,
+    try {
+      const commandArgs = [
+        "-jpeg",
+        "-r", String(dpi),
+        "-f", String(firstPage),
+        "-l", String(lastPage),
+        ...(options.cropBox ? ["-cropbox"] : []),
+        ...(options.hideAnnotations ? ["-hide-annotations"] : []),
+        localPath,
+        prefix,
       ];
+      await execFileAsync(
+        resolvePdftoppmCommand(),
+        commandArgs,
+        {
+          timeout: 60000,
+          maxBuffer: 5 * 1024 * 1024,
+          windowsHide: true,
+        }
+      );
 
-      let found = false;
-      for (const candidate of candidates) {
-        if (existsSync(candidate)) {
-          let buf: Buffer | null = await readFile(candidate);
-          const b64 = buf.toString("base64");
-          const size = buf.length;
-          buf = null; // Release raw JPEG buffer immediately
-          images.push({ page, base64: b64, sizeBytes: size });
-          // Clean up temp file
-          await unlink(candidate).catch(() => {});
-          found = true;
-          break;
+      const images: PdfPageImage[] = [];
+      for (let page = firstPage; page <= lastPage; page++) {
+        // pdftoppm names files like prefix-01.jpg, prefix-02.jpg, etc.
+        // The number of digits depends on total pages: could be -1.jpg, -01.jpg, -001.jpg
+        const candidates = [
+          `${prefix}-${page}.jpg`,
+          `${prefix}-${String(page).padStart(2, "0")}.jpg`,
+          `${prefix}-${String(page).padStart(3, "0")}.jpg`,
+        ];
+
+        let found = false;
+        for (const candidate of candidates) {
+          if (existsSync(candidate)) {
+            let buf: Buffer | null = await readFile(candidate);
+            const b64 = buf.toString("base64");
+            const size = buf.length;
+            buf = null; // Release raw JPEG buffer immediately
+            images.push({ page, base64: b64, sizeBytes: size });
+            // Clean up temp file
+            await unlink(candidate).catch(() => { });
+            found = true;
+            break;
+          }
+        }
+
+        if (!found) {
+          console.warn(`[pdftoppm] Missing output for page ${page} of ${pdfPath}`);
         }
       }
 
-      if (!found) {
-        console.warn(`[pdftoppm] Missing output for page ${page} of ${pdfPath}`);
+      return images;
+    } catch (err) {
+      // Clean up any temp files on error
+      for (let page = firstPage; page <= lastPage; page++) {
+        for (const suffix of [
+          `${page}.jpg`,
+          `${String(page).padStart(2, "0")}.jpg`,
+          `${String(page).padStart(3, "0")}.jpg`,
+        ]) {
+          await unlink(`${prefix}-${suffix}`).catch(() => { });
+        }
       }
+      throw err;
     }
-
-    return images;
-  } catch (err) {
-    // Clean up any temp files on error
-    for (let page = firstPage; page <= lastPage; page++) {
-      for (const suffix of [
-        `${page}.jpg`,
-        `${String(page).padStart(2, "0")}.jpg`,
-        `${String(page).padStart(3, "0")}.jpg`,
-      ]) {
-        await unlink(`${prefix}-${suffix}`).catch(() => {});
-      }
-    }
-    throw err;
-  }
+  });
 }

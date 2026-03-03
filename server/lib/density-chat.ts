@@ -60,6 +60,7 @@ import {
   isDraftTooThin,
   buildFallbackDraftContent,
   loadFirmConfig,
+  normalizeDocumentType,
   DEFAULT_COMPOSE_BUDGET,
   type DocumentType,
   type DocAgentPathContext,
@@ -105,6 +106,40 @@ const FOLDER_DETAIL_MAX_CHARS = 6000;
 const EXTRACTION_BATCH_CHAR_BUDGET = 400_000;
 /** Memory compression threshold — compress when memory exceeds this (chars) */
 const MEMORY_COMPRESS_THRESHOLD = 60_000;
+/** Sparse memory threshold — trigger raw fallback when memory is below this (chars) */
+const SPARSE_MEMORY_THRESHOLD = 100;
+/** Max chars per message when formatting history for prompts */
+const HISTORY_MESSAGE_CAP = 300;
+/** Max recent messages to include in history context */
+const HISTORY_MESSAGE_LIMIT = 12;
+
+// ============================================================================
+// History Formatting
+// ============================================================================
+
+/**
+ * Format recent conversation history as a concise block for prompt injection.
+ * Returns empty string if no meaningful history exists.
+ */
+function formatHistoryForPrompt(history: ChatMessage[]): string {
+  if (!history || history.length === 0) return "";
+
+  const recent = history.slice(-HISTORY_MESSAGE_LIMIT);
+  const lines: string[] = [];
+
+  for (const msg of recent) {
+    const role = msg.role === "user" ? "User" : "Assistant";
+    let content = msg.content.trim();
+    if (content.length > HISTORY_MESSAGE_CAP) {
+      content = content.slice(0, HISTORY_MESSAGE_CAP) + "...";
+    }
+    lines.push(`${role}: ${content}`);
+  }
+
+  if (lines.length === 0) return "";
+
+  return `## Recent Conversation\n${lines.join("\n")}`;
+}
 
 // ============================================================================
 // Main Entry Point
@@ -137,35 +172,16 @@ export async function* densityChat(
 
     switch (intent.intent) {
       case "answer": {
-        generator = runQAPipeline(caseFolder, intent.params.question || message, metaIndex, metaIndexSummary, usage);
+        generator = runQAPipeline(caseFolder, intent.params.question || message, metaIndex, metaIndexSummary, usage, history);
         break;
       }
       case "generate_document": {
         generator = densityGenerateDocument(
           caseFolder,
-          intent.params.doc_type || "case_memo",
+          intent.params.doc_type || "action_plan",
           intent.params.instructions || message,
           usage,
         );
-        break;
-      }
-      case "build_packet": {
-        generator = runBuildPacketPipeline(
-          caseFolder,
-          intent.params,
-          message,
-          metaIndex,
-          metaIndexSummary,
-          usage,
-        );
-        break;
-      }
-      case "confirm_hearing": {
-        generator = confirmHearingPipeline(caseFolder, message, usage);
-        break;
-      }
-      case "confirm_packet": {
-        generator = confirmPacketPipeline(caseFolder);
         break;
       }
       case "clarify": {
@@ -272,7 +288,9 @@ async function* runQAPipeline(
   metaIndex: Record<string, any>,
   metaIndexSummary: string,
   usage: UsageAccumulator,
+  history: ChatMessage[] = [],
 ): AsyncGenerator<DensityChatEvent> {
+  const formattedHistory = formatHistoryForPrompt(history);
   yield { type: "status", content: "Routing to relevant folders..." };
 
   // Step 1: Route — select relevant folders
@@ -306,7 +324,7 @@ async function* runQAPipeline(
   }>({
     messages: [
       { role: "system", content: buildPlannerPrompt() },
-      { role: "user", content: buildPlannerUserPrompt(question, folderDetails) },
+      { role: "user", content: buildPlannerUserPrompt(question, folderDetails, formattedHistory || undefined) },
     ],
     maxTokens: 16000,
     temperature: 0.1,
@@ -324,12 +342,18 @@ async function* runQAPipeline(
   if (docsToRead.length > 0 && !skipExtraction) {
     yield { type: "status", content: `Reading ${docsToRead.length} documents...` };
 
-    // Load all document contents
+    // Load all document contents, tracking thin docs for potential raw fallback
     const loadedDocs: Array<{ name: string; content: string }> = [];
+    const thinDocs: Array<{ folder: string; filename: string }> = [];
     for (const doc of docsToRead) {
       const content = await readDocumentContent(caseFolder, doc.folder, doc.filename);
       if (content) {
         loadedDocs.push({ name: doc.filename, content });
+        if (content.length < 200) {
+          thinDocs.push({ folder: doc.folder, filename: doc.filename });
+        }
+      } else {
+        thinDocs.push({ folder: doc.folder, filename: doc.filename });
       }
     }
 
@@ -351,7 +375,7 @@ async function* runQAPipeline(
       batches.push(currentBatch);
     }
 
-    console.log(`[density] Processing ${loadedDocs.length} documents in ${batches.length} batch(es)`);
+    console.log(`[density] Processing ${loadedDocs.length} documents in ${batches.length} batch(es)${thinDocs.length > 0 ? ` (${thinDocs.length} thin)` : ""}`);
 
     // Process each batch
     for (let i = 0; i < batches.length; i++) {
@@ -400,6 +424,12 @@ async function* runQAPipeline(
         }
       }
     }
+
+    // Raw document fallback — re-read files when extraction is sparse
+    if (memory.length < SPARSE_MEMORY_THRESHOLD || thinDocs.length > 0) {
+      yield { type: "status", content: "Re-reading raw documents for detail..." };
+      memory = await rawDocumentFallback(caseFolder, question, memory, thinDocs, usage);
+    }
   }
 
   // Always include folder details — they have dates and summaries for ALL files,
@@ -428,7 +458,7 @@ async function* runQAPipeline(
   const answerResult = await groqChat({
     messages: [
       { role: "system", content: buildAnswererPrompt(knowledge) },
-      { role: "user", content: buildAnswererUserPrompt(question, fullContext, caseContext) },
+      { role: "user", content: buildAnswererUserPrompt(question, fullContext, caseContext, formattedHistory || undefined) },
     ],
     maxTokens: 16000,
     temperature: 0.3,
@@ -507,12 +537,18 @@ async function* densityGenerateDocument(
   if (docsToRead.length > 0) {
     yield { type: "status", content: `Reading ${docsToRead.length} documents for research...` };
 
-    // Load all document contents
+    // Load all document contents, tracking thin docs for potential raw fallback
     const loadedDocs: Array<{ name: string; content: string }> = [];
+    const thinDocs: Array<{ folder: string; filename: string }> = [];
     for (const doc of docsToRead) {
       const content = await readDocumentContent(caseFolder, doc.folder, doc.filename);
       if (content) {
         loadedDocs.push({ name: doc.filename, content });
+        if (content.length < 200) {
+          thinDocs.push({ folder: doc.folder, filename: doc.filename });
+        }
+      } else {
+        thinDocs.push({ folder: doc.folder, filename: doc.filename });
       }
     }
 
@@ -574,6 +610,12 @@ async function* densityGenerateDocument(
           researchMemory = compressed;
         }
       }
+    }
+
+    // Raw document fallback — re-read files when extraction is sparse
+    if (researchMemory.length < SPARSE_MEMORY_THRESHOLD || thinDocs.length > 0) {
+      yield { type: "status", content: "Re-reading raw documents for detail..." };
+      researchMemory = await rawDocumentFallback(caseFolder, researchQuestion, researchMemory, thinDocs, usage);
     }
   }
 
@@ -1181,6 +1223,12 @@ async function* dispatchAction(
         };
         break;
       }
+      case "clarify_documents": {
+        // Map intent to the actual tool name
+        const contextResult = await executeTool("get_context_questions", {}, caseFolder);
+        yield { type: "text", content: contextResult };
+        return;
+      }
       default: {
         // Shouldn't reach here since classifier validation falls back to "answer",
         // but just in case — treat as a question
@@ -1348,6 +1396,7 @@ async function readDocumentContent(
       if (file.type) parts.push(`Type: ${file.type}`);
       if (file.key_info) parts.push(`Summary: ${file.key_info}`);
       if (file.date) parts.push(`Date: ${file.date}`);
+      if (file.user_context) parts.push(`User Context: ${file.user_context}`);
       if (file.extracted_data) {
         const flattened = flattenExtractedData(file.extracted_data);
         if (flattened) parts.push(flattened);
@@ -1372,6 +1421,95 @@ async function readDocumentContent(
   } catch {
     return null;
   }
+}
+
+/**
+ * Read raw document content, bypassing the index.
+ * Uses executeTool("read_file") for PDF/DOCX, fs for text files.
+ */
+async function readRawDocumentContent(
+  caseFolder: string,
+  folder: string,
+  filename: string,
+): Promise<string | null> {
+  try {
+    const filePath = join(caseFolder, folder, filename);
+    const ext = filename.toLowerCase().split(".").pop();
+    if (ext === "pdf" || ext === "docx") {
+      return await executeTool("read_file", { path: `${folder}/${filename}` }, caseFolder);
+    }
+    return await readFile(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Raw document fallback — re-read raw files for documents with thin/missing
+ * extracted data, run one extraction pass, and return enriched memory.
+ */
+async function rawDocumentFallback(
+  caseFolder: string,
+  question: string,
+  memory: string,
+  thinDocs: Array<{ folder: string; filename: string }>,
+  usage: UsageAccumulator,
+): Promise<string> {
+  if (thinDocs.length === 0) return memory;
+
+  console.log(`[density] Raw fallback triggered for ${thinDocs.length} thin doc(s)`);
+
+  // Re-read raw files
+  const rawDocs: Array<{ name: string; content: string }> = [];
+  for (const doc of thinDocs) {
+    const content = await readRawDocumentContent(caseFolder, doc.folder, doc.filename);
+    if (content && content.length > 0) {
+      rawDocs.push({ name: doc.filename, content });
+    }
+  }
+
+  if (rawDocs.length === 0) return memory;
+
+  // Batch by existing budget
+  const batches: Array<Array<{ name: string; content: string }>> = [];
+  let currentBatch: Array<{ name: string; content: string }> = [];
+  let currentBatchChars = 0;
+
+  for (const doc of rawDocs) {
+    if (currentBatchChars + doc.content.length > EXTRACTION_BATCH_CHAR_BUDGET && currentBatch.length > 0) {
+      batches.push(currentBatch);
+      currentBatch = [];
+      currentBatchChars = 0;
+    }
+    currentBatch.push(doc);
+    currentBatchChars += doc.content.length;
+  }
+  if (currentBatch.length > 0) {
+    batches.push(currentBatch);
+  }
+
+  // Run extraction on raw content
+  let enrichedMemory = memory;
+  for (const batch of batches) {
+    const userPrompt = batch.length === 1
+      ? buildExtractorUserPrompt(question, enrichedMemory, batch[0].content, batch[0].name)
+      : buildBatchExtractorUserPrompt(question, enrichedMemory, batch);
+
+    const extractResult = await groqChat({
+      messages: [
+        { role: "system", content: buildExtractorPrompt() },
+        { role: "user", content: userPrompt },
+      ],
+      maxTokens: 16000,
+      temperature: 0.1,
+    });
+    usage.inputTokens += extractResult.usage.inputTokens;
+    usage.outputTokens += extractResult.usage.outputTokens;
+
+    enrichedMemory = extractResult.content || enrichedMemory;
+  }
+
+  return enrichedMemory;
 }
 
 /**
@@ -1455,9 +1593,5 @@ function buildDatasetSummary(metaIndex: Record<string, any>): string {
 }
 
 function validateDocType(docType: string): DocumentType {
-  const valid: DocumentType[] = ["demand_letter", "case_memo", "settlement", "general_letter", "decision_order"];
-  if (valid.includes(docType as DocumentType)) {
-    return docType as DocumentType;
-  }
-  return "case_memo";
+  return normalizeDocumentType(docType);
 }

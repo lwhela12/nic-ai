@@ -4,7 +4,8 @@ import { PRACTICE_AREAS } from "../practice-areas";
 
 export type PracticeAreaName =
   | typeof PRACTICE_AREAS.PI
-  | typeof PRACTICE_AREAS.WC;
+  | typeof PRACTICE_AREAS.WC
+  | typeof PRACTICE_AREAS.EC;
 
 /**
  * Normalize any common practice-area representation to canonical display names.
@@ -31,6 +32,14 @@ export function normalizePracticeArea(value: unknown): PracticeAreaName | undefi
     normalized.includes("injury")
   ) {
     return PRACTICE_AREAS.PI;
+  }
+
+  if (
+    normalized === "ec" ||
+    normalized.includes("elder") ||
+    normalized.includes("care")
+  ) {
+    return PRACTICE_AREAS.EC;
   }
 
   return undefined;

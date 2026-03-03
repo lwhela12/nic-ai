@@ -72,7 +72,7 @@ export default function KnowledgeEditor({ apiUrl, firmRoot, canEditKnowledge }: 
   const saveSection = async () => {
     if (!selectedSection || !isDirty) return
     if (!canEditKnowledge) {
-      setError('Only attorneys can edit firm knowledge.')
+      setError('Only owners and admins can edit workspace knowledge.')
       return
     }
     setSaving(true)
@@ -83,7 +83,7 @@ export default function KnowledgeEditor({ apiUrl, firmRoot, canEditKnowledge }: 
         body: JSON.stringify({ root: firmRoot, content }),
       })
       if (!res.ok) {
-        if (res.status === 403) throw new Error('Only attorneys can edit firm knowledge.')
+        if (res.status === 403) throw new Error('Only owners and admins can edit workspace knowledge.')
         throw new Error('Failed to save')
       }
       setOriginalContent(content)
@@ -97,7 +97,7 @@ export default function KnowledgeEditor({ apiUrl, firmRoot, canEditKnowledge }: 
   const deleteSection = async () => {
     if (!selectedSection) return
     if (!canEditKnowledge) {
-      setError('Only attorneys can edit firm knowledge.')
+      setError('Only owners and admins can edit workspace knowledge.')
       return
     }
     if (!confirm('Delete this section? This cannot be undone.')) return
@@ -107,7 +107,7 @@ export default function KnowledgeEditor({ apiUrl, firmRoot, canEditKnowledge }: 
         method: 'DELETE',
       })
       if (!res.ok) {
-        if (res.status === 403) throw new Error('Only attorneys can edit firm knowledge.')
+        if (res.status === 403) throw new Error('Only owners and admins can edit workspace knowledge.')
         throw new Error('Failed to delete')
       }
       setSelectedSection(null)
@@ -123,7 +123,7 @@ export default function KnowledgeEditor({ apiUrl, firmRoot, canEditKnowledge }: 
     const title = newSectionTitle.trim()
     if (!title) return
     if (!canEditKnowledge) {
-      setError('Only attorneys can edit firm knowledge.')
+      setError('Only owners and admins can edit workspace knowledge.')
       return
     }
     try {
@@ -254,7 +254,7 @@ export default function KnowledgeEditor({ apiUrl, firmRoot, canEditKnowledge }: 
               <div className="flex-1 overflow-y-auto p-8 bg-white">
                 {!canEditKnowledge && (
                   <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-700">
-                    Read-only mode: only attorneys can edit firm knowledge.
+                    Read-only mode: only owners and admins can edit workspace knowledge.
                   </div>
                 )}
                 <div className="max-w-3xl mx-auto prose prose-sm

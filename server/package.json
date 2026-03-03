@@ -13,6 +13,8 @@
     "docx": "^9.5.1",
     "docxtemplater": "^3.68.2",
     "fast-xml-parser": "^4.5.0",
+    "google-auth-library": "^10.6.1",
+    "googleapis": "^171.4.0",
     "groq-sdk": "^0.37.0",
     "hono": "^4.4.0",
     "jszip": "^3.10.1",

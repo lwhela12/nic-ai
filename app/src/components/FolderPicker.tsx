@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 
 interface Props {
   apiUrl: string
+  apiPath?: string
   onSelect: (path: string) => void
   onCancel: () => void
 }
@@ -30,31 +31,69 @@ const XMarkIcon = () => (
   </svg>
 )
 
-export default function FolderPicker({ apiUrl, onSelect, onCancel }: Props) {
+export default function FolderPicker({ apiUrl, apiPath = '/api/files/browse', onSelect, onCancel }: Props) {
   const [currentPath, setCurrentPath] = useState('')
   const [parentPath, setParentPath] = useState('')
   const [folders, setFolders] = useState<Folder[]>([])
   const [loading, setLoading] = useState(true)
   const [manualPath, setManualPath] = useState('')
+  const [error, setError] = useState<string | null>(null)
 
   const browse = useCallback(async (dir?: string) => {
     setLoading(true)
+    setError(null)
     try {
       const url = dir
-        ? `${apiUrl}/api/files/browse?dir=${encodeURIComponent(dir)}`
-        : `${apiUrl}/api/files/browse`
+        ? `${apiUrl}${apiPath}?dir=${encodeURIComponent(dir)}`
+        : `${apiUrl}${apiPath}`
       const res = await fetch(url)
-      const data = await res.json()
-      setCurrentPath(data.current)
-      setParentPath(data.parent)
-      setFolders(data.folders || [])
-      setManualPath(data.current)
+      let data: unknown = null
+      const contentType = res.headers.get('content-type') || ''
+      if (contentType.includes('application/json')) {
+        data = await res.json()
+      } else {
+        const text = await res.text()
+        try {
+          data = JSON.parse(text)
+        } catch {
+          data = null
+        }
+      }
+      const payload = data && typeof data === 'object'
+        ? (data as Record<string, unknown>)
+        : null
+
+      if (!res.ok) {
+        const message = typeof payload?.error === 'string'
+          ? payload.error
+          : `Could not read directory (${res.status})`
+        setError(message)
+        setFolders([])
+        return
+      }
+
+      const nextCurrent = typeof payload?.current === 'string' ? payload.current : ''
+      const nextParent = typeof payload?.parent === 'string' ? payload.parent : nextCurrent
+      const nextFolders = Array.isArray(payload?.folders)
+        ? payload.folders.filter((folder: unknown): folder is Folder => (
+          folder
+          && typeof folder === 'object'
+          && typeof folder.name === 'string'
+          && typeof folder.path === 'string'
+        ))
+        : []
+
+      setCurrentPath(nextCurrent)
+      setParentPath(nextParent)
+      setFolders(nextFolders)
+      setManualPath(nextCurrent || '')
     } catch {
-      // Handle error
+      setError('Could not read directory')
+      setFolders([])
     } finally {
       setLoading(false)
     }
-  }, [apiUrl])
+  }, [apiUrl, apiPath])
 
   useEffect(() => {
     browse()
@@ -121,6 +160,11 @@ export default function FolderPicker({ apiUrl, onSelect, onCancel }: Props) {
             {currentPath}
           </span>
         </div>
+        {error && (
+          <div className="px-6 py-2 border-b border-surface-200 bg-red-50 text-red-700 text-xs">
+            {error}
+          </div>
+        )}
 
         {/* Folder list */}
         <div className="h-72 overflow-y-auto">
@@ -175,8 +219,10 @@ export default function FolderPicker({ apiUrl, onSelect, onCancel }: Props) {
             </button>
             <button
               onClick={handleSelect}
+              disabled={!currentPath}
               className="px-5 py-2 text-sm font-medium bg-brand-900 text-white
-                         hover:bg-brand-800 rounded-lg transition-colors"
+                         hover:bg-brand-800 rounded-lg transition-colors
+                         disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Select This Folder
             </button>

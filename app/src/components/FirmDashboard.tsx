@@ -1,11 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type SetStateAction, type Dispatch } from 'react'
+import nicLogo from '../assets/nic_logo.png'
 import FirmChat from './FirmChat'
 import KnowledgeEditor from './KnowledgeEditor'
 import KnowledgeChat from './KnowledgeChat'
 import TemplateManager from './TemplateManager'
-import TeamManager from './TeamManager'
-import CaseAssignmentDropdown from './CaseAssignmentDropdown'
-import { formatDateMMDDYYYY } from '../utils/dateFormat'
+import FolderPicker from './FolderPicker'
 
 // URL param helpers for persisting view state across refreshes
 const getUrlParam = (key: string): string | null => {
@@ -32,28 +31,14 @@ interface FirmTodo {
   id: string
   text: string
   caseRef?: string
+  casePath?: string
   priority: 'high' | 'medium' | 'low'
   status: 'pending' | 'completed'
   createdAt: string
 }
 
-type PracticeArea = 'Personal Injury' | 'Workers\' Compensation'
-type TeamRole = 'attorney' | 'case_manager_lead' | 'case_manager' | 'case_manager_assistant'
-type AssignmentFilter = 'all' | 'mine' | 'unassigned' | `member:${string}`
-
-interface TeamMember {
-  id: string
-  email: string
-  name?: string
-  role: TeamRole
-  status: 'pending' | 'active' | 'deactivated'
-}
-
-interface CaseAssignment {
-  userId: string
-  assignedAt: string
-  assignedBy: string
-}
+type PracticeArea = 'Personal Injury' | 'Workers\' Compensation' | 'Elder Care'
+type TeamRole = 'owner' | 'admin' | 'member' | 'viewer'
 
 interface CaseSummary {
   path: string
@@ -80,8 +65,6 @@ interface CaseSummary {
   amw?: number
   compensationRate?: number
   openHearings?: Array<{ case_number: string; hearing_level: string; next_date?: string; issue?: string }>
-  // Team assignments
-  assignments?: CaseAssignment[]
   // DOI container fields (for WC multi-injury clients)
   isContainer?: boolean          // True for client containers (not a case itself)
   containerPath?: string         // Path to container (for DOI cases)
@@ -90,6 +73,12 @@ interface CaseSummary {
   injuryDate?: string            // Parsed from DOI folder name (YYYY-MM-DD)
   fileCount?: number             // Total document files in case folder
   latestYear?: number            // Most recent year folder containing this client
+}
+
+interface FirmAttorney {
+  name: string
+  barNo: string
+  barLabel?: string
 }
 
 interface FirmData {
@@ -167,10 +156,8 @@ interface Props {
 type TableDensity = 'comfortable' | 'compact'
 
 // Icons
-const ScaleIcon = () => (
-  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v17.25m0 0c-1.472 0-2.882.265-4.185.75M12 20.25c1.472 0 2.882.265 4.185.75M18.75 4.97A48.416 48.416 0 0012 4.5c-2.291 0-4.545.16-6.75.47m13.5 0c1.01.143 2.01.317 3 .52m-3-.52l2.62 10.726c.122.499-.106 1.028-.589 1.202a5.988 5.988 0 01-2.031.352 5.988 5.988 0 01-2.031-.352c-.483-.174-.711-.703-.59-1.202L18.75 4.971zm-16.5.52c.99-.203 1.99-.377 3-.52m0 0l2.62 10.726c.122.499-.106 1.028-.589 1.202a5.989 5.989 0 01-2.031.352 5.989 5.989 0 01-2.031-.352c-.483-.174-.711-.703-.59-1.202L5.25 4.971z" />
-  </svg>
+const LeafIcon = () => (
+  <img src={nicLogo} alt="NIC Logo" className="w-32 h-32 object-contain" />
 )
 
 const CheckCircleIcon = () => (
@@ -195,12 +182,6 @@ const RefreshIcon = () => (
 const XMarkIcon = () => (
   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-  </svg>
-)
-
-const ChevronRightIcon = () => (
-  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
   </svg>
 )
 
@@ -251,13 +232,14 @@ const ClipboardDocumentListIcon = () => (
 // Module-level cache — survives component unmount/remount so the dashboard
 // appears instantly when navigating back from a case view.
 let firmDataCache: { root: string; data: FirmData; fetchedAt: number } | null = null
+// Skip background refetch if the cache was populated less than this many ms ago.
+const CACHE_FRESH_MS = 60_000
 
 export default function FirmDashboard({
   apiUrl, firmRoot, practiceArea, onSelectCase, onChangeFirmRoot, userEmail, onLogout,
   todos, onDrawerOpen, onTodosUpdated,
   firmChatPrompt, forceShowFirmChat, onFirmChatPromptUsed,
   knowledgeVersion,
-  teamContext,
   indexingProgress,
   firmCasesVersion,
   lastIndexedCasePath,
@@ -267,7 +249,6 @@ export default function FirmDashboard({
   onShowBatchModalChange,
   onBatchComplete,
 }: Props) {
-  const isWC = practiceArea === 'Workers\' Compensation'
   const firmCasesVersionRef = useRef(firmCasesVersion)
   const hasCachedData = firmDataCache?.root === firmRoot
   const [firmData, setFirmDataState] = useState<FirmData | null>(
@@ -360,9 +341,6 @@ export default function FirmDashboard({
         setKnowledgeSubTabState('editor')
       }
 
-      const urlSettingsTab = getUrlParam('settingsTab')
-      setSettingsTab(urlSettingsTab === 'team' ? 'team' : 'firm')
-
       const shouldOpenSettings = getUrlParam('openSettings') === '1'
       setShowFirmConfig(shouldOpenSettings)
     }
@@ -376,39 +354,99 @@ export default function FirmDashboard({
   const [selectedCases, setSelectedCases] = useState<Set<string>>(new Set())
   const [knowledgeExists, setKnowledgeExists] = useState<boolean | null>(null)
   const [showFirmConfig, setShowFirmConfig] = useState(false)
-  const [firmConfig, setFirmConfig] = useState<Record<string, any>>({})
+  const [firmConfig, setFirmConfig] = useState<Record<string, unknown>>({})
   const [firmConfigSaving, setFirmConfigSaving] = useState(false)
   const [logoPreview, setLogoPreview] = useState<string | null>(null)
   const [uploadingLogo, setUploadingLogo] = useState(false)
   const [logoDragOver, setLogoDragOver] = useState(false)
-  const [packetTemplates, setPacketTemplates] = useState<Array<{ id: string; name: string; heading: string; builtIn?: boolean }>>([])
+  const [gdriveStatus, setGdriveStatus] = useState<{
+    connected: boolean
+    vfsMode: string
+    rootFolderId: string | null
+    rootFolderName?: string | null
+  } | null>(null)
+  const [pickingGdriveRoot, setPickingGdriveRoot] = useState(false)
 
-  // Team management state
-  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
-  const [settingsTab, setSettingsTab] = useState<'firm' | 'team'>(() => {
-    const tab = getUrlParam('settingsTab')
-    return tab === 'team' ? 'team' : 'firm'
-  })
-  const [assignmentFilter, setAssignmentFilter] = useState<AssignmentFilter>('all')
-  const canFilterBySpecificMember = teamContext?.role === 'attorney' || teamContext?.role === 'case_manager_lead'
-  const selectableMemberFilters = useMemo(
-    () =>
-      teamMembers.filter(
-        (member) =>
-          member.status === 'active' &&
-          (member.role === 'case_manager' || member.role === 'case_manager_assistant')
-      ),
-    [teamMembers]
-  )
-  const selectedMemberFilterId = assignmentFilter.startsWith('member:')
-    ? assignmentFilter.slice('member:'.length)
-    : null
-  const chatScope =
-    assignmentFilter === 'mine'
-      ? ({ mode: 'mine' } as const)
-      : selectedMemberFilterId
-        ? ({ mode: 'member', memberId: selectedMemberFilterId } as const)
-        : ({ mode: 'firm' } as const)
+  const normalizeCaseRef = useCallback((value?: string) => {
+    return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ')
+  }, [])
+
+  const normalizePath = useCallback((value?: string) => {
+    return String(value || '')
+      .replace(/\\/g, '/')
+      .replace(/^\.\/+/, '')
+      .replace(/^\/+/, '')
+      .replace(/\/+/g, '/')
+      .trim()
+      .toLowerCase()
+  }, [])
+
+  const pendingTodoCountsByPath = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const todo of todos) {
+      if (todo.status !== 'pending') continue
+      const key = normalizePath(todo.casePath)
+      if (!key) continue
+      counts.set(key, (counts.get(key) || 0) + 1)
+    }
+    return counts
+  }, [normalizePath, todos])
+
+  const pendingTodoCountsByRef = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const todo of todos) {
+      if (todo.status !== 'pending') continue
+      const key = normalizeCaseRef(todo.caseRef)
+      if (!key) continue
+      counts.set(key, (counts.get(key) || 0) + 1)
+    }
+    return counts
+  }, [normalizeCaseRef, todos])
+
+  const getTodoCountForCase = useCallback((caseSummary: CaseSummary) => {
+    const byPath = pendingTodoCountsByPath.get(normalizePath(caseSummary.path)) || 0
+    if (byPath > 0) return byPath
+
+    const candidateRefs = [caseSummary.clientName, caseSummary.name, caseSummary.containerName]
+      .map((value) => normalizeCaseRef(value))
+      .filter(Boolean)
+
+    for (const ref of candidateRefs) {
+      const count = pendingTodoCountsByRef.get(ref)
+      if (count) return count
+    }
+    return 0
+  }, [normalizeCaseRef, normalizePath, pendingTodoCountsByPath, pendingTodoCountsByRef])
+
+  const formatFolderDisplayName = useCallback((path: string) => {
+    const trimmed = path.trim()
+    if (!trimmed) return 'Selected Folder'
+    const normalized = trimmed.replace(/\/+$/, '')
+    const lastSegment = normalized.split('/').filter(Boolean).pop()
+    return lastSegment || normalized
+  }, [])
+
+  const folderDisplayName = useMemo(() => {
+    if (gdriveStatus?.vfsMode === 'gdrive') {
+      return gdriveStatus.rootFolderName || formatFolderDisplayName(firmRoot)
+    }
+    return formatFolderDisplayName(firmRoot)
+  }, [firmRoot, formatFolderDisplayName, gdriveStatus?.rootFolderName, gdriveStatus?.vfsMode])
+
+  const firmAttorneys = useMemo<FirmAttorney[]>(() => {
+    if (!Array.isArray(firmConfig.attorneys)) return []
+    const attorneys: FirmAttorney[] = []
+    for (const entry of firmConfig.attorneys) {
+      if (!entry || typeof entry !== 'object') continue
+      const candidate = entry as Record<string, unknown>
+      attorneys.push({
+        name: typeof candidate.name === 'string' ? candidate.name : '',
+        barNo: typeof candidate.barNo === 'string' ? candidate.barNo : '',
+        barLabel: typeof candidate.barLabel === 'string' ? candidate.barLabel : 'Credential',
+      })
+    }
+    return attorneys
+  }, [firmConfig.attorneys])
 
   // Container expand/collapse state (for DOI multi-injury clients)
   const [expandedContainers, setExpandedContainers] = useState<Set<string>>(new Set())
@@ -459,14 +497,27 @@ export default function FirmDashboard({
     })
   }
 
-  const loadCases = useCallback(async () => {
+  const loadCases = useCallback(async (forceRefresh = false) => {
+    // Skip the fetch entirely if we already have fresh cached data for this root
+    if (
+      !forceRefresh &&
+      firmDataCache &&
+      firmDataCache.root === firmRoot &&
+      Date.now() - firmDataCache.fetchedAt < CACHE_FRESH_MS
+    ) {
+      setLoading(false)
+      return
+    }
+
     // Only show loading spinner if we have no data to display yet
     if (!firmDataCache || firmDataCache.root !== firmRoot) {
       setLoading(true)
     }
     setError(null)
     try {
-      const res = await fetch(`${apiUrl}/api/firm/cases?root=${encodeURIComponent(firmRoot)}`)
+      const res = await fetch(
+        `${apiUrl}/api/firm/cases?root=${encodeURIComponent(firmRoot)}&practiceArea=${encodeURIComponent(practiceArea)}`
+      )
       if (!res.ok) throw new Error('Failed to load cases')
       const data = await res.json()
       setFirmData(data)
@@ -475,62 +526,11 @@ export default function FirmDashboard({
     } finally {
       setLoading(false)
     }
-  }, [apiUrl, firmRoot, isWC, setFirmData])
-
-  const loadTeamMembers = useCallback(async () => {
-    try {
-      const res = await fetch(`${apiUrl}/api/team?root=${encodeURIComponent(firmRoot)}`)
-      if (res.ok) {
-        const data = await res.json()
-        if (data.configured && data.team?.members) {
-          setTeamMembers(data.team.members)
-        }
-      }
-    } catch {}
-  }, [apiUrl, firmRoot])
-
-  const syncCaseAssignments = useCallback(async (casePath: string, newAssignments: CaseAssignment[]) => {
-    if (!teamContext?.permissions?.canAssignCases) return
-
-    const existing = firmData?.cases.find(c => c.path === casePath)?.assignments || []
-    const existingSet = new Set(existing.map(a => a.userId))
-    const nextSet = new Set(newAssignments.map(a => a.userId))
-
-    const toAdd = Array.from(nextSet).filter(id => !existingSet.has(id))
-    const toRemove = Array.from(existingSet).filter(id => !nextSet.has(id))
-
-    if (toAdd.length > 0) {
-      const addRes = await fetch(`${apiUrl}/api/firm/case/assign`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          casePath,
-          userIds: toAdd,
-          assignedBy: (userEmail || teamContext.userId || 'system').toLowerCase(),
-        }),
-      })
-      if (!addRes.ok) {
-        const data = await addRes.json().catch(() => ({}))
-        throw new Error(data.error || 'Failed to assign users')
-      }
-    }
-
-    for (const userId of toRemove) {
-      const removeRes = await fetch(
-        `${apiUrl}/api/firm/case/unassign?casePath=${encodeURIComponent(casePath)}&userId=${encodeURIComponent(userId)}`,
-        { method: 'DELETE' }
-      )
-      if (!removeRes.ok) {
-        const data = await removeRes.json().catch(() => ({}))
-        throw new Error(data.error || 'Failed to unassign user')
-      }
-    }
-  }, [apiUrl, firmData?.cases, teamContext?.permissions?.canAssignCases, teamContext?.userId, userEmail])
+  }, [apiUrl, firmRoot, practiceArea, setFirmData])
 
   useEffect(() => {
     loadCases()
-    loadTeamMembers()
-  }, [loadCases, loadTeamMembers])
+  }, [loadCases])
 
   // Reload cases when a case finishes indexing (skip initial mount — loadCases already runs above)
   useEffect(() => {
@@ -540,27 +540,9 @@ export default function FirmDashboard({
     if (lastIndexedCasePath && firmData) {
       refreshSingleCase(lastIndexedCasePath)
     } else {
-      loadCases()
+      loadCases(true)
     }
   }, [firmCasesVersion]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!teamContext?.role) return
-
-    setAssignmentFilter((prev) => {
-      if (prev.startsWith('member:')) {
-        const memberId = prev.slice('member:'.length)
-        const memberStillSelectable = selectableMemberFilters.some((member) => member.id === memberId)
-        if (!canFilterBySpecificMember || !memberStillSelectable) {
-          return teamContext.role === 'case_manager' ? 'mine' : 'all'
-        }
-      }
-      if (teamContext.role === 'case_manager' && prev === 'all') {
-        return 'mine'
-      }
-      return prev
-    })
-  }, [canFilterBySpecificMember, selectableMemberFilters, teamContext?.role])
 
   // Check if knowledge base exists
   const checkKnowledge = useCallback(async () => {
@@ -578,7 +560,9 @@ export default function FirmDashboard({
     try {
       const res = await fetch(`${apiUrl}/api/knowledge/firm-config?root=${encodeURIComponent(firmRoot)}`)
       if (res.ok) setFirmConfig(await res.json())
-    } catch {}
+    } catch {
+      return
+    }
   }, [apiUrl, firmRoot])
 
   const loadFirmLogo = useCallback(async () => {
@@ -596,33 +580,33 @@ export default function FirmDashboard({
     }
   }, [apiUrl, firmRoot])
 
-  const loadPacketTemplates = useCallback(async () => {
+  const loadGdriveStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${apiUrl}/api/knowledge/packet-templates?root=${encodeURIComponent(firmRoot)}`)
-      if (res.ok) {
-        const data = await res.json()
-        setPacketTemplates(data.templates || [])
-      }
-    } catch {}
-  }, [apiUrl, firmRoot])
+      const res = await fetch(`${apiUrl}/api/auth/gdrive/status`)
+      if (res.ok) setGdriveStatus(await res.json())
+    } catch {
+      return
+    }
+  }, [apiUrl])
 
-  const openFirmSettings = useCallback((tab: 'firm' | 'team' = 'firm') => {
+  useEffect(() => {
+    loadGdriveStatus()
+  }, [loadGdriveStatus])
+
+  const openFirmSettings = useCallback(() => {
     setView('knowledge')
     setKnowledgeSubTab('editor')
-    setSettingsTab(tab)
     loadFirmConfig()
     loadFirmLogo()
-    loadTeamMembers()
-    loadPacketTemplates()
+    loadGdriveStatus()
     setShowFirmConfig(true)
     setUrlParam('openSettings', null, false)
-  }, [loadFirmConfig, loadFirmLogo, loadTeamMembers, loadPacketTemplates])
+  }, [loadFirmConfig, loadFirmLogo, loadGdriveStatus])
 
   useEffect(() => {
     const shouldOpenSettings = getUrlParam('openSettings') === '1'
     if (!shouldOpenSettings) return
-    const tab = getUrlParam('settingsTab')
-    openFirmSettings(tab === 'team' ? 'team' : 'firm')
+    openFirmSettings()
   }, [openFirmSettings])
 
   const handleLogoUpload = async (files: FileList | null) => {
@@ -702,8 +686,11 @@ export default function FirmDashboard({
         body: JSON.stringify({ root: firmRoot, ...firmConfig }),
       })
       setShowFirmConfig(false)
-    } catch {}
-    setFirmConfigSaving(false)
+    } catch {
+      return
+    } finally {
+      setFirmConfigSaving(false)
+    }
   }
 
   // Switch to Firm Chat when forceShowFirmChat is true
@@ -863,180 +850,58 @@ export default function FirmDashboard({
     }
   }
 
-  const formatCurrency = (amount?: number) => {
-    if (amount === undefined) return '—'
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(amount)
-  }
+  const getUnindexedDocsSummary = useCallback((caseSummary: CaseSummary) => {
+    if (caseSummary.isContainer && Array.isArray(caseSummary.siblingCases) && caseSummary.siblingCases.length > 0) {
+      let count = 0
+      let hasUnindexed = false
 
-  const formatDate = (dateStr?: string) => {
-    if (!dateStr || dateStr === 'Unknown') return '—'
-    return formatDateMMDDYYYY(dateStr, dateStr)
-  }
-
-  /**
-   * Format policy limits for display.
-   * Canonical schema: { "1P": { bodily_injury, um_uim, ... }, "3P": { bodily_injury, ... } }
-   */
-  const formatPolicyLimits = (limits?: string | Record<string, unknown>): React.ReactNode => {
-    if (!limits) return '—'
-
-    // Handle JSON strings (legacy data)
-    let parsed: Record<string, unknown>
-    if (typeof limits === 'string') {
-      if (limits.startsWith('{')) {
-        try {
-          parsed = JSON.parse(limits)
-        } catch {
-          return limits // Can't parse, show as-is
+      for (const sibling of caseSummary.siblingCases) {
+        const siblingCase = firmData?.cases.find((entry) => entry.path === sibling.path)
+        if (!siblingCase) continue
+        if (!siblingCase.indexed) {
+          hasUnindexed = true
+          count += siblingCase.fileCount || 0
+          continue
         }
-      } else {
-        return limits
+        if (siblingCase.needsReindex) {
+          hasUnindexed = true
+        }
       }
-    } else if (typeof limits === 'object') {
-      parsed = limits
-    } else {
-      return '—'
+
+      if (!hasUnindexed) {
+        return { hasUnindexed: false, label: '0' }
+      }
+      return { hasUnindexed: true, label: count > 0 ? String(count) : 'Yes' }
     }
 
-    // Extract BI from a policy object, with fallbacks
-    const extractBI = (obj: Record<string, unknown>): string | null => {
-      const bi = obj.bodily_injury ?? obj.bi ?? obj.um_uim
-      if (typeof bi === 'string') return bi
-      if (typeof bi === 'number') return '$' + bi.toLocaleString()
-      // Fallback: first string containing $
-      for (const v of Object.values(obj)) {
-        if (typeof v === 'string' && v.includes('$')) return v
-      }
-      return null
-    }
-
-    // Look for canonical 1P/3P keys (case-insensitive)
-    let thirdParty: string | null = null
-    let firstParty: string | null = null
-
-    for (const [key, val] of Object.entries(parsed)) {
-      if (typeof val !== 'object' || val === null) continue
-      const keyUpper = key.toUpperCase()
-      if (keyUpper.includes('3P') || keyUpper.includes('THIRD')) {
-        thirdParty = thirdParty || extractBI(val as Record<string, unknown>)
-      }
-      if (keyUpper.includes('1P') || keyUpper.includes('FIRST')) {
-        firstParty = firstParty || extractBI(val as Record<string, unknown>)
+    if (!caseSummary.indexed) {
+      return {
+        hasUnindexed: true,
+        label: caseSummary.fileCount && caseSummary.fileCount > 0 ? String(caseSummary.fileCount) : 'Yes',
       }
     }
 
-    if (!thirdParty && !firstParty) return '—'
-
-    return (
-      <div className="leading-snug">
-        {thirdParty && <div>3P: {thirdParty}</div>}
-        {firstParty && <div>1P: {firstParty}</div>}
-      </div>
-    )
-  }
-
-  const getSolBadge = (days?: number) => {
-    if (days === undefined) return null
-
-    let config = 'bg-surface-100 text-brand-600 ring-1 ring-surface-200'
-    if (days <= 30) config = 'bg-red-50 text-red-700 ring-1 ring-red-200'
-    else if (days <= 90) config = 'bg-amber-50 text-amber-700 ring-1 ring-amber-200'
-    else if (days <= 180) config = 'bg-yellow-50 text-yellow-700 ring-1 ring-yellow-200'
-
-    return (
-      <span className={`inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-md ${config}`}>
-        {days}d
-      </span>
-    )
-  }
-
-  const getTTDStatusBadge = (status?: string) => {
-    if (!status) return <span className="text-brand-400">—</span>
-
-    const colors: Record<string, string> = {
-      'active': 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200',
-      'suspended': 'bg-amber-50 text-amber-700 ring-1 ring-amber-200',
-      'terminated': 'bg-red-50 text-red-700 ring-1 ring-red-200',
-      'closed': 'bg-surface-100 text-brand-600 ring-1 ring-surface-200',
+    if (caseSummary.needsReindex) {
+      return { hasUnindexed: true, label: 'Needs refresh' }
     }
-    const color = colors[status.toLowerCase()] || 'bg-surface-100 text-brand-500'
-    return (
-      <span className={`inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-md ${color}`}>
-        {status}
-      </span>
-    )
-  }
 
-  const formatAMW = (amw?: number, rate?: number) => {
-    if (!amw && !rate) return '—'
-    const parts = []
-    if (amw) parts.push(`AMW: ${formatCurrency(amw)}`)
-    if (rate) parts.push(`Rate: ${formatCurrency(rate)}`)
-    return parts.join(' / ')
-  }
+    return { hasUnindexed: false, label: '0' }
+  }, [firmData?.cases])
 
-  const formatHearings = (hearings?: Array<{ case_number: string; hearing_level: string; next_date?: string }>) => {
-    if (!hearings || hearings.length === 0) return '—'
-    const hasAO = hearings.some(h => h.hearing_level === 'A.O.')
-    const label = hasAO ? 'AO' : 'HO'
-    return (
-      <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
-        hasAO ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'
-      }`}>
-        {label}
-      </span>
-    )
-  }
-
-  const getPhaseBadge = (phase?: string) => {
-    const colors: Record<string, string> = {
-      // PI phases
-      'Intake': 'bg-surface-100 text-brand-600',
-      'Investigation': 'bg-blue-50 text-blue-700',
-      'Treatment': 'bg-purple-50 text-purple-700',
-      'Demand': 'bg-orange-50 text-orange-700',
-      'Negotiation': 'bg-yellow-50 text-yellow-700',
-      'Settlement': 'bg-emerald-50 text-emerald-700',
-      'Complete': 'bg-emerald-50 text-emerald-700',
-      // WC phases
-      'MMI Evaluation': 'bg-indigo-50 text-indigo-700',
-      'Benefits Resolution': 'bg-orange-50 text-orange-700',
-      'Settlement/Hearing': 'bg-amber-50 text-amber-700',
-      'Closed': 'bg-emerald-50 text-emerald-700',
-    }
-    const color = colors[phase || ''] || 'bg-surface-100 text-brand-500'
-    return (
-      <span className={`inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-md ${color}`}>
-        {phase || 'Unknown'}
-      </span>
-    )
-  }
-
-  const sortedCases = firmData?.cases
-    .filter(c => {
-      if (!searchQuery) return true
-      const q = searchQuery.toLowerCase()
-      return (c.clientName || '').toLowerCase().includes(q) ||
-             c.name.toLowerCase().includes(q)
-    })
-    .filter(c => {
-      if (!firmData?.yearBasedMode || filterYears.size === 0) return true
-      return c.latestYear != null && filterYears.has(c.latestYear)
-    })
-    .filter(c => {
-      // Assignment filter
-      if (assignmentFilter === 'all') return true
-      if (assignmentFilter === 'unassigned') return !c.assignments || c.assignments.length === 0
-      if (assignmentFilter === 'mine' && teamContext?.userId) {
-        return c.assignments?.some(a => a.userId === teamContext.userId)
-      }
-      if (assignmentFilter.startsWith('member:')) {
-        const memberId = assignmentFilter.slice('member:'.length)
-        return c.assignments?.some(a => a.userId === memberId)
-      }
-      return true
-    })
-    .sort((a, b) => (a.clientName || a.name).localeCompare(b.clientName || b.name)) || []
+  const sortedCases = useMemo(() => {
+    return (firmData?.cases || [])
+      .filter(c => {
+        if (!searchQuery) return true
+        const q = searchQuery.toLowerCase()
+        return (c.clientName || '').toLowerCase().includes(q) ||
+          c.name.toLowerCase().includes(q)
+      })
+      .filter(c => {
+        if (!firmData?.yearBasedMode || filterYears.size === 0) return true
+        return c.latestYear != null && filterYears.has(c.latestYear)
+      })
+      .sort((a, b) => (a.clientName || a.name).localeCompare(b.clientName || b.name))
+  }, [filterYears, firmData?.cases, firmData?.yearBasedMode, searchQuery])
 
   const visibleCasePaths = useMemo(
     () => sortedCases.filter((c) => !c.isContainer).map((c) => c.path),
@@ -1086,12 +951,20 @@ export default function FirmDashboard({
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4 bg-surface-50">
         <div className="text-red-600 font-medium">{error}</div>
-        <button
-          onClick={loadCases}
-          className="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800 transition-colors"
-        >
-          Retry
-        </button>
+        <div className="flex gap-3">
+          <button
+            onClick={loadCases}
+            className="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800 transition-colors"
+          >
+            Retry
+          </button>
+          <button
+            onClick={onChangeFirmRoot}
+            className="px-4 py-2 border border-brand-200 text-brand-700 bg-white rounded-lg hover:bg-brand-50 transition-colors shadow-sm"
+          >
+            Change Folder
+          </button>
+        </div>
       </div>
     )
   }
@@ -1099,17 +972,18 @@ export default function FirmDashboard({
   return (
     <div className="flex flex-col h-full bg-surface-50">
       {/* Header */}
+      {/* Header */}
       <div className="bg-brand-900/95 text-white px-8 py-6 backdrop-blur">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-4">
-            <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center">
-              <ScaleIcon />
+            <div className="flex items-center justify-center">
+              <LeafIcon />
             </div>
             <div>
               <h1 className="font-serif text-2xl tracking-tight">
-                {isWC ? 'Workers\' Comp Dashboard' : 'Case Dashboard'}
+                Dashboard
               </h1>
-              <p className="text-sm text-brand-300 mt-0.5">{firmRoot}</p>
+              <p className="text-sm text-brand-300 mt-0.5">{folderDisplayName}</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
@@ -1126,10 +1000,12 @@ export default function FirmDashboard({
                       if (res.ok) {
                         const result = await res.json()
                         if (result.added?.length > 0 || result.updated?.length > 0) {
-                          loadCases()
+                          loadCases(true)
                         }
                       }
-                    } catch {}
+                    } catch {
+                      return
+                    }
                   }}
                   className="px-4 py-2 text-sm text-brand-200 hover:text-white bg-white/5 hover:bg-white/10
                              rounded-lg transition-colors"
@@ -1139,7 +1015,7 @@ export default function FirmDashboard({
                 </button>
               )}
               <button
-                onClick={loadCases}
+                onClick={() => loadCases(true)}
                 className="p-2 text-brand-200 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors"
                 title="Refresh"
               >
@@ -1153,43 +1029,36 @@ export default function FirmDashboard({
                 <FolderIcon />
                 <span>Change Folder</span>
               </button>
-              <div className="h-6 w-px bg-white/15" />
-              <div className="px-3 py-1.5 text-xs font-medium rounded-lg bg-white/10 text-brand-100">
-                Workers' Comp
-              </div>
             </div>
 
             {/* View toggle */}
             <div className="flex bg-white/10 rounded-lg p-1">
               <button
                 onClick={() => setView('dashboard')}
-                className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                  view === 'dashboard'
-                    ? 'bg-white text-brand-900'
-                    : 'text-brand-300 hover:text-white'
-                }`}
+                className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${view === 'dashboard'
+                  ? 'bg-white text-brand-900'
+                  : 'text-brand-300 hover:text-white'
+                  }`}
               >
                 <TableCellsIcon />
                 Dashboard
               </button>
               <button
                 onClick={() => setView('firmChat')}
-                className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                  view === 'firmChat'
-                    ? 'bg-white text-brand-900'
-                    : 'text-brand-300 hover:text-white'
-                }`}
+                className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${view === 'firmChat'
+                  ? 'bg-white text-brand-900'
+                  : 'text-brand-300 hover:text-white'
+                  }`}
               >
                 <ChatBubbleIcon />
                 Firm Chat
               </button>
               <button
                 onClick={() => setView('knowledge')}
-                className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                  view === 'knowledge'
-                    ? 'bg-white text-brand-900'
-                    : 'text-brand-300 hover:text-white'
-                }`}
+                className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${view === 'knowledge'
+                  ? 'bg-white text-brand-900'
+                  : 'text-brand-300 hover:text-white'
+                  }`}
               >
                 <BookOpenIcon />
                 Knowledge
@@ -1212,7 +1081,7 @@ export default function FirmDashboard({
                 )}
               </button>
               <button
-                onClick={() => openFirmSettings('firm')}
+                onClick={openFirmSettings}
                 className="p-2 text-brand-200 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors"
                 title="Settings"
               >
@@ -1244,7 +1113,7 @@ export default function FirmDashboard({
                 <p className="text-sm font-medium text-brand-300 uppercase tracking-wide">Indexed</p>
                 <p className="text-4xl font-serif text-white mt-1">{sortedCases.filter(c => c.indexed && !c.isContainer).length}</p>
               </div>
-              <div className="w-12 h-12 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400">
+              <div className="w-12 h-12 rounded-full bg-accent-500/20 flex items-center justify-center text-accent-400">
                 <CheckCircleIcon />
               </div>
             </div>
@@ -1270,31 +1139,28 @@ export default function FirmDashboard({
             <div className="flex bg-surface-100 rounded-lg p-1">
               <button
                 onClick={() => setKnowledgeSubTab('editor')}
-                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                  knowledgeSubTab === 'editor' ? 'bg-white text-brand-900 shadow-sm' : 'text-brand-500 hover:text-brand-700'
-                }`}
+                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${knowledgeSubTab === 'editor' ? 'bg-white text-brand-900 shadow-sm' : 'text-brand-500 hover:text-brand-700'
+                  }`}
               >
                 Editor
               </button>
               <button
                 onClick={() => setKnowledgeSubTab('chat')}
-                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                  knowledgeSubTab === 'chat' ? 'bg-white text-brand-900 shadow-sm' : 'text-brand-500 hover:text-brand-700'
-                }`}
+                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${knowledgeSubTab === 'chat' ? 'bg-white text-brand-900 shadow-sm' : 'text-brand-500 hover:text-brand-700'
+                  }`}
               >
                 Chat
               </button>
               <button
                 onClick={() => setKnowledgeSubTab('templates')}
-                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                  knowledgeSubTab === 'templates' ? 'bg-white text-brand-900 shadow-sm' : 'text-brand-500 hover:text-brand-700'
-                }`}
+                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${knowledgeSubTab === 'templates' ? 'bg-white text-brand-900 shadow-sm' : 'text-brand-500 hover:text-brand-700'
+                  }`}
               >
                 Templates
               </button>
             </div>
             <button
-              onClick={() => openFirmSettings(settingsTab)}
+              onClick={openFirmSettings}
               className="ml-auto flex items-center gap-1.5 text-sm text-brand-500 hover:text-brand-700 transition-colors"
             >
               <CogIcon />
@@ -1306,7 +1172,7 @@ export default function FirmDashboard({
               <TemplateManager apiUrl={apiUrl} firmRoot={firmRoot} />
             ) : knowledgeExists ? (
               knowledgeSubTab === 'editor'
-                ? <KnowledgeEditor apiUrl={apiUrl} firmRoot={firmRoot} canEditKnowledge={teamContext?.permissions?.canEditKnowledge || false} />
+                ? <KnowledgeEditor apiUrl={apiUrl} firmRoot={firmRoot} canEditKnowledge={true} />
                 : <KnowledgeChat apiUrl={apiUrl} firmRoot={firmRoot} />
             ) : (
               <div className="flex flex-col items-center justify-center h-full text-brand-400 gap-2">
@@ -1320,7 +1186,7 @@ export default function FirmDashboard({
         <FirmChat
           apiUrl={apiUrl}
           firmRoot={firmRoot}
-          scope={chatScope}
+          scope={{ mode: 'firm' }}
           onTodosUpdated={onTodosUpdated}
           initialPrompt={firmChatPrompt}
           onInitialPromptUsed={onFirmChatPromptUsed}
@@ -1414,47 +1280,23 @@ export default function FirmDashboard({
                 )}
               </div>
             )}
-            {/* Assignment filter - only show when team is configured */}
-            {teamMembers.length > 0 && (
-              <div className="flex items-center gap-2">
-                <label className="text-sm font-medium text-brand-600">Assignment</label>
-                <select
-                  value={assignmentFilter}
-                  onChange={(e) => setAssignmentFilter(e.target.value as AssignmentFilter)}
-                  className="text-sm border border-surface-200 rounded-lg px-3 py-2 bg-white
-                             focus:outline-none focus:ring-2 focus:ring-accent-500 focus:border-transparent"
-                >
-                  <option value="all">All Cases</option>
-                  <option value="mine">My Cases</option>
-                  <option value="unassigned">Unassigned</option>
-                  {canFilterBySpecificMember &&
-                    selectableMemberFilters.map((member) => (
-                      <option key={member.id} value={`member:${member.id}`}>
-                        {member.name || member.email}
-                      </option>
-                    ))}
-                </select>
-              </div>
-            )}
             <div className="ml-auto flex items-center gap-4">
               <div className="flex items-center gap-1 rounded-lg bg-surface-100 p-1">
                 <button
                   onClick={() => setTableDensity('comfortable')}
-                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                    tableDensity === 'comfortable'
-                      ? 'bg-white text-brand-900 shadow-sm'
-                      : 'text-brand-500 hover:text-brand-700'
-                  }`}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${tableDensity === 'comfortable'
+                    ? 'bg-white text-brand-900 shadow-sm'
+                    : 'text-brand-500 hover:text-brand-700'
+                    }`}
                 >
                   Comfortable
                 </button>
                 <button
                   onClick={() => setTableDensity('compact')}
-                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                    tableDensity === 'compact'
-                      ? 'bg-white text-brand-900 shadow-sm'
-                      : 'text-brand-500 hover:text-brand-700'
-                  }`}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${tableDensity === 'compact'
+                    ? 'bg-white text-brand-900 shadow-sm'
+                    : 'text-brand-500 hover:text-brand-700'
+                    }`}
                 >
                   Compact
                 </button>
@@ -1467,491 +1309,460 @@ export default function FirmDashboard({
 
           {/* Cases table */}
           <div className="flex-1 overflow-auto px-8 py-6">
-        {selectedCases.size > 0 && (
-          <div className="mb-4 flex items-center gap-3 rounded-xl border border-accent-200 bg-accent-50 px-4 py-3">
-            <div className="text-sm text-brand-700">
-              <span className="font-semibold text-brand-900">{selectedCases.size}</span> case{selectedCases.size !== 1 ? 's' : ''} selected
-              {selectedVisibleCount !== selectedCases.size && (
-                <span className="text-brand-500"> ({selectedVisibleCount} in current view)</span>
-              )}
-            </div>
-            <button
-              onClick={handleIndexSelected}
-              disabled={batchProgress?.isRunning}
-              className="px-3.5 py-2 text-sm font-medium bg-accent-600 text-white rounded-lg
+            {selectedCases.size > 0 && (
+              <div className="mb-4 flex items-center gap-3 rounded-xl border border-accent-200 bg-accent-50 px-4 py-3">
+                <div className="text-sm text-brand-700">
+                  <span className="font-semibold text-brand-900">{selectedCases.size}</span> case{selectedCases.size !== 1 ? 's' : ''} selected
+                  {selectedVisibleCount !== selectedCases.size && (
+                    <span className="text-brand-500"> ({selectedVisibleCount} in current view)</span>
+                  )}
+                </div>
+                <button
+                  onClick={handleIndexSelected}
+                  disabled={batchProgress?.isRunning}
+                  className="px-3.5 py-2 text-sm font-medium bg-accent-600 text-white rounded-lg
                          hover:bg-accent-500 disabled:opacity-50 transition-colors"
-            >
-              {batchProgress?.isRunning ? 'Indexing...' : 'Index Selected'}
-            </button>
-            <button
-              onClick={() => setSelectedCases(new Set())}
-              className="px-3.5 py-2 text-sm font-medium text-brand-700 bg-white border border-surface-200 rounded-lg
+                >
+                  {batchProgress?.isRunning ? 'Indexing...' : 'Index Selected'}
+                </button>
+                <button
+                  onClick={() => setSelectedCases(new Set())}
+                  className="px-3.5 py-2 text-sm font-medium text-brand-700 bg-white border border-surface-200 rounded-lg
                          hover:bg-surface-100 transition-colors"
-            >
-              Clear Selection
-            </button>
-          </div>
-        )}
-        <div className="bg-white rounded-xl shadow-card border border-surface-200 overflow-hidden">
-          <table className="w-full">
-            <thead className="sticky top-0 z-10 bg-white">
-              <tr className="border-b border-surface-200">
-                <th className={checkboxHeaderCellPad}>
-                  <input
-                    type="checkbox"
-                    checked={sortedCases.filter(c => !c.isContainer).length > 0 && sortedCases.filter(c => !c.isContainer).every(c => selectedCases.has(c.path))}
-                    onChange={toggleAllVisible}
-                    className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
-                  />
-                </th>
-                <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Client</th>
-                <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Phase</th>
-                <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>
-                  {isWC ? 'Date of Injury' : 'Date of Loss'}
-                </th>
-                {isWC ? (
-                  <>
-                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Employer</th>
-                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>TTD Status</th>
-                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>AMW / Rate</th>
-                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Hearings</th>
-                  </>
-                ) : (
-                  <>
-                    <th className={`text-right ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Specials</th>
-                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Policy Limits</th>
-                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>SOL</th>
-                  </>
-                )}
-                {teamMembers.length > 0 && (
-                  <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Assigned To</th>
-                )}
-                <th className={`text-center ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-surface-100">
-              {sortedCases.map((c) => {
-                // Check if this is a DOI case that should be hidden (container collapsed)
-                const isDOICase = !!c.containerPath
-                const isContainerExpanded = c.containerPath ? expandedContainers.has(c.containerPath) : true
-                if (isDOICase && !isContainerExpanded) return null
-
-                // Container row rendering
-                if (c.isContainer) {
-                  const isExpanded = expandedContainers.has(c.path)
-                  const doiCaseCount = c.siblingCases?.length || 0
-                  const allDoiCasesSelected = c.siblingCases?.every(s => selectedCases.has(s.path)) || false
-                  const someDoiCasesSelected = c.siblingCases?.some(s => selectedCases.has(s.path)) || false
-
-                  return (
-                    <tr
-                      key={c.path}
-                      onClick={() => toggleContainer(c.path)}
-                      className="bg-brand-50 hover:bg-brand-100 cursor-pointer transition-colors"
-                    >
-                      <td className={containerCheckboxCellPad} onClick={e => e.stopPropagation()}>
-                        <input
-                          type="checkbox"
-                          checked={allDoiCasesSelected}
-                          ref={(el) => { if (el) el.indeterminate = someDoiCasesSelected && !allDoiCasesSelected }}
-                          onChange={() => toggleCase(c.path, true, c.siblingCases)}
-                          className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
-                        />
-                      </td>
-                      <td className={containerRowCellPad} colSpan={isWC ? 9 : 7}>
-                        <div className="flex items-center gap-3">
-                          <span className={`text-brand-600 transition-transform ${isExpanded ? 'rotate-0' : '-rotate-90'}`}>
-                            <ChevronDownIcon />
-                          </span>
-                          <span className="text-brand-500">
-                            <UsersIcon />
-                          </span>
-                          <div>
-                            <div className="font-semibold text-brand-900">{c.clientName || c.name}</div>
-                            <div className="text-xs text-brand-500 mt-0.5">
-                              {doiCaseCount} injury claim{doiCaseCount !== 1 ? 's' : ''}
-                            </div>
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                }
-
-                // Regular case row or DOI case row
-                return (
-                  <tr
-                    key={c.path}
-                    onClick={() => c.indexed && onSelectCase(c.path)}
-                    className={`group ${c.indexed
-                      ? 'hover:bg-surface-50 cursor-pointer border-l-2 border-l-transparent hover:border-l-accent-500'
-                      : 'bg-surface-50/50 opacity-60'} ${c.isSubcase || isDOICase ? 'bg-surface-25' : ''} transition-all`}
-                  >
-                    <td className={checkboxBodyCellPad} onClick={e => e.stopPropagation()}>
+                >
+                  Clear Selection
+                </button>
+              </div>
+            )}
+            <div className="bg-white rounded-xl shadow-card border border-surface-200 overflow-hidden">
+              <table className="w-full">
+                <thead className="sticky top-0 z-10 bg-white">
+                  <tr className="border-b border-surface-200">
+                    <th className={checkboxHeaderCellPad}>
                       <input
                         type="checkbox"
-                        checked={selectedCases.has(c.path)}
-                        onChange={() => toggleCase(c.path)}
+                        checked={sortedCases.filter(c => !c.isContainer).length > 0 && sortedCases.filter(c => !c.isContainer).every(c => selectedCases.has(c.path))}
+                        onChange={toggleAllVisible}
                         className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
                       />
-                    </td>
-                    <td className={`${isCompact ? 'py-3' : 'py-4'} ${c.isSubcase || isDOICase ? 'pl-10 pr-6' : 'px-6'}`}>
-                      <div className="flex items-center gap-3">
-                        {(c.isSubcase || isDOICase) && (
-                          <span className="text-brand-300 mr-1 -ml-4">└</span>
-                        )}
-                        <div>
-                          <div className="font-medium text-brand-900">
-                            {isDOICase ? (
-                              <>
-                                {c.clientName || c.containerName}
-                                <span className="ml-2 text-xs font-normal text-brand-500">
-                                  DOI: {c.injuryDate}
-                                </span>
-                              </>
+                    </th>
+                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Client</th>
+                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>To-dos</th>
+                    <th className={`text-left ${headerCellPad} text-xs font-semibold text-brand-500 uppercase tracking-wider`}>Unindexed Docs</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-surface-100">
+                  {sortedCases.map((c) => {
+                    // Check if this is a DOI case that should be hidden (container collapsed)
+                    const isDOICase = !!c.containerPath
+                    const isContainerExpanded = c.containerPath ? expandedContainers.has(c.containerPath) : true
+                    if (isDOICase && !isContainerExpanded) return null
+
+                    // Container row rendering
+                    if (c.isContainer) {
+                      const isExpanded = expandedContainers.has(c.path)
+                      const doiCaseCount = c.siblingCases?.length || 0
+                      const allDoiCasesSelected = c.siblingCases?.every(s => selectedCases.has(s.path)) || false
+                      const someDoiCasesSelected = c.siblingCases?.some(s => selectedCases.has(s.path)) || false
+                      const todoCount = (c.siblingCases || []).reduce((sum, sibling) => {
+                        return sum + (pendingTodoCountsByPath.get(normalizePath(sibling.path)) || 0)
+                      }, 0)
+                      const unindexedSummary = getUnindexedDocsSummary(c)
+                      const parsedCount = Number(unindexedSummary.label)
+                      const unindexedLabel = Number.isFinite(parsedCount) && parsedCount > 0
+                        ? `${parsedCount} file${parsedCount === 1 ? '' : 's'}`
+                        : unindexedSummary.label
+
+                      return (
+                        <tr
+                          key={c.path}
+                          onClick={() => toggleContainer(c.path)}
+                          className="bg-brand-50 hover:bg-brand-100 cursor-pointer transition-colors"
+                        >
+                          <td className={containerCheckboxCellPad} onClick={e => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={allDoiCasesSelected}
+                              ref={(el) => { if (el) el.indeterminate = someDoiCasesSelected && !allDoiCasesSelected }}
+                              onChange={() => toggleCase(c.path, true, c.siblingCases)}
+                              className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
+                            />
+                          </td>
+                          <td className={containerRowCellPad}>
+                            <div className="flex items-center gap-3">
+                              <span className={`text-brand-600 transition-transform ${isExpanded ? 'rotate-0' : '-rotate-90'}`}>
+                                <ChevronDownIcon />
+                              </span>
+                              <span className="text-brand-500">
+                                <UsersIcon />
+                              </span>
+                              <div>
+                                <div className="font-semibold text-brand-900">{c.clientName || c.name}</div>
+                                <div className="text-xs text-brand-500 mt-0.5">
+                                  {doiCaseCount} injury claim{doiCaseCount !== 1 ? 's' : ''}
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                          <td className={bodyCellPad}>
+                            {todoCount > 0 ? (
+                              <span className="inline-flex items-center px-2.5 py-1 text-xs font-semibold rounded-md bg-blue-50 text-blue-700 ring-1 ring-blue-200">
+                                {todoCount}
+                              </span>
                             ) : (
-                              c.clientName || c.name
+                              <span className="text-xs text-brand-400">0</span>
                             )}
-                          </div>
-                          {c.isSubcase ? (
-                            <div className="text-xs text-brand-400 mt-0.5">
-                              Linked to: {c.parentName}
-                            </div>
-                          ) : !isDOICase && (
-                            <div className="text-xs text-brand-400 mt-0.5">{c.name}</div>
-                          )}
-                        </div>
-                      </div>
-                    </td>
-                    <td className={bodyCellPad}>{getPhaseBadge(c.casePhase)}</td>
-                    <td className={`${bodyCellPad} text-sm text-brand-600`}>
-                      {isDOICase ? c.injuryDate : formatDate(c.dateOfLoss)}
-                    </td>
-                    {isWC ? (
-                      <>
-                        <td className={`${bodyCellPad} text-sm text-brand-600`}>{c.employer || '—'}</td>
-                        <td className={bodyCellPad}>{getTTDStatusBadge(c.ttdStatus)}</td>
-                        <td className={`${bodyCellPad} text-sm text-brand-600 tabular-nums`}>{formatAMW(c.amw, c.compensationRate)}</td>
-                        <td className={`${bodyCellPad} text-sm text-brand-600`}>{formatHearings(c.openHearings)}</td>
-                      </>
-                    ) : (
-                      <>
-                        <td className={`${bodyCellPad} text-sm text-brand-900 text-right font-semibold tabular-nums`}>
-                          {formatCurrency(c.totalSpecials)}
+                          </td>
+                          <td className={bodyCellPad}>
+                            {unindexedSummary.hasUnindexed ? (
+                              <span className="inline-flex items-center px-2.5 py-1 text-xs font-semibold rounded-md bg-amber-50 text-amber-700 ring-1 ring-amber-200">
+                                {unindexedLabel}
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center px-2.5 py-1 text-xs font-semibold rounded-md bg-accent-50 text-accent-700 ring-1 ring-accent-200">
+                                0
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    }
+
+                    // Regular case row or DOI case row
+                    const todoCount = getTodoCountForCase(c)
+                    const unindexedSummary = getUnindexedDocsSummary(c)
+                    const parsedCount = Number(unindexedSummary.label)
+                    const unindexedLabel = Number.isFinite(parsedCount) && parsedCount > 0
+                      ? `${parsedCount} file${parsedCount === 1 ? '' : 's'}`
+                      : unindexedSummary.label
+
+                    return (
+                      <tr
+                        key={c.path}
+                        onClick={() => c.indexed && onSelectCase(c.path)}
+                        className={`group ${c.indexed
+                          ? 'hover:bg-surface-50 cursor-pointer border-l-2 border-l-transparent hover:border-l-accent-500'
+                          : 'bg-surface-50/50 opacity-60'} ${c.isSubcase || isDOICase ? 'bg-surface-25' : ''} transition-all`}
+                      >
+                        <td className={checkboxBodyCellPad} onClick={e => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={selectedCases.has(c.path)}
+                            onChange={() => toggleCase(c.path)}
+                            className="w-4 h-4 rounded border-surface-300 text-accent-600 focus:ring-accent-500 cursor-pointer"
+                          />
                         </td>
-                        <td className={`${bodyCellPad} text-sm text-brand-600`}>{formatPolicyLimits(c.policyLimits)}</td>
-                        <td className={bodyCellPad}>{getSolBadge(c.solDaysRemaining)}</td>
-                      </>
-                    )}
-                    {teamMembers.length > 0 && (
-                      <td className={bodyCellPad} onClick={e => e.stopPropagation()}>
-                        <CaseAssignmentDropdown
-                          casePath={c.path}
-                          assignments={c.assignments || []}
-                          teamMembers={teamMembers}
-                          userEmail={userEmail || ''}
-                          canAssign={teamContext?.permissions?.canAssignCases || false}
-                          onAssignmentChange={async (newAssignments) => {
-                            await syncCaseAssignments(c.path, newAssignments)
-                            // Update the case in firmData
-                            if (firmData) {
-                              setFirmData({
-                                ...firmData,
-                                cases: firmData.cases.map(cs =>
-                                  cs.path === c.path ? { ...cs, assignments: newAssignments } : cs
-                                )
-                              })
-                            }
-                          }}
-                          compact
-                        />
-                      </td>
-                    )}
-                    <td className={bodyCellPad}>
-                      <div className="flex items-center justify-center">
-                        {indexingProgress?.isRunning && indexingProgress.caseFolder === c.path ? (
-                          <div className="flex flex-col items-center gap-1 min-w-24">
-                            <div className="w-24 h-1.5 bg-surface-200 rounded-full overflow-hidden">
-                              <div
-                                className="h-full bg-accent-500 rounded-full transition-all duration-300"
-                                style={{ width: indexingProgress.filesTotal > 0
-                                  ? `${(indexingProgress.filesComplete / indexingProgress.filesTotal) * 100}%`
-                                  : '100%'
-                                }}
-                              />
+                        <td className={`${isCompact ? 'py-3' : 'py-4'} ${c.isSubcase || isDOICase ? 'pl-10 pr-6' : 'px-6'}`}>
+                          <div className="flex items-center gap-3">
+                            {(c.isSubcase || isDOICase) && (
+                              <span className="text-brand-300 mr-1 -ml-4">└</span>
+                            )}
+                            <div>
+                              <div className="font-medium text-brand-900">
+                                {isDOICase ? (
+                                  <>
+                                    {c.clientName || c.containerName}
+                                    <span className="ml-2 text-xs font-normal text-brand-500">
+                                      DOI: {c.injuryDate}
+                                    </span>
+                                  </>
+                                ) : (
+                                  c.clientName || c.name
+                                )}
+                              </div>
+                              {c.isSubcase ? (
+                                <div className="text-xs text-brand-400 mt-0.5">
+                                  Linked to: {c.parentName}
+                                </div>
+                              ) : !isDOICase && (
+                                <div className="text-xs text-brand-400 mt-0.5">{c.name}</div>
+                              )}
                             </div>
-                            <span className="text-[10px] text-brand-500 truncate max-w-24">
+                          </div>
+                        </td>
+                        <td className={bodyCellPad}>
+                          {todoCount > 0 ? (
+                            <span className="inline-flex items-center px-2.5 py-1 text-xs font-semibold rounded-md bg-blue-50 text-blue-700 ring-1 ring-blue-200">
+                              {todoCount}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-brand-400">0</span>
+                          )}
+                        </td>
+                        <td className={bodyCellPad}>
+                          {indexingProgress?.isRunning && indexingProgress.caseFolder === c.path ? (
+                            <span className="text-xs text-brand-500">
                               {indexingProgress.filesTotal > 0
-                                ? `${indexingProgress.filesComplete}/${indexingProgress.filesTotal} files`
+                                ? `${indexingProgress.filesComplete}/${indexingProgress.filesTotal} indexing`
                                 : 'Indexing...'}
                             </span>
-                          </div>
-                        ) : !c.indexed ? (
-                          <span className="text-xs text-brand-400">Not indexed{c.fileCount ? ` (${c.fileCount} files)` : ''}</span>
-                        ) : c.needsReindex ? (
-                          <span className="inline-flex items-center gap-1.5 text-amber-600">
-                            <span className="w-2 h-2 bg-amber-400 rounded-full"></span>
-                            <span className="text-xs font-medium">Update</span>
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1.5 text-emerald-600">
-                            <span className="w-2 h-2 bg-emerald-400 rounded-full"></span>
-                            <span className="text-xs font-medium">Current</span>
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    {c.indexed && (
-                      <td className="px-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <ChevronRightIcon />
-                      </td>
-                    )}
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+                          ) : unindexedSummary.hasUnindexed ? (
+                            <span className="inline-flex items-center px-2.5 py-1 text-xs font-semibold rounded-md bg-amber-50 text-amber-700 ring-1 ring-amber-200">
+                              {unindexedLabel}
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center px-2.5 py-1 text-xs font-semibold rounded-md bg-accent-50 text-accent-700 ring-1 ring-accent-200">
+                              0
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
 
-          {sortedCases.length === 0 && (
-            <div className="text-center py-16">
-              <div className="w-16 h-16 rounded-full bg-surface-100 flex items-center justify-center mx-auto mb-4">
-                <FolderIcon />
-              </div>
-              <p className="text-brand-600 font-medium">No cases found</p>
-              <p className="text-sm text-brand-400 mt-1">Check your folder selection</p>
+              {sortedCases.length === 0 && (
+                <div className="text-center py-16">
+                  <div className="w-16 h-16 rounded-full bg-surface-100 flex items-center justify-center mx-auto mb-4">
+                    <FolderIcon />
+                  </div>
+                  <p className="text-brand-600 font-medium">No cases found</p>
+                  <p className="text-sm text-brand-400 mt-1">Check your folder selection</p>
+                </div>
+              )}
             </div>
-          )}
-        </div>
-      </div>
+          </div>
         </>
       )}
 
-      {/* Firm Settings modal with tabs */}
+      {/* Firm Settings modal */}
       {showFirmConfig && (
         <div className="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl shadow-elevated w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden">
-            {/* Tabs header */}
-            <div className="flex border-b border-surface-200">
+            <div className="px-6 py-4 border-b border-surface-200 flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-brand-900">Firm Settings</h2>
               <button
-                onClick={() => setSettingsTab('firm')}
-                className={`flex-1 px-6 py-4 text-sm font-medium transition-colors ${
-                  settingsTab === 'firm'
-                    ? 'text-brand-900 border-b-2 border-brand-900'
-                    : 'text-brand-500 hover:text-brand-700'
-                }`}
+                onClick={() => setShowFirmConfig(false)}
+                className="p-2 text-brand-400 hover:text-brand-600 hover:bg-surface-100 rounded-lg transition-colors"
               >
-                Firm Info
-              </button>
-              <button
-                onClick={() => setSettingsTab('team')}
-                className={`flex-1 px-6 py-4 text-sm font-medium transition-colors ${
-                  settingsTab === 'team'
-                    ? 'text-brand-900 border-b-2 border-brand-900'
-                    : 'text-brand-500 hover:text-brand-700'
-                }`}
-              >
-                Team
+                <XMarkIcon />
               </button>
             </div>
-
-            {/* Tab content */}
-            {settingsTab === 'firm' ? (
-              <div className="p-6 overflow-y-auto flex-1">
-                <div className="space-y-3">
-                  {[
-                    { key: 'firmName', label: 'Firm Name' },
-                    { key: 'attorneyName', label: 'Attorney Name' },
-                    { key: 'nevadaBarNo', label: 'Nevada Bar No.' },
-                    { key: 'address', label: 'Address' },
-                    { key: 'cityStateZip', label: 'City, State ZIP' },
-                    { key: 'phone', label: 'Phone' },
-                    { key: 'practiceArea', label: 'Practice Area' },
-                    { key: 'feeStructure', label: 'Fee Structure' },
-                  ].map(field => (
-                    <div key={field.key}>
-                      <label className="text-xs font-medium text-brand-600 mb-1 block">{field.label}</label>
-                      <input
-                        value={firmConfig[field.key] || ''}
-                        onChange={(e) => setFirmConfig(prev => ({ ...prev, [field.key]: e.target.value }))}
-                        className="w-full border border-surface-200 rounded-lg px-3 py-2 text-sm
+            <div className="p-6 overflow-y-auto flex-1">
+              <div className="space-y-3">
+                {[
+                  { key: 'officeName', label: 'Office Name' },
+                  { key: 'assistantName', label: 'Assistant Name' },
+                  { key: 'contactPerson', label: 'Contact Person' },
+                  { key: 'credentials', label: 'Credentials' },
+                  { key: 'address', label: 'Address' },
+                  { key: 'phone', label: 'Phone' },
+                  { key: 'email', label: 'Email' },
+                  { key: 'website', label: 'Website' },
+                ].map(field => (
+                  (() => {
+                    const fieldValue = firmConfig[field.key]
+                    return (
+                      <div key={field.key}>
+                        <label className="text-xs font-medium text-brand-600 mb-1 block">{field.label}</label>
+                        <input
+                          value={typeof fieldValue === 'string' ? fieldValue : ''}
+                          onChange={(e) => setFirmConfig(prev => ({ ...prev, [field.key]: e.target.value }))}
+                          className="w-full border border-surface-200 rounded-lg px-3 py-2 text-sm
                                    focus:outline-none focus:ring-2 focus:ring-accent-500"
-                      />
-                    </div>
-                  ))}
-
-                  {/* Logo upload section */}
-                  <div className="pt-3 border-t border-surface-200 mt-3">
-                    <label className="text-xs font-medium text-brand-600 mb-2 block">Firm Logo</label>
-
-                    {logoPreview ? (
-                      <div className="flex items-center gap-4">
-                        <img src={logoPreview} alt="Firm logo" className="h-16 object-contain rounded border border-surface-200" />
-                        <button
-                          onClick={handleLogoDelete}
-                          className="text-sm text-red-500 hover:text-red-700 transition-colors"
-                        >
-                          Remove
-                        </button>
+                        />
                       </div>
-                    ) : (
-                      <div
-                        onDrop={handleLogoDrop}
-                        onDragOver={handleLogoDragOver}
-                        onDragLeave={handleLogoDragLeave}
-                        className={`relative border-2 border-dashed rounded-lg p-4 text-center cursor-pointer transition-colors
+                    )
+                  })()
+                ))}
+
+                {/* Logo upload section */}
+                <div className="pt-3 border-t border-surface-200 mt-3">
+                  <label className="text-xs font-medium text-brand-600 mb-2 block">Firm Logo</label>
+
+                  {logoPreview ? (
+                    <div className="flex items-center gap-4">
+                      <img src={logoPreview} alt="Firm logo" className="h-16 object-contain rounded border border-surface-200" />
+                      <button
+                        onClick={handleLogoDelete}
+                        className="text-sm text-red-500 hover:text-red-700 transition-colors"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      onDrop={handleLogoDrop}
+                      onDragOver={handleLogoDragOver}
+                      onDragLeave={handleLogoDragLeave}
+                      className={`relative border-2 border-dashed rounded-lg p-4 text-center cursor-pointer transition-colors
                           ${logoDragOver ? 'border-accent-500 bg-accent-50' : 'border-surface-300 hover:border-accent-500'}
                           ${uploadingLogo ? 'opacity-50 pointer-events-none' : ''}
                         `}
-                      >
+                    >
+                      <input
+                        type="file"
+                        accept=".png,.jpg,.jpeg"
+                        onChange={(e) => handleLogoUpload(e.target.files)}
+                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                        disabled={uploadingLogo}
+                      />
+                      {uploadingLogo ? (
+                        <p className="text-sm text-brand-500">Uploading...</p>
+                      ) : (
+                        <>
+                          <p className="text-sm text-brand-500">Drop image or click to upload</p>
+                          <p className="text-xs text-brand-400 mt-1">PNG or JPG</p>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Contacts / Signers section */}
+                <div className="pt-3 border-t border-surface-200 mt-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-xs font-medium text-brand-600">Contacts / Signers</label>
+                    <button
+                      onClick={() => {
+                        const attorneys = [...firmAttorneys]
+                        attorneys.push({ name: '', barLabel: 'Credential', barNo: '' })
+                        setFirmConfig(prev => ({ ...prev, attorneys }))
+                      }}
+                      className="text-xs text-accent-600 hover:text-accent-800 font-medium"
+                    >
+                      + Add
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    {firmAttorneys.map((attorney, i: number) => (
+                      <div key={i} className="flex gap-2 items-center">
                         <input
-                          type="file"
-                          accept=".png,.jpg,.jpeg"
-                          onChange={(e) => handleLogoUpload(e.target.files)}
-                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                          disabled={uploadingLogo}
+                          value={attorney.name || ''}
+                          onChange={(e) => {
+                            const attorneys = [...firmAttorneys]
+                            attorneys[i] = { ...attorneys[i], name: e.target.value }
+                            setFirmConfig(prev => ({ ...prev, attorneys }))
+                          }}
+                          placeholder="Name"
+                          className="flex-1 border border-surface-200 rounded-lg px-3 py-1.5 text-sm
+                                       focus:outline-none focus:ring-2 focus:ring-accent-500"
                         />
-                        {uploadingLogo ? (
-                          <p className="text-sm text-brand-500">Uploading...</p>
-                        ) : (
-                          <>
-                            <p className="text-sm text-brand-500">Drop image or click to upload</p>
-                            <p className="text-xs text-brand-400 mt-1">PNG or JPG</p>
-                          </>
+                        <select
+                          value={attorney.barLabel || 'Credential'}
+                          onChange={(e) => {
+                            const attorneys = [...firmAttorneys]
+                            attorneys[i] = { ...attorneys[i], barLabel: e.target.value }
+                            setFirmConfig(prev => ({ ...prev, attorneys }))
+                          }}
+                          className="w-40 border border-surface-200 rounded-lg px-2 py-1.5 text-sm
+                                       focus:outline-none focus:ring-2 focus:ring-accent-500"
+                        >
+                          <option value="Credential">Credential</option>
+                          <option value="License #">License #</option>
+                          <option value="Role">Role</option>
+                        </select>
+                        <input
+                          value={attorney.barNo || ''}
+                          onChange={(e) => {
+                            const attorneys = [...firmAttorneys]
+                            attorneys[i] = { ...attorneys[i], barNo: e.target.value }
+                            setFirmConfig(prev => ({ ...prev, attorneys }))
+                          }}
+                          placeholder="Number"
+                          className="w-24 border border-surface-200 rounded-lg px-3 py-1.5 text-sm
+                                       focus:outline-none focus:ring-2 focus:ring-accent-500"
+                        />
+                        <button
+                          onClick={() => {
+                            const attorneys = firmAttorneys.filter((_, idx) => idx !== i)
+                            setFirmConfig(prev => ({ ...prev, attorneys }))
+                          }}
+                          className="p-1 text-brand-400 hover:text-red-500 transition-colors"
+                        >
+                          <XMarkIcon />
+                        </button>
+                        {i === 0 && (
+                          <span className="text-[10px] text-brand-400 whitespace-nowrap">Primary</span>
                         )}
+                      </div>
+                    ))}
+                    {firmAttorneys.length === 0 && (
+                      <p className="text-xs text-brand-400 italic">No contacts added</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Google Drive Integration section */}
+                <div className="pt-3 border-t border-surface-200 mt-3 pb-2">
+                  <label className="text-xs font-medium text-brand-600 mb-2 block">Google Drive Storage</label>
+                  <div className="p-4 bg-surface-50 border border-surface-200 rounded-lg">
+                    {gdriveStatus?.connected ? (
+                      <div className="flex flex-col gap-2">
+                        <p className="text-sm font-medium text-brand-900">Connected to Google Drive</p>
+                        <p className="text-xs text-brand-500">
+                          Root Folder: <span className="font-mono text-brand-600">{gdriveStatus.rootFolderName || gdriveStatus.rootFolderId || 'Not Set'}</span>
+                        </p>
+                        <div className="flex gap-2 mt-2">
+                          <button
+                            onClick={() => setPickingGdriveRoot(true)}
+                            className="px-3 py-1.5 text-xs font-medium bg-brand-100 text-brand-700 rounded hover:bg-brand-200 transition-colors"
+                          >
+                            {gdriveStatus.rootFolderId ? 'Change Root Folder' : 'Set Root Folder'}
+                          </button>
+                          <button
+                            onClick={async () => {
+                              await fetch(`${apiUrl}/api/auth/gdrive/disconnect`, { method: 'POST' })
+                              loadGdriveStatus()
+                              window.location.reload()
+                            }}
+                            className="px-3 py-1.5 text-xs font-medium bg-red-50 text-red-600 rounded hover:bg-red-100 transition-colors"
+                          >
+                            Disconnect
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-2">
+                        <p className="text-sm text-brand-500">Connect Google Drive to securely store and access your cases directly from the cloud.</p>
+                        <button
+                          onClick={async () => {
+                            try {
+                              const res = await fetch(`${apiUrl}/api/auth/gdrive/url`)
+                              const { url } = await res.json()
+                              const width = 500;
+                              const height = 600;
+                              const left = Math.max(0, (window.screen.width / 2) - (width / 2));
+                              const top = Math.max(0, (window.screen.height / 2) - (height / 2));
+                              const popup = window.open(url, "Google Drive Auth", `width=${width},height=${height},left=${left},top=${top}`);
+
+                              const timer = setInterval(() => {
+                                if (popup?.closed) {
+                                  clearInterval(timer);
+                                  loadGdriveStatus();
+                                }
+                              }, 500);
+                            } catch {
+                              alert("Failed to connect to Google Drive");
+                            }
+                          }}
+                          className="px-4 py-2 text-sm font-medium bg-brand-900 text-white rounded-lg hover:bg-brand-800 transition-colors w-fit"
+                        >
+                          Connect Google Drive
+                        </button>
                       </div>
                     )}
                   </div>
-
-                  {/* Attorneys / Signers section */}
-                  <div className="pt-3 border-t border-surface-200 mt-3">
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-xs font-medium text-brand-600">Attorneys / Signers</label>
-                      <button
-                        onClick={() => {
-                          const attorneys = Array.isArray(firmConfig.attorneys) ? [...firmConfig.attorneys] : []
-                          attorneys.push({ name: '', barLabel: 'NV Bar No.', barNo: '' })
-                          setFirmConfig(prev => ({ ...prev, attorneys }))
-                        }}
-                        className="text-xs text-accent-600 hover:text-accent-800 font-medium"
-                      >
-                        + Add
-                      </button>
-                    </div>
-                    <div className="space-y-2">
-                      {(Array.isArray(firmConfig.attorneys) ? firmConfig.attorneys : []).map((attorney: { name: string; barNo: string; barLabel?: string }, i: number) => (
-                        <div key={i} className="flex gap-2 items-center">
-                          <input
-                            value={attorney.name || ''}
-                            onChange={(e) => {
-                              const attorneys = [...(firmConfig.attorneys || [])]
-                              attorneys[i] = { ...attorneys[i], name: e.target.value }
-                              setFirmConfig(prev => ({ ...prev, attorneys }))
-                            }}
-                            placeholder="Attorney Name, Esq."
-                            className="flex-1 border border-surface-200 rounded-lg px-3 py-1.5 text-sm
-                                       focus:outline-none focus:ring-2 focus:ring-accent-500"
-                          />
-                          <select
-                            value={attorney.barLabel || 'NV Bar No.'}
-                            onChange={(e) => {
-                              const attorneys = [...(firmConfig.attorneys || [])]
-                              attorneys[i] = { ...attorneys[i], barLabel: e.target.value }
-                              setFirmConfig(prev => ({ ...prev, attorneys }))
-                            }}
-                            className="w-40 border border-surface-200 rounded-lg px-2 py-1.5 text-sm
-                                       focus:outline-none focus:ring-2 focus:ring-accent-500"
-                          >
-                            <option value="NV Bar No.">NV Bar No.</option>
-                            <option value="Nevada License #">Nevada License #</option>
-                          </select>
-                          <input
-                            value={attorney.barNo || ''}
-                            onChange={(e) => {
-                              const attorneys = [...(firmConfig.attorneys || [])]
-                              attorneys[i] = { ...attorneys[i], barNo: e.target.value }
-                              setFirmConfig(prev => ({ ...prev, attorneys }))
-                            }}
-                            placeholder="Number"
-                            className="w-24 border border-surface-200 rounded-lg px-3 py-1.5 text-sm
-                                       focus:outline-none focus:ring-2 focus:ring-accent-500"
-                          />
-                          <button
-                            onClick={() => {
-                              const attorneys = (firmConfig.attorneys || []).filter((_: unknown, idx: number) => idx !== i)
-                              setFirmConfig(prev => ({ ...prev, attorneys }))
-                            }}
-                            className="p-1 text-brand-400 hover:text-red-500 transition-colors"
-                          >
-                            <XMarkIcon />
-                          </button>
-                          {i === 0 && (
-                            <span className="text-[10px] text-brand-400 whitespace-nowrap">Primary</span>
-                          )}
-                        </div>
-                      ))}
-                      {(!Array.isArray(firmConfig.attorneys) || firmConfig.attorneys.length === 0) && (
-                        <p className="text-xs text-brand-400 italic">No attorneys added</p>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Packet Templates section (auto-detected from doc-templates) */}
-                  <div className="pt-3 border-t border-surface-200 mt-3">
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-xs font-medium text-brand-600">Packet Templates</label>
-                      <span className="text-[10px] text-brand-400">Auto-detected from uploads</span>
-                    </div>
-                    <div className="space-y-1">
-                      {packetTemplates.map(t => (
-                        <div key={t.id} className="flex items-center justify-between px-3 py-2 rounded-lg border border-surface-200 bg-white">
-                          <div>
-                            <p className="text-sm text-brand-800">{t.name}</p>
-                            <p className="text-[11px] text-brand-400">{t.heading}{t.builtIn ? ' (Built-in)' : ''}</p>
-                          </div>
-                        </div>
-                      ))}
-                      {packetTemplates.length === 0 && (
-                        <p className="text-xs text-brand-400 italic">Loading templates...</p>
-                      )}
-                    </div>
-                  </div>
                 </div>
-                <div className="flex justify-end gap-2 mt-5">
-                  <button
-                    onClick={() => setShowFirmConfig(false)}
-                    className="px-4 py-2 text-sm text-brand-500 hover:text-brand-700 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={saveFirmConfig}
-                    disabled={firmConfigSaving}
-                    className="px-4 py-2 text-sm bg-brand-900 text-white rounded-lg hover:bg-brand-800
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-surface-200 flex justify-end gap-2">
+              <button
+                onClick={() => setShowFirmConfig(false)}
+                className="px-4 py-2 text-sm text-brand-500 hover:text-brand-700 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveFirmConfig}
+                disabled={firmConfigSaving}
+                className="px-4 py-2 text-sm bg-brand-900 text-white rounded-lg hover:bg-brand-800
                                disabled:opacity-50 transition-colors"
-                  >
-                    {firmConfigSaving ? 'Saving...' : 'Save'}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="max-h-[60vh] overflow-y-auto">
-                <TeamManager
-                  apiUrl={apiUrl}
-                  firmRoot={firmRoot}
-                  userEmail={userEmail || ''}
-                  canManageTeam={teamContext?.permissions?.canManageTeam || false}
-                  onClose={() => setShowFirmConfig(false)}
-                />
-                <div className="px-6 pb-6 flex justify-end border-t border-surface-100 pt-4">
-                  <button
-                    onClick={() => { setShowFirmConfig(false); loadTeamMembers() }}
-                    className="px-4 py-2 text-sm bg-brand-900 text-white rounded-lg hover:bg-brand-800 transition-colors"
-                  >
-                    Done
-                  </button>
-                </div>
-              </div>
-            )}
+              >
+                {firmConfigSaving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2013,14 +1824,14 @@ export default function FirmDashboard({
                 const isReading = log.startsWith('Reading:')
                 const isWriting = log.startsWith('Writing:')
                 return (
-                  <div key={i} className={`py-0.5 ${isResult ? 'text-brand-400 pl-4' : isTask ? 'text-amber-400' : isReading || isWriting ? 'text-cyan-400' : 'text-emerald-400'}`}>
+                  <div key={i} className={`py-0.5 ${isResult ? 'text-brand-400 pl-4' : isTask ? 'text-amber-400' : isReading || isWriting ? 'text-cyan-400' : 'text-accent-400'}`}>
                     {!isResult && <span className="text-brand-600 mr-2 select-none">$</span>}
                     {log}
                   </div>
                 )
               })}
               {batchProgress.isRunning && (
-                <div className="text-emerald-400 py-0.5">
+                <div className="text-accent-400 py-0.5">
                   <span className="text-brand-600 mr-2 select-none">$</span>
                   {batchProgress.currentText || 'Working...'}
                   <span className="ml-1 animate-pulse">_</span>
@@ -2054,6 +1865,25 @@ export default function FirmDashboard({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Folder Picker Overlay for GDrive */}
+      {pickingGdriveRoot && (
+        <FolderPicker
+          apiUrl={apiUrl}
+          apiPath="/api/auth/gdrive/browse"
+          onSelect={async (path) => {
+            setPickingGdriveRoot(false)
+            await fetch(`${apiUrl}/api/auth/gdrive/set-root`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ rootFolderId: path })
+            })
+            loadGdriveStatus()
+            window.location.reload()
+          }}
+          onCancel={() => setPickingGdriveRoot(false)}
+        />
       )}
     </div>
   )
