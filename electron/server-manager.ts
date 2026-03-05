@@ -48,9 +48,24 @@ export class ServerManager {
   }
 
   /**
-   * Find a free port dynamically
+   * Try to listen on a specific port; resolves true if available, false if taken.
    */
-  private findFreePort(): Promise<number> {
+  private tryPort(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const server = createServer();
+      server.listen(port, "127.0.0.1", () => {
+        server.close(() => resolve(true));
+      });
+      server.on("error", () => resolve(false));
+    });
+  }
+
+  /**
+   * Find a free port — prefers 3001 so the Google OAuth redirect URI is predictable.
+   */
+  private async findFreePort(): Promise<number> {
+    if (await this.tryPort(3001)) return 3001;
+    debugLog("Port 3001 taken, finding a random free port");
     return new Promise((resolve, reject) => {
       const server = createServer();
       server.listen(0, "127.0.0.1", () => {

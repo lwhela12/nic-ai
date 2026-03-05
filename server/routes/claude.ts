@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { readFile, appendFile, writeFile, mkdir } from "fs/promises";
+import { readFile as fsReadFile, appendFile, writeFile as fsWriteFile, mkdir as fsMkdir } from "fs/promises";
 import { readFileSync as readFileSyncFs, existsSync as existsSyncFs } from "fs";
+import { getVfs } from "../lib/vfs";
 
 // SDK CLI options helper - handles both direct and npx modes
 import { getSDKCliOptions } from "../lib/sdk-cli-options";
@@ -124,7 +125,7 @@ async function loadRouterPrompt(): Promise<string> {
   // Support Electron bundled resources via AGENT_PROMPT_PATH
   const agentDir = process.env.AGENT_PROMPT_PATH || join(import.meta.dir, "../../agent");
   const routerPromptPath = join(agentDir, "router-prompt.md");
-  routerPromptCache = await readFile(routerPromptPath, "utf-8");
+  routerPromptCache = await fsReadFile(routerPromptPath, "utf-8");
   return routerPromptCache;
 }
 
@@ -150,7 +151,8 @@ app.post("/chat", async (c) => {
   const INDEX_MAX_CHARS = 80000; // ~20K tokens, leaves room for session history + response
   try {
     const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
-    const indexContent = await readFile(indexPath, "utf-8");
+    const vfs = getVfs();
+    const indexContent = await vfs.readFile(indexPath, "utf-8");
     const indexData = JSON.parse(indexContent);
 
     let indexJson = JSON.stringify(indexData, null, 2);
@@ -203,7 +205,7 @@ app.post("/chat", async (c) => {
     try {
       const firmRoot = resolveFirmRoot(caseFolder);
       const templatesPath = join(firmRoot, ".ai_tool", "templates", "templates.json");
-      const templatesContent = await readFile(templatesPath, "utf-8");
+      const templatesContent = await getVfs().readFile(templatesPath, "utf-8");
       const templatesData = JSON.parse(templatesContent);
       if (templatesData.templates && templatesData.templates.length > 0) {
         templatesContext = `
@@ -223,7 +225,7 @@ To use a template, read: ../.ai_tool/templates/parsed/{id}.md
     try {
       const firmRoot = resolveFirmRoot(caseFolder);
       const knowledgePath = join(firmRoot, ".ai_tool", "knowledge", "manifest.json");
-      const manifestContent = await readFile(knowledgePath, "utf-8");
+      const manifestContent = await getVfs().readFile(knowledgePath, "utf-8");
       const manifest = JSON.parse(manifestContent);
 
       // Load each knowledge section
@@ -231,7 +233,7 @@ To use a template, read: ../.ai_tool/templates/parsed/{id}.md
       for (const section of manifest.sections || []) {
         try {
           const sectionPath = join(firmRoot, ".ai_tool", "knowledge", section.filename);
-          const content = await readFile(sectionPath, "utf-8");
+          const content = await getVfs().readFile(sectionPath, "utf-8");
           sections.push(content);
         } catch {
           // Skip missing sections
@@ -255,7 +257,7 @@ ${sections.join("\n\n---\n\n")}
     try {
       const firmRoot = resolveFirmRoot(caseFolder);
       const firmConfigPath = join(firmRoot, ".ai_tool", "firm-config.json");
-      const firmConfigContent = await readFile(firmConfigPath, "utf-8");
+      const firmConfigContent = await getVfs().readFile(firmConfigPath, "utf-8");
       const firmConfig = JSON.parse(firmConfigContent);
 
       // Check if profile info is actually configured (not just empty strings)
@@ -311,7 +313,7 @@ No workspace configuration found. When generating letters, use placeholder text 
             if (sibling.type === "doi_sibling") {
               try {
                 const siblingIndexPath = join(sibling.path, ".ai_tool", "document_index.json");
-                const siblingContent = await readFile(siblingIndexPath, "utf-8");
+                const siblingContent = await getVfs().readFile(siblingIndexPath, "utf-8");
                 const siblingIndex = JSON.parse(siblingContent);
 
                 // Extract just the key summary fields for context
@@ -650,7 +652,7 @@ USER REQUEST: `;
         let recoverySummary = "The conversation context grew too large and was reset. Your previous discussion has been preserved in chat history.";
         try {
           const historyPath = join(caseFolder, ".ai_tool", "chat_history.json");
-          const historyContent = await readFile(historyPath, "utf-8");
+          const historyContent = await getVfs().readFile(historyPath, "utf-8");
           const history = JSON.parse(historyContent);
           if (history.messages && history.messages.length > 0) {
             // Take last few messages for a quick summary
@@ -849,7 +851,7 @@ app.post("/init", async (c) => {
       let practiceArea = await resolveFirmPracticeArea(firmRoot);
       if (!practiceArea) {
         try {
-          const existingIndex = JSON.parse(await readFile(join(caseFolder, '.ai_tool', 'document_index.json'), 'utf-8'));
+          const existingIndex = JSON.parse(await getVfs().readFile(join(caseFolder, '.ai_tool', 'document_index.json'), 'utf-8'));
           practiceArea = normalizePracticeArea(existingIndex.practice_area ?? existingIndex.practiceArea);
         } catch {
           // No existing index.
@@ -984,7 +986,7 @@ app.post("/document", async (c) => {
 
   try {
     const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
-    const indexContent = await readFile(indexPath, "utf-8");
+    const indexContent = await getVfs().readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
 
     // Search for the document in the folders structure
@@ -1205,7 +1207,7 @@ app.get("/history", async (c) => {
 
   try {
     const historyPath = join(caseFolder, ".ai_tool", "chat_history.json");
-    const historyContent = await readFile(historyPath, "utf-8");
+    const historyContent = await getVfs().readFile(historyPath, "utf-8");
     const history: ChatHistory = JSON.parse(historyContent);
     return c.json(history);
   } catch (error) {
@@ -1237,12 +1239,12 @@ app.post("/history", async (c) => {
     const historyPath = join(piToolDir, "chat_history.json");
 
     // Ensure .ai_tool directory exists
-    await mkdir(piToolDir, { recursive: true });
+    await getVfs().mkdir(piToolDir, { recursive: true });
 
     // Load existing history or create new
     let history: ChatHistory;
     try {
-      const existingContent = await readFile(historyPath, "utf-8");
+      const existingContent = await getVfs().readFile(historyPath, "utf-8");
       history = JSON.parse(existingContent);
     } catch {
       history = {
@@ -1259,7 +1261,7 @@ app.post("/history", async (c) => {
       history.startedAt = new Date().toISOString();
     }
 
-    await writeFile(historyPath, JSON.stringify(history, null, 2));
+    await getVfs().writeFile(historyPath, JSON.stringify(history, null, 2));
     return c.json({ success: true });
   } catch (error) {
     console.error("Save history error:", error);
@@ -1285,7 +1287,7 @@ app.get("/history/archives", async (c) => {
   try {
     // Load archives from document index
     const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
-    const indexContent = await readFile(indexPath, "utf-8");
+    const indexContent = await getVfs().readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
     return c.json({ archives: index.chat_archives || [] });
   } catch (error) {
@@ -1320,7 +1322,7 @@ app.post("/history/archive", async (c) => {
     // Load current chat history
     let history: ChatHistory;
     try {
-      const historyContent = await readFile(historyPath, "utf-8");
+      const historyContent = await getVfs().readFile(historyPath, "utf-8");
       history = JSON.parse(historyContent);
     } catch {
       return c.json({ error: "No chat history to archive" }, 400);
@@ -1333,7 +1335,7 @@ app.post("/history/archive", async (c) => {
     // Load existing index to check for overwrite
     let index: any = {};
     try {
-      const indexContent = await readFile(indexPath, "utf-8");
+      const indexContent = await getVfs().readFile(indexPath, "utf-8");
       index = JSON.parse(indexContent);
     } catch {
       // No index yet
@@ -1384,7 +1386,7 @@ app.post("/history/archive", async (c) => {
     }
 
     // Create/update archive file
-    await mkdir(archivesDir, { recursive: true });
+    await getVfs().mkdir(archivesDir, { recursive: true });
     const dateStr = new Date().toISOString().split('T')[0];
 
     let archiveId: string;
@@ -1403,7 +1405,7 @@ app.post("/history/archive", async (c) => {
       archivePath = join(archivesDir, archiveFileName);
     }
 
-    await writeFile(archivePath, JSON.stringify({
+    await getVfs().writeFile(archivePath, JSON.stringify({
       ...history,
       archivedAt: new Date().toISOString(),
     }, null, 2));
@@ -1426,7 +1428,7 @@ app.post("/history/archive", async (c) => {
       // Add new entry to beginning
       index.chat_archives.unshift(archiveEntry);
     }
-    await writeFile(indexPath, JSON.stringify(index, null, 2));
+    await getVfs().writeFile(indexPath, JSON.stringify(index, null, 2));
 
     // Extract persistent memories from the conversation (non-blocking)
     extractMemoriesFromConversation(caseFolder, history.messages, archiveEntry.id).catch((err) => {
@@ -1439,7 +1441,7 @@ app.post("/history/archive", async (c) => {
       startedAt: new Date().toISOString(),
       lastUpdated: new Date().toISOString(),
     };
-    await writeFile(historyPath, JSON.stringify(emptyHistory, null, 2));
+    await getVfs().writeFile(historyPath, JSON.stringify(emptyHistory, null, 2));
 
     // Clear the session for fresh context
     await saveSession(caseFolder, "");
@@ -1473,7 +1475,7 @@ app.get("/history/archive/:id", async (c) => {
   try {
     // Find the archive entry in the index
     const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
-    const indexContent = await readFile(indexPath, "utf-8");
+    const indexContent = await getVfs().readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
 
     const archiveEntry = (index.chat_archives || []).find(
@@ -1486,7 +1488,7 @@ app.get("/history/archive/:id", async (c) => {
 
     // Load the archive file
     const archivePath = join(caseFolder, ".ai_tool", archiveEntry.file);
-    const archiveContent = await readFile(archivePath, "utf-8");
+    const archiveContent = await getVfs().readFile(archivePath, "utf-8");
     const archive = JSON.parse(archiveContent);
 
     return c.json({
@@ -1515,7 +1517,7 @@ app.post("/errata-correct", async (c) => {
 
   try {
     const indexPath = join(caseFolder, ".ai_tool", "document_index.json");
-    const indexContent = await readFile(indexPath, "utf-8");
+    const indexContent = await getVfs().readFile(indexPath, "utf-8");
     const index = JSON.parse(indexContent);
 
     // Update reconciled_values with user correction
@@ -1536,7 +1538,7 @@ app.post("/errata-correct", async (c) => {
     // Propagate correction to summary fields so dashboard reflects it immediately
     applyResolvedFieldToSummary(index, field, correctedValue);
 
-    await writeFile(indexPath, JSON.stringify(index, null, 2));
+    await getVfs().writeFile(indexPath, JSON.stringify(index, null, 2));
     await writeIndexDerivedFiles(caseFolder, index);
     return c.json({ success: true });
   } catch (error) {

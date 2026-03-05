@@ -811,6 +811,8 @@ function App() {
   const [, setPacketPiiTabActive] = useState(false)
   const [packetState, setPacketState] = useState<PacketState | null>(null)
   const [packetMigrationNotice, setPacketMigrationNotice] = useState<string | null>(null)
+  // Suppress unused-local warnings for deprecated packet state
+  void _evidencePacketTakeover; void _packetPiiTabActive
 
   // Sync packet mode to sessionStorage so it survives page reloads (Vite HMR)
   useEffect(() => {
@@ -1090,7 +1092,7 @@ function App() {
     return map
   }, [documentIndex])
 
-  const handleEnterPacketModeFromAgent = useCallback(async (
+  const _handleEnterPacketModeFromAgent = useCallback(async (
     proposedDocs: Array<{ docId?: string; path?: string; title?: string }>,
     frontMatter: Partial<PacketFrontMatter>
   ) => {
@@ -1180,7 +1182,7 @@ function App() {
     setPacketMode(true)
   }, [createDefaultFrontMatter, docLookup, docLookupById])
 
-  const handleEnterPacketModeFromDraft = useCallback(async (draftId: string) => {
+  const _handleEnterPacketModeFromDraft = useCallback(async (draftId: string) => {
     if (!caseFolder) return
     try {
       const res = await fetch(`${API_URL}/api/docs/packet-draft/${encodeURIComponent(draftId)}?case=${encodeURIComponent(caseFolder)}`)
@@ -1266,13 +1268,13 @@ function App() {
     return new Set(packetState.documents.map(d => d.path))
   }, [packetState])
 
-  const activePacketPiiResult = useMemo<PacketPiiResult | null>(() => {
+  const _activePacketPiiResult = useMemo<PacketPiiResult | null>(() => {
     if (!packetMode || !packetState || !selectedFilePath) return null
     const selected = normalizeDocumentLookupPath(selectedFilePath)
     return packetState.piiResults.find((result) => normalizeDocumentLookupPath(result.path) === selected) || null
   }, [packetMode, packetState, selectedFilePath])
 
-  const handleUpdatePacketPiiResult = useCallback(
+  const _handleUpdatePacketPiiResult = useCallback(
     (path: string, updater: (prev: PacketPiiResult) => PacketPiiResult) => {
       const normalizedPath = normalizeDocumentLookupPath(path)
       setPacketState((prev) => {
@@ -2268,6 +2270,25 @@ function App() {
     setViewDocPath(docPath || null)
   }
 
+  // GDrive folder picker - rendered as overlay regardless of page state
+  const gdrivePickerOverlay = pickingGdriveRoot ? (
+    <FolderPicker
+      apiUrl={API_URL}
+      apiPath="/api/auth/gdrive/browse"
+      onSelect={async (path) => {
+        setPickingGdriveRoot(false)
+        await fetch(`${API_URL}/api/auth/gdrive/set-root`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rootFolderId: path })
+        })
+        localStorage.setItem(FIRM_ROOT_KEY, path)
+        window.location.reload()
+      }}
+      onCancel={() => setPickingGdriveRoot(false)}
+    />
+  ) : null
+
   // Initial screen - select firm root folder
   if (!firmRoot) {
     return (
@@ -2343,15 +2364,25 @@ function App() {
                     const height = 600;
                     const left = Math.max(0, (window.screen.width / 2) - (width / 2));
                     const top = Math.max(0, (window.screen.height / 2) - (height / 2));
-                    const popup = window.open(url, "Google Drive Auth", `width=${width},height=${height},left=${left},top=${top}`);
+                    window.open(url, "Google Drive Auth", `width=${width},height=${height},left=${left},top=${top}`);
 
+                    // Poll until OAuth completes and tokens are saved
+                    let attempts = 0;
                     const timer = setInterval(async () => {
-                      if (popup?.closed) {
-                        clearInterval(timer);
-                        const statusRes = await fetch(`${API_URL}/api/auth/gdrive/status`)
-                        if (statusRes.ok) setGdriveStatus(await statusRes.json())
-                      }
-                    }, 500);
+                      attempts++;
+                      if (attempts > 120) { clearInterval(timer); return; } // 2 min timeout
+                      try {
+                        const statusRes = await fetch(`${API_URL}/api/auth/gdrive/status`);
+                        if (!statusRes.ok) return;
+                        const status = await statusRes.json();
+                        console.log('[GDrive poll]', attempts, status.connected);
+                        if (status.connected) {
+                          clearInterval(timer);
+                          setGdriveStatus(status);
+                          setPickingGdriveRoot(true);
+                        }
+                      } catch { /* retry */ }
+                    }, 1000);
                   } catch (e) {
                     alert("Failed to connect to Google Drive");
                   }
@@ -2490,25 +2521,7 @@ function App() {
           />
         )}
 
-        {pickingGdriveRoot && (
-          <FolderPicker
-            apiUrl={API_URL}
-            apiPath="/api/auth/gdrive/browse"
-            onSelect={async (path) => {
-              setPickingGdriveRoot(false)
-              await fetch(`${API_URL}/api/auth/gdrive/set-root`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ rootFolderId: path })
-              })
-              // Save the selected GDrive root ID to local storage so the frontend uses it
-              localStorage.setItem(FIRM_ROOT_KEY, path)
-              // Hard reload once root is selected to fetch firm config
-              window.location.reload()
-            }}
-            onCancel={() => setPickingGdriveRoot(false)}
-          />
-        )}
+        {gdrivePickerOverlay}
         <TodoDrawer
           isOpen={isDrawerOpen}
           onClose={() => setIsDrawerOpen(false)}
@@ -2896,6 +2909,7 @@ function App() {
       {/* Knowledge init modal — shown when firm root has no knowledge base */}
       {showKnowledgeInit && <KnowledgeInitModal />}
       <IndexingUI />
+      {gdrivePickerOverlay}
     </div>
   )
 
@@ -2907,14 +2921,25 @@ function App() {
         const height = 600;
         const left = Math.max(0, (window.screen.width / 2) - (width / 2));
         const top = Math.max(0, (window.screen.height / 2) - (height / 2));
-        const popup = window.open(url, "Google Drive Auth", `width=${width},height=${height},left=${left},top=${top}`);
+        window.open(url, "Google Drive Auth", `width=${width},height=${height},left=${left},top=${top}`);
 
+        // Poll until OAuth completes and tokens are saved
+        let attempts = 0;
         const timer = setInterval(async () => {
-          if (popup?.closed) {
-            clearInterval(timer);
-            await loadGdriveStatus()
-          }
-        }, 500);
+          attempts++;
+          if (attempts > 120) { clearInterval(timer); return; }
+          try {
+            const statusRes = await fetch(`${API_URL}/api/auth/gdrive/status`);
+            if (!statusRes.ok) return;
+            const status = await statusRes.json();
+            console.log('[GDrive poll]', attempts, status.connected);
+            if (status.connected) {
+              clearInterval(timer);
+              setGdriveStatus(status);
+              setPickingGdriveRoot(true);
+            }
+          } catch { /* retry */ }
+        }, 1000);
       })
       .catch(() => alert("Failed to connect to Google Drive"));
   }

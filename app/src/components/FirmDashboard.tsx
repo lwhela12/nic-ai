@@ -1729,12 +1729,17 @@ export default function FirmDashboard({
                               const top = Math.max(0, (window.screen.height / 2) - (height / 2));
                               const popup = window.open(url, "Google Drive Auth", `width=${width},height=${height},left=${left},top=${top}`);
 
-                              const timer = setInterval(() => {
-                                if (popup?.closed) {
+                              const timer = setInterval(async () => {
+                                if (popup && !popup.closed) return;
+                                const statusRes = await fetch(`${apiUrl}/api/auth/gdrive/status`);
+                                if (!statusRes.ok) return;
+                                const status = await statusRes.json();
+                                if (status.connected) {
                                   clearInterval(timer);
-                                  loadGdriveStatus();
+                                  setGdriveStatus(status);
+                                  setPickingGdriveRoot(true);
                                 }
-                              }, 500);
+                              }, 1000);
                             } catch {
                               alert("Failed to connect to Google Drive");
                             }

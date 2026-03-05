@@ -12,7 +12,14 @@
  *   - "clarify" → Return question to user
  */
 
-import { readFile, writeFile as writeFileAsync, mkdir as mkdirAsync, unlink } from "fs/promises";
+import { readFile as fsReadFile, writeFile as fsWriteFileAsync, mkdir as fsMkdirAsync, unlink as fsUnlink } from "fs/promises";
+import { getVfs } from "../lib/vfs";
+
+// VFS-aware wrappers for case file operations
+const readFile: typeof fsReadFile = ((...args: any[]) => (getVfs() as any).readFile(...args)) as any;
+const writeFileAsync: typeof fsWriteFileAsync = ((...args: any[]) => (getVfs() as any).writeFile(...args)) as any;
+const mkdirAsync: typeof fsMkdirAsync = ((...args: any[]) => (getVfs() as any).mkdir(...args)) as any;
+const unlink: typeof fsUnlink = ((...args: any[]) => (getVfs() as any).unlink(...args)) as any;
 import { join, dirname } from "path";
 
 import { groqChat, groqChatJson } from "./groq-chat-client";

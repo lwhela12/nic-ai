@@ -10,7 +10,15 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import { readFile, writeFile, mkdir, stat } from "fs/promises";
+import { readFile as fsReadFile, writeFile as fsWriteFile, mkdir as fsMkdir, stat as fsStat } from "fs/promises";
+import { getVfs } from "../lib/vfs";
+
+// VFS-aware wrappers — when vfsMode is "local", these pass through to fs/promises;
+// when vfsMode is "gdrive", they read/write from Google Drive.
+const readFile: typeof fsReadFile = ((...args: any[]) => (getVfs() as any).readFile(...args)) as any;
+const writeFile: typeof fsWriteFile = ((...args: any[]) => (getVfs() as any).writeFile(...args)) as any;
+const mkdir: typeof fsMkdir = ((...args: any[]) => (getVfs() as any).mkdir(...args)) as any;
+const stat: typeof fsStat = ((...args: any[]) => (getVfs() as any).stat(...args)) as any;
 import { join, dirname, resolve, sep } from "path";
 import { resolveFirmRoot } from "./year-mode";
 import { generateDocument, normalizeDocumentType, type DocumentType } from "./doc-agent";

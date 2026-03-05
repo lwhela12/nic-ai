@@ -7,7 +7,15 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import { readFile, writeFile, mkdir, readdir, stat, appendFile } from "fs/promises";
+import { readFile as fsReadFile, writeFile as fsWriteFile, mkdir as fsMkdir, readdir as fsReaddir, stat as fsStat, appendFile } from "fs/promises";
+import { getVfs } from "../lib/vfs";
+
+// VFS-aware wrappers for case file operations
+const readFile: typeof fsReadFile = ((...args: any[]) => (getVfs() as any).readFile(...args)) as any;
+const writeFile: typeof fsWriteFile = ((...args: any[]) => (getVfs() as any).writeFile(...args)) as any;
+const mkdir: typeof fsMkdir = ((...args: any[]) => (getVfs() as any).mkdir(...args)) as any;
+const stat: typeof fsStat = ((...args: any[]) => (getVfs() as any).stat(...args)) as any;
+const readdir: typeof fsReaddir = ((...args: any[]) => (getVfs() as any).readdir(...args)) as any;
 import { join, relative as pathRelative, extname, resolve as pathResolve, sep } from "path";
 import {
   resolveFirmRoot,

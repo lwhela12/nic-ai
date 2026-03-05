@@ -204,6 +204,46 @@ function createWindow(): void {
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith(`http://127.0.0.1:${serverPort}`)) return { action: "allow" };
+
+    // Open Google OAuth in a child BrowserWindow so the callback reaches our server
+    if (url.includes("accounts.google.com")) {
+      const authWin = new BrowserWindow({
+        width: 500,
+        height: 700,
+        parent: mainWindow ?? undefined,
+        modal: true,
+        webPreferences: { nodeIntegration: false, contextIsolation: true },
+      });
+      authWin.loadURL(url);
+
+      const safeClose = () => {
+        if (!authWin.isDestroyed()) authWin.close();
+      };
+
+      // Allow any navigation within the auth window (Google opens sub-popups)
+      authWin.webContents.setWindowOpenHandler(({ url: popupUrl }) => {
+        if (!authWin.isDestroyed()) authWin.loadURL(popupUrl);
+        return { action: "deny" };
+      });
+
+      // Close only when we land on our callback URL
+      authWin.webContents.on("did-navigate", (_e, navUrl) => {
+        debugLog(`[OAuth] did-navigate: ${navUrl}`);
+        if (navUrl.startsWith("http://localhost") && navUrl.includes("/api/auth/gdrive/callback")) {
+          setTimeout(safeClose, 500);
+        }
+      });
+
+      authWin.webContents.on("will-redirect", (_e, navUrl) => {
+        debugLog(`[OAuth] will-redirect: ${navUrl}`);
+        if (navUrl.startsWith("http://localhost") && navUrl.includes("/api/auth/gdrive/callback")) {
+          setTimeout(safeClose, 1000);
+        }
+      });
+
+      return { action: "deny" };
+    }
+
     shell.openExternal(url);
     return { action: "deny" };
   });
