@@ -799,15 +799,16 @@ function App() {
   const [reviewPrompt, setReviewPrompt] = useState<string>('')
   const [viewDocPath, setViewDocPath] = useState<string | null>(null)
   const [refreshDraftsKey, setRefreshDraftsKey] = useState(0)
-  const [evidencePacketTakeover, setEvidencePacketTakeover] = useState<{ path: string; version: number } | null>(null)
-  const [indexStatusForViewer, setIndexStatusForViewer] = useState<{ needsIndex: boolean; newFiles: string[]; modifiedFiles: string[] } | null>(null)
+  const [, setEvidencePacketTakeover] = useState<{ path: string; version: number } | null>(null)
+  const [indexStatusForViewer, setIndexStatusForViewer] = useState<{ needsIndex: boolean; newFiles: string[]; modifiedFiles: string[]; reason?: string } | null>(null)
+  const [caseNeedsReindexHint, setCaseNeedsReindexHint] = useState(false)
   const [agentDocumentView, setAgentDocumentView] = useState<AgentDocumentView | null>(null)
   const [savedAgentViews, setSavedAgentViews] = useState<AgentDocumentView[]>([])
 
   const packetFeaturesEnabled = false
   // Packet workflows are deprecated; keep legacy state archived but inactive.
   const [packetMode, setPacketMode] = useState(false)
-  const [packetPiiTabActive, setPacketPiiTabActive] = useState(false)
+  const [, setPacketPiiTabActive] = useState(false)
   const [packetState, setPacketState] = useState<PacketState | null>(null)
   const [packetMigrationNotice, setPacketMigrationNotice] = useState<string | null>(null)
 
@@ -1288,6 +1289,12 @@ function App() {
     },
     []
   )
+
+  // Packet workflows are currently disabled; keep these handlers compiled for quick re-enable.
+  void handleEnterPacketModeFromAgent
+  void handleEnterPacketModeFromDraft
+  void activePacketPiiResult
+  void handleUpdatePacketPiiResult
 
   // Contact card state
   const [isContactCardOpen, setIsContactCardOpen] = useState(false)
@@ -1866,7 +1873,7 @@ function App() {
     // Set up to show Firm Chat with the generate tasks prompt
     setIsGeneratingTasks(true)
     setForceShowFirmChat(true)
-    setFirmChatPrompt('Generate a prioritized task list based on case deadlines and status')
+    setFirmChatPrompt('Generate a prioritized elder care coordination task list based on upcoming appointments, follow-ups, and care-plan needs')
     setIsDrawerOpen(false) // Close drawer while generating
   }
 
@@ -2152,6 +2159,59 @@ function App() {
     checkAuthStatus()
   }
 
+  const refreshCaseNeedsReindexHint = useCallback(async (
+    targetCaseFolder: string | null,
+    options?: { signal?: AbortSignal }
+  ) => {
+    if (!targetCaseFolder || !firmRoot) {
+      setCaseNeedsReindexHint(false)
+      return
+    }
+
+    const normalizePath = (value: string) => value.replace(/\\/g, '/').replace(/\/+$/, '')
+
+    try {
+      const res = await fetch(`${API_URL}/api/firm/cases?root=${encodeURIComponent(firmRoot)}`, {
+        signal: options?.signal,
+      })
+      if (!res.ok) {
+        setCaseNeedsReindexHint(false)
+        return
+      }
+      const data = await res.json()
+      const cases = Array.isArray(data?.cases) ? data.cases : []
+      const target = cases.find((item: any) =>
+        typeof item?.path === 'string' && normalizePath(item.path) === normalizePath(targetCaseFolder)
+      )
+      setCaseNeedsReindexHint(!!target?.needsReindex)
+    } catch (error) {
+      if ((error as Error).name === 'AbortError') return
+      setCaseNeedsReindexHint(false)
+    }
+  }, [firmRoot])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void refreshCaseNeedsReindexHint(caseFolder, { signal: controller.signal })
+
+    return () => {
+      controller.abort()
+    }
+  }, [caseFolder, refreshCaseNeedsReindexHint])
+
+  useEffect(() => {
+    if (!caseFolder) return
+
+    const onFocus = () => {
+      void refreshCaseNeedsReindexHint(caseFolder)
+    }
+
+    window.addEventListener('focus', onFocus)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [caseFolder, refreshCaseNeedsReindexHint])
+
   // Show loading while checking auth
   if (!authChecked) {
     return (
@@ -2200,6 +2260,7 @@ function App() {
     } catch {
       // Ignore
     }
+    await refreshCaseNeedsReindexHint(caseFolder)
   }
 
   const handleViewUpdate = (content: string, docPath?: string) => {
@@ -2268,7 +2329,7 @@ function App() {
                     Browse Google Drive
                   </p>
                   <p className="text-sm text-brand-400">
-                    Select your firm's folder from Google Drive
+                    Select your workspace folder from Google Drive
                   </p>
                 </div>
               </button>
@@ -2307,7 +2368,7 @@ function App() {
                     Connect Google Drive
                   </p>
                   <p className="text-sm text-brand-400">
-                    Sign in to access cases in the cloud
+                    Sign in to access client files in the cloud
                   </p>
                 </div>
               </button>
@@ -2319,7 +2380,7 @@ function App() {
           )}
 
           <p className="text-xs text-brand-400 text-center mt-6">
-            Your cases are stored locally and never uploaded
+            Your client files are stored locally and never uploaded
           </p>
         </div>
 
@@ -2479,19 +2540,6 @@ function App() {
               <h1 className="font-serif text-xl tracking-tight">
                 {documentIndex?.summary?.client || documentIndex?.case_name || caseFolder?.split('/').pop() || 'Case'}
               </h1>
-              <div className="flex items-center gap-3 text-sm text-brand-300">
-                <span>{documentIndex?.practice_area === "Workers' Compensation" ? 'DOI' : 'DOL'}: {documentIndex?.summary?.incident_date || documentIndex?.summary?.dol || '—'}</span>
-                <span className="text-brand-500">•</span>
-                {documentIndex?.practice_area === "Workers' Compensation" ? (
-                  <span className="text-accent-400 font-medium">
-                    {documentIndex?.summary?.disability_status?.type || '—'}
-                  </span>
-                ) : (
-                  <span className="text-accent-400 font-medium">
-                    {documentIndex?.summary?.total_charges || '—'} in specials
-                  </span>
-                )}
-              </div>
             </div>
             {/* Packet workflows are deprecated and intentionally hidden */}
             {packetFeaturesEnabled && practiceArea === 'Workers\' Compensation' && documentIndex && (
@@ -2740,6 +2788,8 @@ function App() {
                 <Chat
                   caseFolder={caseFolder}
                   apiUrl={API_URL}
+                  firmRoot={firmRoot}
+                  needsReindexHint={caseNeedsReindexHint}
                   onViewUpdate={handleViewUpdate}
                   initialPrompt={reviewPrompt}
                   onInitialPromptUsed={() => setReviewPrompt('')}
@@ -2880,8 +2930,8 @@ function App() {
         <div className="bg-white rounded-2xl shadow-elevated w-full max-w-lg overflow-hidden animate-slide-up" onClick={e => e.stopPropagation()}>
           <div className="p-6 border-b border-surface-200 flex items-center justify-between">
             <div>
-              <h2 className="text-xl font-bold text-brand-900">Select Firm Directory</h2>
-              <p className="text-sm text-brand-500 mt-1">Choose where your case files are stored</p>
+              <h2 className="text-xl font-bold text-brand-900">Select Workspace Directory</h2>
+              <p className="text-sm text-brand-500 mt-1">Choose where your client files are stored</p>
             </div>
             <button
               onClick={onCancel}
@@ -2938,7 +2988,7 @@ function App() {
                   {gdriveStatus?.connected ? "Browse Google Drive" : "Connect Google Drive"}
                 </p>
                 <p className="text-sm text-brand-400">
-                  {gdriveStatus?.connected ? "Select your firm's folder from Google Drive" : "Sign in to access cases in the cloud"}
+                  {gdriveStatus?.connected ? "Select your workspace folder from Google Drive" : "Sign in to access client files in the cloud"}
                 </p>
               </div>
             </button>

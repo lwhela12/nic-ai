@@ -1,14 +1,29 @@
 /**
- * Groq Chat Client
+ * Chat Client (Cerebras / Groq)
  *
- * Thin wrapper around getGroqClient() for chat completions.
+ * Thin wrapper for chat completions.
  * - groqChat(): returns raw string response
  * - groqChatJson<T>(): returns parsed JSON response
- * - 120b primary → 20b fallback on 429
- * - Rate limit tracking reuses pattern from groq-extract.ts
+ * - Cerebras preferred when CEREBRAS_API_KEY is set; Groq fallback otherwise
+ * - On Groq: 120b primary → 20b fallback on 429
  */
 
 import { getGroqClient } from "./groq-client";
+import { getCerebrasClient } from "./cerebras-client";
+
+let _useCerebras: boolean | null = null;
+function useCerebras(): boolean {
+  if (_useCerebras === null) {
+    _useCerebras = !!process.env.CEREBRAS_API_KEY;
+    console.log(`[chat] Using ${_useCerebras ? "Cerebras" : "Groq"} provider`);
+  }
+  return _useCerebras;
+}
+
+/** Call after env is loaded to log provider at startup */
+export function initChatProvider(): void {
+  useCerebras();
+}
 
 // ============================================================================
 // Types
@@ -34,6 +49,17 @@ export interface GroqChatResult {
 
 const PRIMARY_MODEL = "openai/gpt-oss-120b";
 const FALLBACK_MODEL = "openai/gpt-oss-20b";
+
+/** Map Groq model IDs to Cerebras equivalents */
+const CEREBRAS_MODEL_MAP: Record<string, string> = {
+  "openai/gpt-oss-120b": "gpt-oss-120b",
+  "openai/gpt-oss-20b": "gpt-oss-120b", // no 20b on Cerebras, use 120b
+  "llama-3.1-8b-instant": "llama3.1-8b",
+};
+
+function toCerebrasModel(groqModel: string): string {
+  return CEREBRAS_MODEL_MAP[groqModel] || groqModel;
+}
 
 const ESTIMATED_CHAT_TOKENS = 10_000;
 
@@ -75,7 +101,39 @@ function shouldUseFallback(model: string, estimatedTokens: number): boolean {
 // Core API Call
 // ============================================================================
 
-async function callModel(
+async function callModelCerebras(
+  modelId: string,
+  messages: GroqChatOptions["messages"],
+  maxTokens: number,
+  temperature: number,
+  jsonMode: boolean,
+): Promise<GroqChatResult> {
+  const cerebras = getCerebrasClient();
+  const cerebrasModel = toCerebrasModel(modelId);
+
+  const opts: any = {
+    model: cerebrasModel,
+    temperature,
+    max_tokens: maxTokens,
+    messages,
+  };
+  if (jsonMode) {
+    opts.response_format = { type: "json_object" };
+  }
+
+  const response = await cerebras.chat.completions.create(opts);
+
+  return {
+    content: response.choices[0]?.message?.content || "",
+    model: "120b",
+    usage: {
+      inputTokens: response.usage?.prompt_tokens || 0,
+      outputTokens: response.usage?.completion_tokens || 0,
+    },
+  };
+}
+
+async function callModelGroq(
   modelId: string,
   messages: GroqChatOptions["messages"],
   maxTokens: number,
@@ -110,6 +168,19 @@ async function callModel(
   };
 }
 
+async function callModel(
+  modelId: string,
+  messages: GroqChatOptions["messages"],
+  maxTokens: number,
+  temperature: number,
+  jsonMode: boolean,
+): Promise<GroqChatResult> {
+  if (useCerebras()) {
+    return callModelCerebras(modelId, messages, maxTokens, temperature, jsonMode);
+  }
+  return callModelGroq(modelId, messages, maxTokens, temperature, jsonMode);
+}
+
 // ============================================================================
 // Fallback Logic
 // ============================================================================
@@ -125,6 +196,28 @@ async function callWithFallback(
     return callModel(overrideModel, messages, maxTokens, temperature, jsonMode);
   }
 
+  // Cerebras: always use 120b, retry once on error (no 20b fallback)
+  if (useCerebras()) {
+    try {
+      return await callModel(PRIMARY_MODEL, messages, maxTokens, temperature, jsonMode);
+    } catch (err: any) {
+      const status = err?.status || err?.statusCode;
+      const isRetryable = status === 429 || err?.name === "APIConnectionTimeoutError" || err?.code === "ETIMEDOUT" || err?.message?.includes("timed out");
+
+      if (isRetryable) {
+        console.log(`[cerebras-chat] ${status === 429 ? "429" : "Timeout"} on 120b, retrying once`);
+        const retryAfter = err?.headers?.get?.("retry-after");
+        if (retryAfter) {
+          const waitMs = Math.min(parseInt(retryAfter, 10) * 1000, 30_000);
+          if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+        }
+        return callModel(PRIMARY_MODEL, messages, maxTokens, temperature, jsonMode);
+      }
+      throw err;
+    }
+  }
+
+  // Groq: 120b → 20b fallback on 429
   const skip120b = shouldUseFallback(PRIMARY_MODEL, ESTIMATED_CHAT_TOKENS);
   const primaryModel = skip120b ? FALLBACK_MODEL : PRIMARY_MODEL;
 

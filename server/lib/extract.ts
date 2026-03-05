@@ -53,13 +53,28 @@ function isBinaryFileByExtension(ext: string | undefined): boolean {
   return !!ext && BINARY_FILE_EXTENSIONS.has(ext.toLowerCase());
 }
 
+function getFileExtension(filePath: string): string | undefined {
+  const fileName = filePath.split(/[\\/]/).pop() || filePath;
+  const lastDot = fileName.lastIndexOf(".");
+  if (lastDot <= 0 || lastDot === fileName.length - 1) return undefined;
+  return fileName.slice(lastDot + 1).toLowerCase();
+}
+
+function isLikelyTextMimeType(mimeType: string): boolean {
+  return mimeType.startsWith("text/")
+    || mimeType === "application/json"
+    || mimeType === "application/xml"
+    || mimeType === "application/x-javascript"
+    || mimeType === "application/javascript";
+}
+
 export function isImageFile(filename: string): boolean {
-  const ext = filename.toLowerCase().split(".").pop();
+  const ext = getFileExtension(filename);
   return !!ext && IMAGE_EXTENSIONS.has(ext);
 }
 
 export function getImageMimeType(filename: string): string {
-  const ext = filename.toLowerCase().split(".").pop();
+  const ext = getFileExtension(filename);
   switch (ext) {
     case "jpg":
     case "jpeg":
@@ -245,10 +260,44 @@ export async function extractHtmlFromDocx(filePath: string): Promise<DocxHtmlExt
  * Extract text from a file based on its extension.
  * Supports PDF, DOCX, and plain text formats.
  */
-export async function extractTextFromFile(filePath: string): Promise<string> {
-  const ext = filePath.toLowerCase().split(".").pop();
+export async function extractTextFromFile(
+  filePath: string,
+  options?: { mimeType?: string }
+): Promise<string> {
+  const ext = getFileExtension(filePath);
+  const mimeType = typeof options?.mimeType === "string"
+    ? options.mimeType.toLowerCase()
+    : undefined;
+
+  if (mimeType === "application/pdf") {
+    return extractTextFromPdf(filePath);
+  }
+
+  if (mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+    return extractTextFromDocx(filePath);
+  }
+
+  // Google Workspace files (Docs/Sheets/Slides) are exported by GDrive VFS.
+  if (mimeType?.startsWith("application/vnd.google-apps.")) {
+    const vfs = getVfs();
+    try {
+      return await vfs.readFile(filePath, "utf-8");
+    } catch {
+      return `[Could not read file: ${mimeType}]`;
+    }
+  }
+
+  if (mimeType?.startsWith("image/")) {
+    return `[Binary file: ${mimeType}]`;
+  }
+
+  if (mimeType && isLikelyTextMimeType(mimeType)) {
+    const vfs = getVfs();
+    return vfs.readFile(filePath, "utf-8");
+  }
+
   if (isBinaryFileByExtension(ext)) {
-    return `[Binary file: ${ext}]`;
+    return `[Binary file: ${ext || "unknown"}]`;
   }
 
   const vfs = getVfs();
@@ -268,17 +317,18 @@ export async function extractTextFromFile(filePath: string): Promise<string> {
       // Try to read as text, return empty if binary
       try {
         const content = await vfs.readFile(filePath, "utf-8");
+        if (!content) return content;
         // Check if content looks like binary (high ratio of non-printable chars)
         const nonPrintable = content.split('').filter((c: string) => {
           const code = c.charCodeAt(0);
           return code < 32 && code !== 9 && code !== 10 && code !== 13;
         }).length;
-        if (nonPrintable / content.length > 0.1) {
-          return `[Binary file: ${ext}]`;
+        if (content.length > 0 && nonPrintable / content.length > 0.1) {
+          return `[Binary file: ${ext || mimeType || "unknown"}]`;
         }
         return content;
       } catch {
-        return `[Could not read file: ${ext}]`;
+        return `[Could not read file: ${ext || mimeType || "unknown"}]`;
       }
   }
 }

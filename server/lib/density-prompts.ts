@@ -22,6 +22,7 @@ export const INTENT_TYPES = [
   "create_document_view",
   "read_document",
   "clarify_documents",
+  "remember",
   "clarify",
 ] as const;
 
@@ -89,6 +90,11 @@ Examples: "Read the intake form", "What does the MRI report say?"
 **clarify_documents** — User wants to review or provide context for flagged documents.
 params: {}
 Examples: "What documents need clarification?", "Show me the unclear documents", "Review the documents that need context", "Clarify docs"
+
+**remember** — User wants the system to remember a fact, preference, or instruction across conversations.
+params: { "content": "what to remember", "scope": "case"|"firm" }
+Use "firm" scope for preferences that apply across all cases (tone, formatting, workflow preferences). Use "case" scope for facts specific to this case.
+Examples: "Remember that the client prefers email", "Always use formal tone in documents", "Note that the accident date is actually March 5th"
 
 **clarify** — Message is too vague or ambiguous to classify.
 params: { "question": "what to ask the user" }
@@ -453,6 +459,82 @@ function getDocTypeInstructions(docType: string): string {
 - Keep content actionable.`,
   };
   return instructions[docType] || "Follow a clear, structured document format.";
+}
+
+// ============================================================================
+// Persistent Memory Prompts
+// ============================================================================
+
+/**
+ * Prompt for auto-extracting memories from a conversation at archive time.
+ */
+export function buildMemoryExtractionPrompt(): string {
+  return `You extract persistent memories from conversations. Analyze the conversation and extract:
+
+1. **case_facts** — Facts specific to this case: corrections to data, discovered information, important dates, client details, case-specific instructions.
+2. **firm_preferences** — Preferences that apply across all cases: formatting preferences, communication style, workflow instructions, tool preferences.
+
+Return JSON:
+{
+  "case_facts": [
+    { "content": "the fact itself", "category": "fact"|"correction"|"instruction" }
+  ],
+  "firm_preferences": [
+    { "content": "the preference itself", "category": "preference"|"instruction" }
+  ]
+}
+
+Rules:
+- Only extract genuinely persistent information — skip transient discussion.
+- Corrections override previous values: "The DOB is actually 01/15/1980" → correction.
+- Instructions like "always do X" or "never do Y" → instruction.
+- Keep each entry concise (1-2 sentences max).
+- Return empty arrays if nothing worth remembering.
+- Do NOT extract information that would already be in the document index (e.g., standard case fields).`;
+}
+
+/**
+ * Prompt for routing to relevant archived conversations.
+ */
+export function buildArchiveRouterPrompt(archiveSummaries: string): string {
+  return `You select which archived conversations might contain relevant context for the user's question.
+
+## Available Archives
+${archiveSummaries}
+
+Return JSON:
+{
+  "selected_archives": ["archive-id-1", "archive-id-2"],
+  "reasoning": "brief explanation"
+}
+
+Rules:
+- Select 1-3 archives most likely to contain relevant information.
+- If no archives seem relevant, return an empty array.
+- Match based on the summary descriptions and the user's question topic.`;
+}
+
+/**
+ * Lightweight check: should we search archived conversations?
+ */
+export function buildArchiveRelevancePrompt(): string {
+  return `Determine if the user's question requires searching archived conversations.
+
+Return JSON:
+{
+  "search": true/false,
+  "reasoning": "brief explanation"
+}
+
+Search archives when:
+- User references prior conversations: "we discussed", "last time", "you told me", "remember when"
+- Persistent memory is empty/sparse AND the question implies prior context
+- User asks about something not in documents or current memory
+
+Do NOT search when:
+- The question can be answered from documents and current memory alone
+- It's a straightforward document query or action request
+- Persistent memory already contains relevant information`;
 }
 
 // ============================================================================

@@ -52,6 +52,10 @@ import { authMiddleware } from "./middleware/auth";
 // Initialize VFS based on stored config (Google Drive vs Local)
 initVfs();
 
+// Log chat provider after env is loaded
+import { initChatProvider } from "./lib/groq-chat-client";
+initChatProvider();
+
 // Reuse the dirname from env loading
 const __filename = __envFilename;
 const __dirname = __envDirname;

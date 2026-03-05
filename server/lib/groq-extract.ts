@@ -8,7 +8,7 @@
  * - generateCaseSummaryWithGptOss: Case summary generation via GPT-OSS 120B
  */
 
-import { getVfs } from "./vfs";
+import { getVfs, withLocalVfsFile } from "./vfs";
 import { getGroqClient } from "./groq-client";
 import { pdfToImages, getPdfPageCount, type PdfPageImage } from "./pdftoppm";
 import { extractPdfTextByPage } from "./pdftotext";
@@ -750,11 +750,15 @@ export async function extractTextPerPage(
   folder: string,
   systemPrompt: string
 ): Promise<{ results: PageExtractionResult[]; usage: GroqUsage }> {
+  // Wrap in withLocalVfsFile so the PDF is downloaded from GDrive once,
+  // not once per page. Inner calls to getPdfPageCount/extractPdfTextByPage
+  // detect the temp path and skip re-downloading.
+  return withLocalVfsFile(pdfPath, async (localPdfPath) => {
   const totalUsage: GroqUsage = { inputTokens: 0, outputTokens: 0 };
 
   let pageCount: number;
   try {
-    pageCount = await getPdfPageCount(pdfPath);
+    pageCount = await getPdfPageCount(localPdfPath);
   } catch {
     pageCount = 1;
   }
@@ -764,7 +768,7 @@ export async function extractTextPerPage(
   for (let page = 1; page <= pageCount; page++) {
     let pageText: string;
     try {
-      pageText = await extractPdfTextByPage(pdfPath, page);
+      pageText = await extractPdfTextByPage(localPdfPath, page);
     } catch {
       pageText = "";
     }
@@ -842,6 +846,7 @@ Return the JSON extraction now.`,
   }
 
   return { results, usage: totalUsage };
+  }); // end withLocalVfsFile
 }
 
 /**
@@ -855,11 +860,15 @@ export async function extractVisionPerPage(
   fileSizeMB: number,
   systemPrompt: string
 ): Promise<{ results: PageExtractionResult[]; usage: GroqUsage }> {
+  // Wrap in withLocalVfsFile so the PDF is downloaded from GDrive once,
+  // not once per page. Inner calls to getPdfPageCount/pdfToImages
+  // detect the temp path and skip re-downloading.
+  return withLocalVfsFile(pdfPath, async (localPdfPath) => {
   const totalUsage: GroqUsage = { inputTokens: 0, outputTokens: 0 };
 
   let pageCount: number;
   try {
-    pageCount = await getPdfPageCount(pdfPath);
+    pageCount = await getPdfPageCount(localPdfPath);
   } catch {
     pageCount = 1;
   }
@@ -871,7 +880,7 @@ export async function extractVisionPerPage(
     const batchLabel = `page ${page}/${pageCount}`;
     try {
       const pageResults = await extractVisionRangeWithAdaptiveRetry(
-        pdfPath,
+        localPdfPath,
         filename,
         folder,
         systemPrompt,
@@ -911,6 +920,7 @@ export async function extractVisionPerPage(
   }
 
   return { results, usage: totalUsage };
+  }); // end withLocalVfsFile
 }
 
 // Also export mergeExtractions so it can be used externally for per-page merging

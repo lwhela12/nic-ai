@@ -18,12 +18,23 @@ export function getVfs(): FileSystemProvider {
 /**
  * Ensures a VFS path is available as a local file before executing a callback.
  * If the VFS is already local, it passes the path directly.
+ * If the path is already a local temp file (from an outer withLocalVfsFile call),
+ * it passes through without re-downloading — this avoids redundant GDrive downloads
+ * when per-page extraction calls withLocalVfsFile once per page.
  * Otherwise, it downloads to a temporary file, executes, and cleans up.
  */
 export async function withLocalVfsFile<T>(vfsPath: string, callback: (localPath: string) => Promise<T>): Promise<T> {
     const vfs = getVfs();
     // If it's already local, just use the path
     if (vfs.name === "local") {
+        return callback(vfsPath);
+    }
+
+    // If this is already a local temp path (from an outer withLocalVfsFile scope),
+    // skip download and use directly. This prevents N+2 GDrive downloads per
+    // multi-page PDF during per-page extraction.
+    const tempDir = tmpdir();
+    if (vfsPath.startsWith(tempDir + "/") || vfsPath.startsWith(tempDir + "\\")) {
         return callback(vfsPath);
     }
 

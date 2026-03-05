@@ -16,8 +16,9 @@ import { buildPhasePrompt } from "../shared/phase-rules";
 import { isPathWithinBounds, extractPathsFromBash } from "../lib/path-validator";
 import { directChat, type ChatMessage as DirectChatMessage } from "../lib/direct-chat";
 import { densityChat } from "../lib/density-chat";
+import { extractMemoriesFromConversation } from "../lib/memory";
 
-const CHAT_BACKEND = process.env.CHAT_BACKEND || "direct";
+const CHAT_BACKEND = process.env.CHAT_BACKEND || "density";
 import { requireCaseAccess } from "../lib/team-access";
 import { acquireCaseLock, releaseCaseLock } from "../lib/case-lock";
 import { applyResolvedFieldToSummary } from "../lib/index-summary-sync";
@@ -239,7 +240,7 @@ To use a template, read: ../.ai_tool/templates/parsed/{id}.md
 
       if (sections.length > 0) {
         knowledgeContext = `
-PI PRACTICE KNOWLEDGE (${manifest.practiceArea} - ${manifest.jurisdiction}):
+WORKSPACE KNOWLEDGE (${manifest.practiceArea} - ${manifest.jurisdiction}):
 
 ${sections.join("\n\n---\n\n")}
 
@@ -249,7 +250,7 @@ ${sections.join("\n\n---\n\n")}
       // No knowledge base - that's fine
     }
 
-    // Load firm configuration for signature blocks and letterhead
+    // Load workspace profile for signature blocks and letterhead
     let firmInfoContext = "";
     try {
       const firmRoot = resolveFirmRoot(caseFolder);
@@ -257,37 +258,43 @@ ${sections.join("\n\n---\n\n")}
       const firmConfigContent = await readFile(firmConfigPath, "utf-8");
       const firmConfig = JSON.parse(firmConfigContent);
 
-      // Check if firm info is actually configured (not just empty strings)
-      const hasConfig = firmConfig.firmName || firmConfig.attorneyName;
+      // Check if profile info is actually configured (not just empty strings)
+      const hasConfig =
+        firmConfig.officeName ||
+        firmConfig.firmName ||
+        firmConfig.contactPerson ||
+        firmConfig.assistantName ||
+        firmConfig.attorneyName;
 
       if (hasConfig) {
         firmInfoContext = `
-FIRM INFORMATION (use this for signature blocks and letterhead):
-- Firm Name: ${firmConfig.firmName || "[Not configured]"}
-- Attorney Name: ${firmConfig.attorneyName || "[Not configured]"}
+WORKSPACE PROFILE (use this for signature blocks and letterhead):
+- Organization Name: ${firmConfig.officeName || firmConfig.firmName || "[Not configured]"}
+- Coordinator Name: ${firmConfig.contactPerson || firmConfig.attorneyName || "[Not configured]"}
+- Assistant Name: ${firmConfig.assistantName || "[Not configured]"}
 - Address: ${firmConfig.address || "[Not configured]"}
 - Phone: ${firmConfig.phone || "[Not configured]"}
-- Fax: ${firmConfig.fax || "[Not configured]"}
 - Email: ${firmConfig.email || "[Not configured]"}
+- Website: ${firmConfig.website || "[Not configured]"}
 
-⚠️ ALWAYS use the firm information above for signature blocks. NEVER use hardcoded names like "Adam Muslusky" or "Muslusky Law" - use the configured firm info.
+⚠️ ALWAYS use the workspace profile above for signature blocks. NEVER use hardcoded names.
 
 `;
       } else {
         firmInfoContext = `
-⚠️ FIRM INFORMATION NOT CONFIGURED
-The firm settings have not been filled in. When generating letters:
-- Use placeholder text like "[Firm Name]", "[Attorney Name]", "[Address]", etc.
-- Tell the user they need to configure firm settings in the Firm Settings panel
-- NEVER use hardcoded names like "Adam Muslusky" or "Muslusky Law"
+⚠️ WORKSPACE PROFILE NOT CONFIGURED
+The workspace settings have not been filled in. When generating letters:
+- Use placeholder text like "[Organization Name]", "[Coordinator Name]", "[Address]", etc.
+- Tell the user they need to configure workspace settings in the Workspace Settings panel
+- NEVER use hardcoded names
 
 `;
       }
     } catch {
       // No firm config file - agent will use placeholders
       firmInfoContext = `
-⚠️ FIRM INFORMATION NOT CONFIGURED
-No firm configuration found. When generating letters, use placeholder text and tell the user to configure firm settings.
+⚠️ WORKSPACE PROFILE NOT CONFIGURED
+No workspace configuration found. When generating letters, use placeholder text and tell the user to configure workspace settings.
 
 `;
     }
@@ -1420,6 +1427,11 @@ app.post("/history/archive", async (c) => {
       index.chat_archives.unshift(archiveEntry);
     }
     await writeFile(indexPath, JSON.stringify(index, null, 2));
+
+    // Extract persistent memories from the conversation (non-blocking)
+    extractMemoriesFromConversation(caseFolder, history.messages, archiveEntry.id).catch((err) => {
+      console.error("[archive] Memory extraction failed:", err);
+    });
 
     // Clear active chat history
     const emptyHistory: ChatHistory = {

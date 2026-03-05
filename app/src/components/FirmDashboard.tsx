@@ -941,7 +941,7 @@ export default function FirmDashboard({
       <div className="flex items-center justify-center h-full bg-surface-50">
         <div className="text-center">
           <div className="w-8 h-8 border-2 border-brand-200 border-t-brand-600 rounded-full animate-spin mx-auto mb-3"></div>
-          <p className="text-brand-500">Loading cases...</p>
+          <p className="text-brand-500">Loading client records...</p>
         </div>
       </div>
     )
@@ -953,7 +953,9 @@ export default function FirmDashboard({
         <div className="text-red-600 font-medium">{error}</div>
         <div className="flex gap-3">
           <button
-            onClick={loadCases}
+            onClick={() => {
+              void loadCases()
+            }}
             className="px-4 py-2 bg-brand-900 text-white rounded-lg hover:bg-brand-800 transition-colors"
           >
             Retry
@@ -1051,7 +1053,7 @@ export default function FirmDashboard({
                   }`}
               >
                 <ChatBubbleIcon />
-                Firm Chat
+                Care Chat
               </button>
               <button
                 onClick={() => setView('knowledge')}
@@ -1121,7 +1123,7 @@ export default function FirmDashboard({
           <div className="bg-white/10 backdrop-blur rounded-xl p-5">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-brand-300 uppercase tracking-wide">Active Cases</p>
+                <p className="text-sm font-medium text-brand-300 uppercase tracking-wide">Active Clients</p>
                 <p className="text-4xl font-serif text-white mt-1">{sortedCases.filter(c => !c.isContainer).length}</p>
               </div>
               <div className="w-12 h-12 rounded-full bg-brand-500/30 flex items-center justify-center text-brand-300">
@@ -1164,7 +1166,7 @@ export default function FirmDashboard({
               className="ml-auto flex items-center gap-1.5 text-sm text-brand-500 hover:text-brand-700 transition-colors"
             >
               <CogIcon />
-              Firm Settings
+              Workspace Settings
             </button>
           </div>
           <div className="flex-1 overflow-hidden">
@@ -1204,7 +1206,7 @@ export default function FirmDashboard({
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search cases..."
+                  placeholder="Search client records..."
                   className="text-sm border border-surface-200 rounded-lg pl-9 pr-3 py-2 bg-white w-52
                              focus:outline-none focus:ring-2 focus:ring-accent-500 focus:border-transparent
                              placeholder:text-brand-400"
@@ -1302,7 +1304,7 @@ export default function FirmDashboard({
                 </button>
               </div>
               <div className="text-sm text-brand-500">
-                {visibleCasePaths.length} case{visibleCasePaths.length !== 1 ? 's' : ''}
+                {visibleCasePaths.length} client record{visibleCasePaths.length !== 1 ? 's' : ''}
               </div>
             </div>
           </div>
@@ -1312,7 +1314,7 @@ export default function FirmDashboard({
             {selectedCases.size > 0 && (
               <div className="mb-4 flex items-center gap-3 rounded-xl border border-accent-200 bg-accent-50 px-4 py-3">
                 <div className="text-sm text-brand-700">
-                  <span className="font-semibold text-brand-900">{selectedCases.size}</span> case{selectedCases.size !== 1 ? 's' : ''} selected
+                  <span className="font-semibold text-brand-900">{selectedCases.size}</span> client record{selectedCases.size !== 1 ? 's' : ''} selected
                   {selectedVisibleCount !== selectedCases.size && (
                     <span className="text-brand-500"> ({selectedVisibleCount} in current view)</span>
                   )}
@@ -1517,7 +1519,7 @@ export default function FirmDashboard({
                   <div className="w-16 h-16 rounded-full bg-surface-100 flex items-center justify-center mx-auto mb-4">
                     <FolderIcon />
                   </div>
-                  <p className="text-brand-600 font-medium">No cases found</p>
+                  <p className="text-brand-600 font-medium">No client records found</p>
                   <p className="text-sm text-brand-400 mt-1">Check your folder selection</p>
                 </div>
               )}
@@ -1526,12 +1528,12 @@ export default function FirmDashboard({
         </>
       )}
 
-      {/* Firm Settings modal */}
+      {/* Workspace Settings modal */}
       {showFirmConfig && (
         <div className="fixed inset-0 bg-brand-900/60 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl shadow-elevated w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden">
             <div className="px-6 py-4 border-b border-surface-200 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-brand-900">Firm Settings</h2>
+              <h2 className="text-sm font-semibold text-brand-900">Workspace Settings</h2>
               <button
                 onClick={() => setShowFirmConfig(false)}
                 className="p-2 text-brand-400 hover:text-brand-600 hover:bg-surface-100 rounded-lg transition-colors"
@@ -1569,11 +1571,11 @@ export default function FirmDashboard({
 
                 {/* Logo upload section */}
                 <div className="pt-3 border-t border-surface-200 mt-3">
-                  <label className="text-xs font-medium text-brand-600 mb-2 block">Firm Logo</label>
+                  <label className="text-xs font-medium text-brand-600 mb-2 block">Workspace Logo</label>
 
                   {logoPreview ? (
                     <div className="flex items-center gap-4">
-                      <img src={logoPreview} alt="Firm logo" className="h-16 object-contain rounded border border-surface-200" />
+                      <img src={logoPreview} alt="Workspace logo" className="h-16 object-contain rounded border border-surface-200" />
                       <button
                         onClick={handleLogoDelete}
                         className="text-sm text-red-500 hover:text-red-700 transition-colors"
@@ -1715,7 +1717,7 @@ export default function FirmDashboard({
                       </div>
                     ) : (
                       <div className="flex flex-col gap-2">
-                        <p className="text-sm text-brand-500">Connect Google Drive to securely store and access your cases directly from the cloud.</p>
+                        <p className="text-sm text-brand-500">Connect Google Drive to securely store and access your client records directly from the cloud.</p>
                         <button
                           onClick={async () => {
                             try {

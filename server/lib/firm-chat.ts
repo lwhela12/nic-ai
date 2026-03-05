@@ -1,9 +1,9 @@
 /**
- * Direct Firm Chat API
+ * Direct Workspace Chat API
  *
- * Fast, lightweight firm-level chat using direct Anthropic API calls.
- * Has access to portfolio context and tools for getting case details,
- * updating todos, and delegating report generation.
+ * Fast, lightweight portfolio chat using direct Anthropic API calls.
+ * Has access to portfolio context and tools for getting client record details,
+ * updating tasks, and delegating report generation.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -60,13 +60,13 @@ interface ParsedAssignment {
 const TOOLS: Anthropic.Tool[] = [
   {
     name: "read_file",
-    description: "Read a firm-level file (knowledge base, template, config). Use for reading firm configuration or knowledge documents.",
+    description: "Read a workspace-level file (knowledge base, template, config). Use for reading configuration or knowledge documents.",
     input_schema: {
       type: "object" as const,
       properties: {
         path: {
           type: "string",
-          description: "Relative path from firm root (e.g., '.ai_tool/firm-config.json', '.ai_tool/knowledge/manifest.json')"
+          description: "Relative path from workspace root (e.g., '.ai_tool/firm-config.json', '.ai_tool/knowledge/manifest.json')"
         }
       },
       required: ["path"]
@@ -74,13 +74,13 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "get_case_details",
-    description: "Get full index details for a specific case by folder name. Use when you need more information than the summary provides about a specific case.",
+    description: "Get full index details for a specific client record by folder name. Use when you need more information than the summary provides.",
     input_schema: {
       type: "object" as const,
       properties: {
         case_name: {
           type: "string",
-          description: "The case folder name (e.g., 'Smith, John' or 'Garcia_Maria')"
+          description: "The client folder name (e.g., 'Smith, John' or 'Garcia_Maria')"
         }
       },
       required: ["case_name"]
@@ -88,7 +88,7 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "update_todos",
-    description: "Update the firm todo list. Use when the user asks to add tasks, generate a task list, or create action items.",
+    description: "Update the workspace task list. Use when the user asks to add tasks, generate a task list, or create action items.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -99,7 +99,7 @@ const TOOLS: Anthropic.Tool[] = [
             type: "object",
             properties: {
               text: { type: "string", description: "Description of the task" },
-              caseRef: { type: "string", description: "Optional case name reference" },
+              caseRef: { type: "string", description: "Optional client record reference" },
               priority: { type: "string", enum: ["high", "medium", "low"], description: "Task priority" }
             },
             required: ["text", "priority"]
@@ -111,7 +111,7 @@ const TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "generate_report",
-    description: "Delegate to a specialized agent for generating formal reports. Use for portfolio summaries, SOL deadline reports, or case phase analyses that need detailed formatting.",
+    description: "Delegate to a specialized agent for generating formal reports. Use for portfolio summaries, upcoming-date reports, or phase analyses that need detailed formatting.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -208,6 +208,59 @@ function formatAssignmentLabels(
   });
 }
 
+function coerceDate(value: unknown): Date | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return parseFlexibleDate(value);
+}
+
+function computeDaysRemaining(target: Date, now: Date): number {
+  const diffMs = target.getTime() - now.getTime();
+  return Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+}
+
+function resolveUpcomingDate(
+  index: Record<string, any>,
+  now: Date
+): { label: string; raw: string; daysRemaining: number } | null {
+  const summary = (index.summary ?? {}) as Record<string, any>;
+  const dateCandidates: Array<{ label: string; value: unknown }> = [
+    { label: "Next appointment", value: index.next_appointment_date ?? summary.next_appointment_date },
+    { label: "Follow-up date", value: index.follow_up_date ?? summary.follow_up_date },
+    { label: "Care-plan review", value: index.next_review_date ?? summary.next_review_date },
+    { label: "Renewal date", value: index.renewal_date ?? summary.renewal_date },
+    { label: "Requested deadline", value: index.next_deadline ?? summary.next_deadline },
+    { label: "Primary date", value: summary.incident_date ?? summary.dol ?? summary.doi ?? index.date_of_loss },
+  ];
+
+  const parsed = dateCandidates
+    .map((candidate) => {
+      const date = coerceDate(candidate.value);
+      if (!date || typeof candidate.value !== "string") return null;
+      return {
+        label: candidate.label,
+        raw: candidate.value,
+        date,
+        daysRemaining: computeDaysRemaining(date, now),
+      };
+    })
+    .filter((candidate): candidate is { label: string; raw: string; date: Date; daysRemaining: number } => !!candidate);
+
+  if (parsed.length === 0) return null;
+
+  // Prefer upcoming dates; otherwise use the most recent past date.
+  const upcoming = parsed
+    .filter((entry) => entry.daysRemaining >= 0)
+    .sort((a, b) => a.date.getTime() - b.date.getTime());
+  if (upcoming.length > 0) {
+    const best = upcoming[0];
+    return { label: best.label, raw: best.raw, daysRemaining: best.daysRemaining };
+  }
+
+  parsed.sort((a, b) => b.date.getTime() - a.date.getTime());
+  const fallback = parsed[0];
+  return { label: fallback.label, raw: fallback.raw, daysRemaining: fallback.daysRemaining };
+}
+
 // Execute a tool and return result
 async function executeTool(
   toolName: string,
@@ -223,7 +276,7 @@ async function executeTool(
         const filePath = join(firmRoot, toolInput.path);
         // Security check - ensure path is within firm root
         if (!filePath.startsWith(firmRoot)) {
-          return "Error: Cannot read files outside the firm folder";
+          return "Error: Cannot read files outside the workspace folder";
         }
         const normalizedPath = toolInput.path.toLowerCase();
         if (normalizedPath.endsWith(".docx")) {
@@ -285,7 +338,7 @@ async function executeTool(
         }));
 
         await saveFirmTodosWithMemory(firmRoot, firmTodos);
-        return `Successfully saved ${firmTodos.length} tasks to the firm todo list.`;
+        return `Successfully saved ${firmTodos.length} tasks to the workspace task list.`;
       }
 
       case "generate_report": {
@@ -392,19 +445,20 @@ async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOption
   const parts: string[] = [];
   const memberById = new Map((options?.teamMembers || []).map((member) => [member.id, member]));
   const scope = options?.scope;
+  let isElderCareWorkspace = false;
 
   // Current date
   const now = new Date();
   const dateStr = formatDateMMDDYYYY(now);
   parts.push(`TODAY'S DATE: ${dateStr}`);
   if (!scope || scope.mode === "firm") {
-    parts.push("ACTIVE CASE VIEW: Firm (all cases)");
+    parts.push("ACTIVE CLIENT VIEW: Workspace (all client records)");
   } else if (scope.mode === "mine") {
-    parts.push("ACTIVE CASE VIEW: My cases");
+    parts.push("ACTIVE CLIENT VIEW: My assigned client records");
   } else {
     const member = memberById.get(scope.memberId);
     const label = member?.name || member?.email || scope.memberId;
-    parts.push(`ACTIVE CASE VIEW: ${label}'s cases`);
+    parts.push(`ACTIVE CLIENT VIEW: ${label}'s client records`);
   }
 
   // Load firm config
@@ -420,6 +474,8 @@ async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOption
   try {
     const manifestPath = join(firmRoot, ".ai_tool", "knowledge", "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
+    const practiceAreaName = typeof manifest.practiceArea === "string" ? manifest.practiceArea : "";
+    isElderCareWorkspace = practiceAreaName.toLowerCase().includes("elder");
     parts.push(`\n## PRACTICE KNOWLEDGE\nArea: ${manifest.practiceArea} (${manifest.jurisdiction})`);
 
     if (manifest.sections) {
@@ -447,8 +503,8 @@ async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOption
   // Build portfolio summary
   const caseSummaries: any[] = [];
   const casesByPhase: Record<string, number> = {};
-  let totalSpecials = 0;
-  let solUrgent = 0;
+  let totalTrackedCharges = 0;
+  let urgentDateCount = 0;
   let indexedCount = 0;
   let visibleCaseCount = 0;
 
@@ -492,8 +548,10 @@ async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOption
           || parseAmount(index.summary?.total_charges)
           || 0;
 
-        // Calculate SOL days remaining
-        let solDaysRemaining: number | undefined;
+        // Calculate date urgency with broad date fields first, then legal fallback if present.
+        let keyDateLabel: string | undefined;
+        let keyDateValue: string | undefined;
+        let daysRemaining: number | undefined;
         let statuteOfLimitations = index.statute_of_limitations || index.summary?.statute_of_limitations;
 
         if (!statuteOfLimitations && dateOfLoss) {
@@ -505,11 +563,20 @@ async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOption
           }
         }
 
-        if (statuteOfLimitations) {
+        const upcomingDate = resolveUpcomingDate(index, now);
+        if (upcomingDate) {
+          keyDateLabel = upcomingDate.label;
+          keyDateValue = upcomingDate.raw;
+          daysRemaining = upcomingDate.daysRemaining;
+        } else if (statuteOfLimitations) {
           const solDate = new Date(statuteOfLimitations);
-          const diffMs = solDate.getTime() - now.getTime();
-          solDaysRemaining = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
-          if (solDaysRemaining <= 90) solUrgent++;
+          keyDateLabel = "Primary deadline";
+          keyDateValue = statuteOfLimitations;
+          daysRemaining = computeDaysRemaining(solDate, now);
+        }
+
+        if (typeof daysRemaining === "number" && daysRemaining <= 30) {
+          urgentDateCount++;
         }
 
         // Extract providers
@@ -522,30 +589,31 @@ async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOption
           providers = index.summary.providers;
         }
 
-        // Extract policy limits
-        let policyLimits: string | undefined;
+        // Extract coverage/benefit hint
+        let coverageHint: string | undefined;
         const limits = index.policy_limits || index.summary?.policy_limits;
         if (typeof limits === 'string') {
-          policyLimits = limits;
+          coverageHint = limits;
         } else if (typeof limits === 'object' && limits !== null) {
           const biValue = limits['3P_bi'] || limits['3p_bi'] || limits['bi'] || limits['bodily_injury'] || limits['3P'];
-          if (typeof biValue === 'string') policyLimits = biValue;
+          if (typeof biValue === 'string') coverageHint = biValue;
         }
 
         // Track phase counts
         casesByPhase[casePhase] = (casesByPhase[casePhase] || 0) + 1;
-        totalSpecials += specials;
+        totalTrackedCharges += specials;
         const assignedTo = formatAssignmentLabels(assignments, memberById);
 
         caseSummaries.push({
           folder: entry.name,
           clientName,
           casePhase,
-          dateOfLoss,
-          totalSpecials: specials,
-          solDaysRemaining,
+          keyDateLabel,
+          keyDateValue,
+          daysRemaining,
+          totalCharges: specials,
           providers,
-          policyLimits,
+          coverageHint,
           assignedTo,
         });
       } catch {
@@ -556,39 +624,44 @@ async function buildFirmContext(firmRoot: string, options?: DirectFirmChatOption
       }
     }
 
-    // Sort by SOL urgency
+    // Sort by date urgency
     caseSummaries.sort((a, b) => {
-      if (a.solDaysRemaining !== undefined && b.solDaysRemaining !== undefined) {
-        return a.solDaysRemaining - b.solDaysRemaining;
+      if (a.daysRemaining !== undefined && b.daysRemaining !== undefined) {
+        return a.daysRemaining - b.daysRemaining;
       }
-      if (a.solDaysRemaining !== undefined) return -1;
-      if (b.solDaysRemaining !== undefined) return 1;
+      if (a.daysRemaining !== undefined) return -1;
+      if (b.daysRemaining !== undefined) return 1;
       return a.clientName.localeCompare(b.clientName);
     });
 
     // Add portfolio metrics
+    const portfolioNoun = isElderCareWorkspace ? "Client Records" : "Cases";
+    const chargesLabel = isElderCareWorkspace ? "Total Tracked Care Charges" : "Total Tracked Charges";
     parts.push(`\n## PORTFOLIO METRICS
-- Total Cases: ${visibleCaseCount}
-- Indexed Cases: ${indexedCount}
-- Total Medical Specials: $${totalSpecials.toLocaleString()}
-- Cases with SOL < 90 days: ${solUrgent}
+- Total ${portfolioNoun}: ${visibleCaseCount}
+- Indexed ${portfolioNoun}: ${indexedCount}
+- ${chargesLabel}: $${totalTrackedCharges.toLocaleString()}
+- Records with key dates in <= 30 days: ${urgentDateCount}
 
-CASES BY PHASE:
+RECORDS BY PHASE:
 ${Object.entries(casesByPhase).map(([phase, count]) => `- ${phase}: ${count}`).join('\n')}`);
 
     // Add case summaries
-    parts.push(`\n## CASE SUMMARIES (sorted by SOL urgency)`);
+    parts.push(`\n## CLIENT RECORD SUMMARIES (sorted by date urgency)`);
     if (caseSummaries.length === 0) {
-      parts.push("- No indexed cases found in the current view.");
+      parts.push("- No indexed client records found in the current view.");
     }
     for (const c of caseSummaries) {
+      const keyDateText =
+        c.keyDateValue && c.keyDateLabel
+          ? `${c.keyDateLabel}: ${c.keyDateValue}${typeof c.daysRemaining === "number" ? ` (${c.daysRemaining} days)` : ""}`
+          : "Unknown";
       parts.push(`
 ### ${c.clientName} (${c.folder})
 - Phase: ${c.casePhase}
-- DOL: ${c.dateOfLoss || 'Unknown'}
-- Specials: $${c.totalSpecials.toLocaleString()}
-- SOL: ${c.solDaysRemaining !== undefined ? `${c.solDaysRemaining} days remaining` : 'Unknown'}
-- Policy: ${c.policyLimits || 'Unknown'}
+- Key Date: ${keyDateText}
+- Tracked Charges: $${c.totalCharges.toLocaleString()}
+- Coverage / Benefits: ${c.coverageHint || 'Unknown'}
 - Providers: ${c.providers.length > 0 ? c.providers.join(', ') : 'None listed'}
 - Assigned: ${c.assignedTo && c.assignedTo.length > 0 ? c.assignedTo.join(', ') : 'Unassigned'}`);
     }
@@ -597,7 +670,7 @@ ${Object.entries(casesByPhase).map(([phase, count]) => `- ${phase}: ${count}`).j
     parts.push(`\nError loading portfolio data: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  parts.push(`\n## FIRM ROOT DIRECTORY\n${firmRoot}`);
+  parts.push(`\n## WORKSPACE ROOT DIRECTORY\n${firmRoot}`);
 
   return parts.join("\n");
 }
@@ -607,11 +680,11 @@ const BASE_SYSTEM_PROMPT = `You are a helpful assistant for portfolio-level anal
 
 ## YOUR CAPABILITIES
 
-1. **Answer Questions**: Use the portfolio data to answer questions about cases, deadlines, and financial summaries.
+1. **Answer Questions**: Use the portfolio data to answer questions about client records, deadlines, follow-ups, and financial summaries.
 
-2. **Read Firm Documents**: Use read_file to review firm configuration, knowledge base, or templates when needed.
+2. **Read Workspace Documents**: Use read_file to review configuration, knowledge base, or templates when needed.
 
-3. **Get Case Details**: Use get_case_details when you need more information than the summary provides about a specific case.
+3. **Get Record Details**: Use get_case_details when you need more information than the summary provides about a specific client record.
 
 4. **Update Todos**: Use update_todos when the user asks to generate tasks, create action items, or add todos.
 
@@ -622,9 +695,9 @@ const BASE_SYSTEM_PROMPT = `You are a helpful assistant for portfolio-level anal
 ## WHEN TO USE get_case_details
 
 Use this tool when:
-- User asks for specific details about a case that aren't in the summary
-- You need case analysis, liability assessment, or injury tier info
-- User wants to know about a case's needs_review items
+- User asks for specific details about a client record that aren't in the summary
+- You need detailed status context, risk flags, or needs_review items
+- You need to verify facts before recommending next actions
 
 Do NOT use it for:
 - Questions answerable from the portfolio summary
@@ -641,9 +714,9 @@ Use this tool when the user says:
 - "Prioritize the workload"
 
 Always use high/medium/low priorities based on:
-- **High**: SOL < 30 days, urgent deadlines, critical issues
-- **Medium**: SOL 30-90 days, follow-ups needed, pending items
-- **Low**: Routine tasks, early stage cases, no urgency
+- **High**: Safety or health risk, key date within 7 days, or urgent blocker
+- **Medium**: Follow-up needed within 8-30 days, missing required info, or stale updates
+- **Low**: Routine maintenance, check-ins, and non-urgent improvements
 
 ## REVIEW MODE
 
@@ -653,7 +726,7 @@ When the user asks to "review tasks", "review my todos", "go through tasks", or 
 1. Call start_review to get all pending tasks
 2. Present the FIRST pending item to the user with context:
    - Show the task text and priority
-   - If it has a caseRef, mention which case it's related to
+   - If it has a caseRef, mention which client record it's related to
    - Ask: "What would you like to do? (complete / skip / modify / delete)"
 3. Wait for the user's response
 4. Based on their response:
@@ -672,7 +745,7 @@ Assistant: [calls start_review]
 Assistant: "Let's review your 3 pending tasks.
 
 **Task 1 of 3** [HIGH]
-Request medical records for Garcia case
+Confirm transportation and medication refill for Garcia
 Related to: Garcia, Maria
 
 What would you like to do? (complete / skip / modify / delete)"
@@ -682,7 +755,7 @@ Assistant: [calls update_todo_item with action "complete"]
 Assistant: "Done! Marked as completed.
 
 **Task 2 of 3** [MEDIUM]
-Follow up on Smith settlement offer
+Follow up on Smith care-plan review appointment
 
 What would you like to do? (complete / skip / modify / delete)"
 
@@ -690,7 +763,7 @@ What would you like to do? (complete / skip / modify / delete)"
 
 - Be concise but thorough
 - Answer from the portfolio data when possible - no need for tools on simple lookups
-- Use specific case names when relevant
+- Use specific client names when relevant
 - Keep responses professional and actionable
 - When generating tasks, also include the JSON in your response for display
 - In review mode, present one item at a time and wait for user input before proceeding`;

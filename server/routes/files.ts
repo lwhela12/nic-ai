@@ -6,6 +6,7 @@ import { homedir } from "os";
 import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
 import { applyResolvedFieldToSummary } from "../lib/index-summary-sync";
 import { writeIndexDerivedFiles } from "../lib/meta-index";
+import { shouldIgnoreFile } from "../lib/file-ignore";
 import {
   getClientSlug,
   resolveFirmRoot,
@@ -14,32 +15,6 @@ import {
   walkYearBasedFiles,
   listYearBasedCaseFiles,
 } from "../lib/year-mode";
-
-// System/temporary files to ignore during file enumeration
-const IGNORED_FILES = new Set([
-  '.DS_Store',
-  '._.DS_Store',
-  'Thumbs.db',
-  'ehthumbs.db',
-  'desktop.ini',
-  '.Spotlight-V100',
-  '.Trashes',
-  '.TemporaryItems',
-]);
-
-const IGNORED_PATTERNS = [
-  /^\._/,           // macOS resource forks (._filename)
-  /\.swp$/,         // vim swap files
-  /\.swo$/,         // vim swap files
-  /~$/,             // backup files (file~)
-  /^~\$/,           // Office temp files (~$document.docx)
-  /^\.~lock\./,     // LibreOffice locks
-];
-
-function shouldIgnoreFile(name: string): boolean {
-  if (IGNORED_FILES.has(name)) return true;
-  return IGNORED_PATTERNS.some(pattern => pattern.test(name));
-}
 
 function normalizeFieldName(value: string): string {
   return String(value || "")
@@ -110,6 +85,16 @@ function dedupeNeedsReviewEntries(needsReview: any[]): any[] {
 }
 
 const app = new Hono();
+const REINDEX_DEBUG = process.env.REINDEX_DEBUG !== "false";
+
+function reindexLog(scope: string, payload: Record<string, unknown>) {
+  if (!REINDEX_DEBUG) return;
+  try {
+    console.log(`[reindex-debug][${scope}] ${JSON.stringify(payload)}`);
+  } catch {
+    console.log(`[reindex-debug][${scope}]`, payload);
+  }
+}
 
 function normalizePath(value: string): string {
   return value
@@ -635,8 +620,14 @@ app.get("/index-status", async (c) => {
     return c.json({ error: "case query param required" }, 400);
   }
 
+  reindexLog("index-status:start", {
+    caseFolder,
+    vfs: getVfs().name,
+  });
+
   const access = await requireCaseAccess(c, caseFolder);
   if (!access.ok) {
+    reindexLog("index-status:access_denied", { caseFolder });
     return access.response;
   }
 
@@ -661,8 +652,12 @@ app.get("/index-status", async (c) => {
           files.push({ path: relativePath, mtime: stats.mtimeMs });
         }
       }
-    } catch {
-      // Ignore errors
+    } catch (error) {
+      reindexLog("index-status:walk_error", {
+        caseFolder,
+        dir,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
     return files;
   }
@@ -675,6 +670,11 @@ app.get("/index-status", async (c) => {
     const registry = await loadClientRegistry(firmRoot);
     if (registry?.clients[statusSlug]) {
       const entry = registry.clients[statusSlug];
+      reindexLog("index-status:year_mode", {
+        caseFolder,
+        slug: statusSlug,
+        sourceFolders: entry.sourceFolders,
+      });
       const allFiles: { path: string; mtime: number }[] = [];
       for (const relSourceFolder of entry.sourceFolders) {
         const absFolder = join(firmRoot, relSourceFolder);
@@ -687,6 +687,11 @@ app.get("/index-status", async (c) => {
       }
       currentFiles = allFiles;
     } else {
+      reindexLog("index-status:year_mode_registry_miss", {
+        caseFolder,
+        slug: statusSlug,
+        firmRoot,
+      });
       currentFiles = await getAllFiles(caseFolder);
     }
   } else {
@@ -775,7 +780,13 @@ app.get("/index-status", async (c) => {
         addIndexedPath(f);
       }
     }
-  } catch {
+  } catch (error) {
+    reindexLog("index-status:no_index", {
+      caseFolder,
+      indexPath,
+      currentFileCount: currentFiles.length,
+      error: error instanceof Error ? error.message : String(error),
+    });
     // No index exists
     return c.json({
       needsIndex: true,
@@ -800,6 +811,20 @@ app.get("/index-status", async (c) => {
   }
 
   const needsIndex = newFiles.length > 0 || modifiedFiles.length > 0;
+
+  reindexLog("index-status:result", {
+    caseFolder,
+    vfs: getVfs().name,
+    currentFileCount: currentFiles.length,
+    indexedFileCount: indexedFiles.size,
+    indexedAtEpochMs: indexedAt,
+    needsIndex,
+    reason: needsIndex ? (newFiles.length > 0 ? "new_files" : "modified_files") : "up_to_date",
+    newCount: newFiles.length,
+    modifiedCount: modifiedFiles.length,
+    newSample: newFiles.slice(0, 8),
+    modifiedSample: modifiedFiles.slice(0, 8),
+  });
 
   return c.json({
     needsIndex,

@@ -5,6 +5,8 @@ import remarkGfm from 'remark-gfm'
 interface Props {
   caseFolder: string
   apiUrl: string
+  firmRoot?: string | null
+  needsReindexHint?: boolean
   onViewUpdate: (content: string) => void
   initialPrompt?: string
   onInitialPromptUsed?: () => void
@@ -211,7 +213,7 @@ const KEEP_RECENT = 2
 // Context usage thresholds
 const CONTEXT_DANGER_PERCENT = 55   // Red warning, trigger auto-summarize
 
-export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onTodosMayHaveChanged, onEvidencePacketGenerated, onShowFile, onDocumentView, onIndexStatusChange, onStartReindex, isReindexing }: Props) {
+export default function Chat({ caseFolder, apiUrl, firmRoot, needsReindexHint, onViewUpdate, initialPrompt, onInitialPromptUsed, onIndexMayHaveChanged, onDraftsMayHaveChanged, onTodosMayHaveChanged, onEvidencePacketGenerated, onShowFile, onDocumentView, onIndexStatusChange, onStartReindex, isReindexing }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -381,18 +383,104 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const indexStatusRequestIdRef = useRef(0)
   const wasReindexingRef = useRef<boolean>(!!isReindexing)
+  const dashboardReindexCacheRef = useRef<{ caseFolder: string; checkedAt: number; value: boolean } | null>(null)
+
+  const buildDashboardFallbackStatus = useCallback((): IndexStatus => ({
+    needsIndex: true,
+    reason: 'dashboard_reindex',
+    newFiles: [],
+    modifiedFiles: [],
+    message: 'Dashboard indicates this case needs an index refresh.',
+  }), [])
+
+  const checkDashboardNeedsReindex = useCallback(async (): Promise<boolean> => {
+    if (!firmRoot) return false
+    const now = Date.now()
+    const cached = dashboardReindexCacheRef.current
+    if (cached && cached.caseFolder === caseFolder && now - cached.checkedAt < 30000) {
+      return cached.value
+    }
+
+    const normalizePath = (value: string) =>
+      value.replace(/\\/g, '/').replace(/\/+$/, '')
+
+    try {
+      const res = await fetch(
+        `${apiUrl}/api/firm/cases?root=${encodeURIComponent(firmRoot)}`
+      )
+      if (!res.ok) {
+        dashboardReindexCacheRef.current = { caseFolder, checkedAt: now, value: false }
+        return false
+      }
+
+      const data = await res.json()
+      const cases = Array.isArray(data?.cases) ? data.cases : []
+      const targetCase = cases.find((item: any) =>
+        typeof item?.path === 'string' && normalizePath(item.path) === normalizePath(caseFolder)
+      )
+      const value = !!targetCase?.needsReindex
+      dashboardReindexCacheRef.current = { caseFolder, checkedAt: now, value }
+      return value
+    } catch {
+      dashboardReindexCacheRef.current = { caseFolder, checkedAt: now, value: false }
+      return false
+    }
+  }, [apiUrl, caseFolder, firmRoot])
 
   const checkIndexStatus = useCallback(async () => {
     const requestId = ++indexStatusRequestIdRef.current
     try {
-      const res = await fetch(`${apiUrl}/api/files/index-status?case=${encodeURIComponent(caseFolder)}`)
-      const data = await res.json()
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 8000)
+      let res: Response
+      try {
+        res = await fetch(`${apiUrl}/api/files/index-status?case=${encodeURIComponent(caseFolder)}`, {
+          signal: controller.signal,
+        })
+      } finally {
+        clearTimeout(timeout)
+      }
+      let data: any = null
+      try {
+        data = await res.json()
+      } catch {
+        data = null
+      }
+
+      let status: IndexStatus | null =
+        res.ok && data && typeof data.needsIndex === 'boolean'
+          ? data as IndexStatus
+          : null
+
+      // Fallback: if dashboard says the case needs reindex, expose the banner in case view.
+      if (!status || !status.needsIndex) {
+        const needsDashboardReindex = await checkDashboardNeedsReindex()
+        if (needsDashboardReindex || needsReindexHint) {
+          status = buildDashboardFallbackStatus()
+        }
+      }
+
       if (requestId !== indexStatusRequestIdRef.current) return
-      setIndexStatus(data)
+      setIndexStatus(status)
     } catch {
-      // Ignore
+      // If index-status fails, still try dashboard summary so the user can reindex.
+      const needsDashboardReindex = await checkDashboardNeedsReindex()
+      if (requestId !== indexStatusRequestIdRef.current) return
+      setIndexStatus((needsDashboardReindex || needsReindexHint) ? buildDashboardFallbackStatus() : null)
     }
-  }, [apiUrl, caseFolder])
+  }, [apiUrl, caseFolder, checkDashboardNeedsReindex, buildDashboardFallbackStatus, needsReindexHint])
+
+  useEffect(() => {
+    if (needsReindexHint) {
+      setIndexStatus(prev => {
+        if (prev?.needsIndex) return prev
+        return buildDashboardFallbackStatus()
+      })
+      return
+    }
+    // Hint cleared: refresh status immediately so stale banner drops without waiting for a manual refresh.
+    void checkIndexStatus()
+  }, [needsReindexHint, buildDashboardFallbackStatus, checkIndexStatus])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -400,14 +488,24 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
 
   useEffect(() => {
     if (!caseFolder) return
-    checkIndexStatus()
-    const interval = setInterval(checkIndexStatus, 30000)
-    return () => clearInterval(interval)
+    void checkIndexStatus()
+  }, [caseFolder, checkIndexStatus])
+
+  useEffect(() => {
+    if (!caseFolder) return
+
+    const handleFocus = () => {
+      void checkIndexStatus()
+    }
+
+    window.addEventListener('focus', handleFocus)
+    return () => window.removeEventListener('focus', handleFocus)
   }, [caseFolder, checkIndexStatus])
 
   useEffect(() => {
     const nowReindexing = !!isReindexing
     if (wasReindexingRef.current && !nowReindexing && caseFolder) {
+      dashboardReindexCacheRef.current = null
       checkIndexStatus()
       onIndexMayHaveChanged?.()
     }
@@ -421,6 +519,11 @@ export default function Chat({ caseFolder, apiUrl, onViewUpdate, initialPrompt, 
 
   const runReindex = async (forceFullReindex = false) => {
     if (onStartReindex) {
+      if (!forceFullReindex && (indexStatus?.reason === 'dashboard_reindex' || needsReindexHint)) {
+        // files/index-status could not enumerate deltas, so trigger a full refresh.
+        onStartReindex(true)
+        return
+      }
       // Delegate to App-level indexing (survives navigation)
       onStartReindex(forceFullReindex)
       return

@@ -130,7 +130,7 @@ export default function TodoDrawer({
                   </div>
                   <p className="text-brand-600 font-medium">Generating tasks...</p>
                   <p className="text-sm text-brand-400 mt-1">
-                    Analyzing your case portfolio
+                    Analyzing your client portfolio
                   </p>
                   <div className="mt-4 flex gap-1.5">
                     <span className="w-2 h-2 bg-accent-400 rounded-full animate-bounce" />
@@ -146,7 +146,7 @@ export default function TodoDrawer({
                   </div>
                   <p className="text-accent-600 font-medium">All Caught Up!</p>
                   <p className="text-sm text-brand-400 mt-1">
-                    No pending tasks for your portfolio
+                    No pending tasks for your client portfolio
                   </p>
                   {onGenerateTasks && (
                     <button
@@ -166,7 +166,7 @@ export default function TodoDrawer({
                   </div>
                   <p className="text-brand-600 font-medium">No tasks yet</p>
                   <p className="text-sm text-brand-400 mt-1">
-                    Generate tasks from your case portfolio
+                    Generate tasks from your client portfolio
                   </p>
                   {onGenerateTasks && (
                     <button

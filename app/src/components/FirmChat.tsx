@@ -93,12 +93,12 @@ const BookmarkIcon = () => (
 
 // Quick actions for firm-level analysis
 const quickActions = [
-  { label: 'Portfolio Overview', prompt: 'Give me a portfolio overview with key metrics', icon: ChartBarIcon },
-  { label: 'SOL Alerts', prompt: 'Which cases have statute of limitations deadlines approaching in the next 90 days?', icon: ExclamationTriangleIcon },
-  { label: 'Generate Tasks', prompt: 'Generate a prioritized task list based on case deadlines and status', icon: ClipboardDocumentListIcon },
-  { label: 'Phase Distribution', prompt: 'Show me the distribution of cases by phase', icon: ListBulletIcon },
-  { label: 'Financial Summary', prompt: 'Summarize total medical specials and compare to policy limits', icon: CurrencyDollarIcon },
-  { label: 'Stale Cases', prompt: 'Which cases might need attention based on their phase and how long they have been there?', icon: ClockIcon },
+  { label: 'Portfolio Overview', prompt: 'Give me a portfolio overview with key metrics and care coordination risks', icon: ChartBarIcon },
+  { label: 'Upcoming Dates', prompt: 'Which client records have important dates coming up in the next 30 days?', icon: ExclamationTriangleIcon },
+  { label: 'Generate Tasks', prompt: 'Generate a prioritized elder care coordination task list based on upcoming appointments, follow-ups, and care-plan needs', icon: ClipboardDocumentListIcon },
+  { label: 'Stage Distribution', prompt: 'Show me the distribution of client records by phase', icon: ListBulletIcon },
+  { label: 'Cost Summary', prompt: 'Summarize tracked charges and any coverage or benefits signals across the portfolio', icon: CurrencyDollarIcon },
+  { label: 'Needs Follow-up', prompt: 'Which client records look stale or need follow-up based on phase and recent activity?', icon: ClockIcon },
 ]
 
 // Memoized message component
@@ -331,7 +331,7 @@ export default function FirmChat({ apiUrl, firmRoot, scope, onTodosUpdated, init
         // Add a confirmation message
         setMessages((prev) => [
           ...prev,
-          { role: 'assistant', content: `Saved ${todos.length} tasks to your firm todo list.` },
+          { role: 'assistant', content: `Saved ${todos.length} tasks to your workspace task list.` },
         ])
       }
     } catch (error) {
@@ -354,7 +354,7 @@ export default function FirmChat({ apiUrl, firmRoot, scope, onTodosUpdated, init
               <span className="text-brand-400">New conversation</span>
             )}
             <span className="text-brand-300 mx-2">|</span>
-            <span className="text-accent-600 font-medium">Firm-level Analysis</span>
+            <span className="text-accent-600 font-medium">Care Coordination Analysis</span>
           </div>
           {chatHistory.length > 0 && (
             <button
@@ -388,14 +388,14 @@ export default function FirmChat({ apiUrl, firmRoot, scope, onTodosUpdated, init
       <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6 bg-surface-50">
         {messages.length === 0 && (
           <div className="text-center py-12">
-            <div className="w-16 h-16 rounded-full bg-accent-100 flex items-center justify-center mx-auto mb-4">
-              <ChartBarIcon />
-            </div>
-            <p className="text-lg font-medium text-brand-700">Firm-Level Case Analysis</p>
-            <p className="text-sm text-brand-400 mt-1">
-              Ask about your portfolio, deadlines, or generate task lists
-            </p>
+          <div className="w-16 h-16 rounded-full bg-accent-100 flex items-center justify-center mx-auto mb-4">
+            <ChartBarIcon />
           </div>
+          <p className="text-lg font-medium text-brand-700">Care Coordination Workspace</p>
+          <p className="text-sm text-brand-400 mt-1">
+            Ask about client status, upcoming care needs, or generate task lists
+          </p>
+        </div>
         )}
 
         {messages.map((msg, i) => (
@@ -440,7 +440,7 @@ export default function FirmChat({ apiUrl, firmRoot, scope, onTodosUpdated, init
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage()}
-            placeholder="Ask about your case portfolio..."
+            placeholder="Ask about your client portfolio..."
             className="flex-1 border border-surface-200 rounded-xl px-4 py-3 text-sm
                        placeholder:text-brand-400 focus:outline-none focus:ring-2
                        focus:ring-accent-500 focus:border-transparent transition-shadow"

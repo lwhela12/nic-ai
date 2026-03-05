@@ -40,6 +40,13 @@ import {
 } from "./density-prompts";
 
 import {
+  loadPersistentMemory,
+  addMemoryEntry,
+  shouldSearchArchives,
+  searchArchives,
+} from "./memory";
+
+import {
   executeTool,
   normalizeDocumentsInput,
   canonicalizePacketDocumentsFromIndex,
@@ -158,13 +165,16 @@ export async function* densityChat(
   let resultFilePath: string | undefined;
 
   try {
-    // Load meta-index for context
-    const metaIndex = await loadMetaIndex(caseFolder);
+    // Load meta-index and persistent memory in parallel
+    const [metaIndex, persistentMemory] = await Promise.all([
+      loadMetaIndex(caseFolder),
+      loadPersistentMemory(caseFolder),
+    ]);
     const metaIndexSummary = buildMetaIndexSummary(metaIndex);
 
-    // Step 1: Classify intent
+    // Step 1: Classify intent (include persistent memory so classifier knows instructions)
     yield { type: "status", content: "Classifying intent..." };
-    const intent = await classifyIntent(message, metaIndexSummary, history, usage);
+    const intent = await classifyIntent(message, metaIndexSummary, history, usage, persistentMemory);
     console.log(`[density] Intent: ${intent.intent} (${intent.confidence}) — ${intent.reasoning}`);
 
     // Step 2: Dispatch based on intent
@@ -172,7 +182,7 @@ export async function* densityChat(
 
     switch (intent.intent) {
       case "answer": {
-        generator = runQAPipeline(caseFolder, intent.params.question || message, metaIndex, metaIndexSummary, usage, history);
+        generator = runQAPipeline(caseFolder, intent.params.question || message, metaIndex, metaIndexSummary, usage, history, persistentMemory);
         break;
       }
       case "generate_document": {
@@ -181,7 +191,19 @@ export async function* densityChat(
           intent.params.doc_type || "action_plan",
           intent.params.instructions || message,
           usage,
+          persistentMemory,
         );
+        break;
+      }
+      case "remember": {
+        const content = intent.params.content || message;
+        const scope = intent.params.scope === "firm" ? "firm" : "case";
+        await addMemoryEntry(
+          caseFolder,
+          { content, category: "instruction", source: "user" },
+          scope,
+        );
+        yield { type: "text", content: `Got it — I'll remember that${scope === "firm" ? " across all cases" : " for this case"}. "${content}"` };
         break;
       }
       case "clarify": {
@@ -225,8 +247,12 @@ async function classifyIntent(
   metaIndexSummary: string,
   history: ChatMessage[],
   usage: UsageAccumulator,
+  persistentMemory?: string,
 ): Promise<ClassifiedIntent> {
-  const systemPrompt = buildIntentClassifierPrompt(metaIndexSummary);
+  let systemPrompt = buildIntentClassifierPrompt(metaIndexSummary);
+  if (persistentMemory) {
+    systemPrompt += `\n\n## Persistent Memory (instructions & preferences)\n${persistentMemory}`;
+  }
 
   // Include recent history for context
   const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
@@ -289,6 +315,7 @@ async function* runQAPipeline(
   metaIndexSummary: string,
   usage: UsageAccumulator,
   history: ChatMessage[] = [],
+  persistentMemory: string = "",
 ): AsyncGenerator<DensityChatEvent> {
   const formattedHistory = formatHistoryForPrompt(history);
   yield { type: "status", content: "Routing to relevant folders..." };
@@ -442,7 +469,21 @@ async function* runQAPipeline(
     memory += folderContext;
   }
 
-  // Step 4: Answer — includes global dataset summary for birds-eye context
+  // Step 4: On-demand archive recall (Layer 2)
+  let archiveContext = "";
+  if (persistentMemory || memory) {
+    try {
+      const needsArchive = await shouldSearchArchives(question, memory, persistentMemory, usage);
+      if (needsArchive) {
+        yield { type: "status", content: "Searching archived conversations..." };
+        archiveContext = await searchArchives(caseFolder, question, usage);
+      }
+    } catch (err) {
+      console.warn("[density] Archive recall failed:", err);
+    }
+  }
+
+  // Step 5: Answer — includes global dataset summary for birds-eye context
   yield { type: "status", content: "Composing answer..." };
 
   const firmRoot = dirname(caseFolder);
@@ -450,10 +491,19 @@ async function* runQAPipeline(
   const caseContext = await buildCompactCaseContext(caseFolder);
   const datasetSummary = buildDatasetSummary(metaIndex);
 
-  // Prepend dataset summary to memory so answerer has global context
-  const fullContext = datasetSummary
-    ? `## Dataset Overview\n${datasetSummary}\n\n${memory}`
-    : memory;
+  // Build full context: persistent memory (firm first) → dataset → archive recall → document memory
+  const contextParts: string[] = [];
+  if (persistentMemory) {
+    contextParts.push(`## Persistent Memory\n${persistentMemory}`);
+  }
+  if (datasetSummary) {
+    contextParts.push(`## Dataset Overview\n${datasetSummary}`);
+  }
+  if (archiveContext) {
+    contextParts.push(`## Recalled from Prior Conversations\n${archiveContext}`);
+  }
+  contextParts.push(memory);
+  const fullContext = contextParts.filter(Boolean).join("\n\n");
 
   const answerResult = await groqChat({
     messages: [
@@ -478,6 +528,7 @@ async function* densityGenerateDocument(
   docType: string,
   userInstructions: string,
   usage: UsageAccumulator,
+  persistentMemory: string = "",
 ): AsyncGenerator<DensityChatEvent> {
   const firmRoot = dirname(caseFolder);
   const validDocType = validateDocType(docType);
@@ -626,11 +677,15 @@ async function* densityGenerateDocument(
   // Phase 2: Compose with Groq
   yield { type: "status", content: "Drafting document..." };
 
-  const firmContext = [
+  const firmContextParts = [
     firmConfig.firmName ? `Firm: ${firmConfig.firmName}` : "",
     firmConfig.address ? `Address: ${firmConfig.address}` : "",
     firmConfig.phone ? `Phone: ${firmConfig.phone}` : "",
-  ].filter(Boolean).join("\n");
+  ].filter(Boolean);
+  if (persistentMemory) {
+    firmContextParts.push(`\n${persistentMemory}`);
+  }
+  const firmContext = firmContextParts.join("\n");
 
   // Apply budget constraints
   const budgeted = applyComposeBudget(

@@ -57,6 +57,7 @@ import { requireCaseAccess, requireFirmAccess } from "../lib/team-access";
 import { formatDateYYYYMMDD, parseFlexibleDate } from "../lib/date-format";
 import { buildDocumentId } from "../lib/document-id";
 import { loadFirmTodos, saveFirmTodosWithMemory } from "../lib/task-store";
+import { shouldIgnoreFile } from "../lib/file-ignore";
 
 // ============================================================================
 // Usage Reporting
@@ -133,6 +134,16 @@ function getClient(): Anthropic {
 }
 
 const app = new Hono();
+const REINDEX_DEBUG = process.env.REINDEX_DEBUG !== "false";
+
+function reindexLog(scope: string, payload: Record<string, unknown>) {
+  if (!REINDEX_DEBUG) return;
+  try {
+    console.log(`[reindex-debug][${scope}] ${JSON.stringify(payload)}`);
+  } catch {
+    console.log(`[reindex-debug][${scope}]`, payload);
+  }
+}
 
 
 // Practice guide loading now handled by knowledge.ts
@@ -506,6 +517,150 @@ const SYNTHESIS_SCHEMA_WC = {
   ] as const
 };
 
+// Elder Care synthesis schema
+const SYNTHESIS_SCHEMA_EC = {
+  type: "object" as const,
+  properties: {
+    needs_review: {
+      type: "array" as const,
+      description: "Fields requiring human review due to conflicts or uncertainty",
+      items: {
+        type: "object" as const,
+        properties: {
+          field: { type: "string" as const, description: "Field name or path" },
+          conflicting_values: {
+            type: "array" as const,
+            items: { type: "string" as const },
+            description: "Different values found"
+          },
+          sources: {
+            type: "array" as const,
+            items: { type: "string" as const },
+            description: "Source documents for each value"
+          },
+          reason: { type: "string" as const, description: "Why this needs human review" }
+        },
+        required: ["field", "conflicting_values", "sources", "reason"] as const
+      }
+    },
+    errata: {
+      type: "array" as const,
+      description: "Documentation of decisions made during synthesis",
+      items: {
+        type: "object" as const,
+        properties: {
+          field: { type: "string" as const, description: "Field that was resolved" },
+          decision: { type: "string" as const, description: "Value chosen" },
+          evidence: { type: "string" as const, description: "What the extractions showed" },
+          confidence: { type: "string" as const, enum: ["high", "medium", "low"] }
+        },
+        required: ["field", "decision", "evidence", "confidence"] as const
+      }
+    },
+    case_analysis: {
+      type: "string" as const,
+      description: "Substantive elder care coordination analysis: care needs, risk indicators, support gaps, and next steps"
+    },
+    care_risk_level: {
+      type: "string" as const,
+      enum: ["low", "moderate", "high"],
+      description: "Overall care coordination risk level"
+    },
+    care_coordination_priority: {
+      type: "string" as const,
+      enum: ["routine", "soon", "urgent"],
+      description: "How quickly coordination action is needed"
+    },
+    summary: {
+      type: "object" as const,
+      description: "Client summary fields for elder care coordination",
+      properties: {
+        client: { type: "string" as const, description: "Client's full name" },
+        incident_date: { type: "string" as const, description: "Primary anchor date if known (appointment/review/incident)" },
+        dob: { type: "string" as const, description: "Client's date of birth" },
+        providers: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: "List of provider, caregiver, or facility names"
+        },
+        total_charges: { type: "number" as const, description: "Total tracked charges in dollars" },
+        contact: {
+          type: "object" as const,
+          properties: {
+            phone: { type: "string" as const },
+            email: { type: "string" as const },
+            address: {
+              type: "object" as const,
+              properties: {
+                street: { type: "string" as const },
+                city: { type: "string" as const },
+                state: { type: "string" as const },
+                zip: { type: "string" as const }
+              }
+            }
+          }
+        },
+        health_insurance: {
+          type: "object" as const,
+          properties: {
+            carrier: { type: "string" as const },
+            group_no: { type: "string" as const },
+            member_no: { type: "string" as const }
+          }
+        },
+        case_summary: { type: "string" as const, description: "Brief narrative summary of current care coordination status" },
+        care_goals: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: "Top care goals identified from records"
+        },
+        key_needs: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: "Primary care/support needs requiring coordination"
+        },
+        next_steps: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: "Recommended next actions"
+        }
+      },
+      required: ["client", "providers", "total_charges", "case_summary"] as const
+    },
+    case_name: {
+      type: "string" as const,
+      description: "Client record label (typically 'LASTNAME, Firstname')"
+    },
+    case_phase: {
+      type: "string" as const,
+      enum: [
+        "Intake",
+        "Investigation",
+        "Treatment",
+        "Demand",
+        "Negotiation",
+        "Settlement",
+        "Complete",
+        "MMI Evaluation",
+        "Benefits Resolution",
+        "Settlement/Hearing",
+        "Closed"
+      ],
+      description: "Current coordination phase"
+    }
+  },
+  required: [
+    "needs_review",
+    "errata",
+    "case_analysis",
+    "care_risk_level",
+    "care_coordination_priority",
+    "summary",
+    "case_name",
+    "case_phase"
+  ] as const
+};
+
 /**
  * Get the appropriate synthesis schema based on practice area.
  */
@@ -513,7 +668,13 @@ function getSynthesisSchema(practiceArea?: string) {
   if (practiceArea === PRACTICE_AREAS.WC) {
     return SYNTHESIS_SCHEMA_WC;
   }
-  return SYNTHESIS_SCHEMA_PI;
+  if (practiceArea === PRACTICE_AREAS.PI) {
+    return SYNTHESIS_SCHEMA_PI;
+  }
+  if (practiceArea === PRACTICE_AREAS.EC) {
+    return SYNTHESIS_SCHEMA_EC;
+  }
+  return SYNTHESIS_SCHEMA_EC;
 }
 
 interface CaseSummary {
@@ -678,6 +839,11 @@ async function buildCaseSummary(
     // Check if needs reindex — skip for year-based dashboard loads (expensive)
     if (!options?.yearRegistry) {
       caseSummary.needsReindex = await checkNeedsReindex(casePath, indexStats.mtimeMs);
+      reindexLog("firm:build_case_summary_reindex", {
+        casePath,
+        indexedAtEpochMs: indexStats.mtimeMs,
+        needsReindex: !!caseSummary.needsReindex,
+      });
     }
 
   } catch {
@@ -806,6 +972,12 @@ app.get("/cases", async (c) => {
   try {
     // Check for year-based folder structure (2024/, 2025/, etc.)
     const yearMode = await detectYearBasedMode(root);
+    reindexLog("firm:cases_start", {
+      root,
+      vfs: getVfs().name,
+      yearMode,
+      practiceArea,
+    });
     if (yearMode) {
       let registry = await loadClientRegistry(root);
       if (!registry) {
@@ -839,6 +1011,12 @@ app.get("/cases", async (c) => {
       });
 
       const indexedCount = cases.filter((c) => c.indexed).length;
+      reindexLog("firm:cases_year_mode_result", {
+        root,
+        totalCases: cases.length,
+        indexedCount,
+        needsReindexCount: cases.filter((c) => c.needsReindex).length,
+      });
 
       return c.json({
         root,
@@ -948,6 +1126,17 @@ app.get("/cases", async (c) => {
       ? sortedCases.filter((c: any) => c.openHearings && c.openHearings.length > 0).length
       : sortedCases.filter((c: any) => c.solDaysRemaining !== undefined && c.solDaysRemaining <= 90).length;
 
+    reindexLog("firm:cases_result", {
+      root,
+      totalCases: sortedCases.length,
+      indexedCount,
+      needsReindexCount: sortedCases.filter((c: any) => !c.isContainer && !!c.needsReindex).length,
+      needsReindexCases: sortedCases
+        .filter((c: any) => !c.isContainer && !!c.needsReindex)
+        .slice(0, 10)
+        .map((c: any) => ({ path: c.path, name: c.name })),
+    });
+
     return c.json({
       root,
       practiceArea,
@@ -960,6 +1149,10 @@ app.get("/cases", async (c) => {
     });
   } catch (error) {
     console.error("Firm cases error:", error);
+    reindexLog("firm:cases_error", {
+      root,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return c.json({ error: "Could not read firm directory" }, 500);
   }
 });
@@ -1166,12 +1359,55 @@ EXTRACTION PRIORITIES:
 
 Always call the extract_document tool with your findings.`;
 
+// Elder Care extraction prompt
+const EC_EXTRACTION_PROMPT = `You are a document extraction agent for an elder care coordination workspace.
+
+YOUR TASK: Analyze the provided document text and extract key information using the extract_document tool.
+
+DOCUMENT TYPES (use for the "type" field):
+- intake_form: Client intake, profile details, emergency contacts
+- care_plan: Care plan, support plan, service plan, reassessment notes
+- medical_record: Clinical records, provider notes, discharge summaries
+- medication_list: Medication lists, MAR sheets, refill notes
+- appointment_note: Visit summaries, appointment instructions, referrals
+- benefits_notice: Medicare/Medicaid/Social Security/VA notices
+- billing_statement: Provider/facility billing or payment statements
+- correspondence: Emails/letters with family, facilities, or providers
+- authorization: HIPAA releases, consent forms, POA documentation
+- identification: ID documents and eligibility verification
+- facility_document: Assisted living, nursing facility, or home care documents
+- incident_report: Fall reports, safety incidents, wellness concerns
+- other: Anything that doesn't fit above
+
+EXTRACTION PRIORITIES:
+1. Client name, DOB, contact info, and emergency contacts
+2. Key dates (appointment date, review date, renewal date, incident date)
+3. Document date (issued/signed/authored date for this specific document)
+4. Handwriting detection:
+   - Set has_handwritten_data to true only if substantive extracted values appear handwritten (exclude signature/initial-only markings)
+   - Set handwritten_fields to non-signature extracted field names that appear handwritten
+5. Care coordination details:
+   - Diagnoses, care needs, ADL/IADL support level, mobility or cognitive concerns
+   - Providers/facilities involved and follow-up actions
+6. Benefits/coverage details:
+   - Carrier/program name, IDs, renewal timelines, coverage limitations
+7. Financial details:
+   - Charges, balances, due dates, payment responsibility signals
+8. Risk signals:
+   - Safety concerns, missed care, urgent follow-ups, medication issues
+
+Always call the extract_document tool with your findings.`;
+
 // Function to get the appropriate extraction prompt
 // Loads from practice-areas module (markdown files) with fallback to hardcoded prompts
 function getFileExtractionSystemPrompt(practiceArea?: string): string {
   const config = practiceArea === PRACTICE_AREAS.WC
     ? practiceAreaRegistry.get("WC")
-    : practiceAreaRegistry.getDefault();
+    : practiceArea === PRACTICE_AREAS.PI
+      ? practiceAreaRegistry.get("PI")
+      : practiceArea === PRACTICE_AREAS.EC
+        ? practiceAreaRegistry.get("EC")
+        : practiceAreaRegistry.getDefault();
 
   // Use loaded prompt from markdown file if available, otherwise fall back to hardcoded
   if (config?.extractionPrompt) {
@@ -1180,7 +1416,9 @@ function getFileExtractionSystemPrompt(practiceArea?: string): string {
 
   // Fallback to hardcoded prompts during migration
   if (practiceArea === PRACTICE_AREAS.WC) return WC_EXTRACTION_PROMPT;
-  return PI_EXTRACTION_PROMPT;
+  if (practiceArea === PRACTICE_AREAS.PI) return PI_EXTRACTION_PROMPT;
+  if (practiceArea === PRACTICE_AREAS.EC) return EC_EXTRACTION_PROMPT;
+  return EC_EXTRACTION_PROMPT;
 }
 
 // PI fallback extraction prompt (agent reads file with tools)
@@ -1320,12 +1558,66 @@ IMPORTANT:
 - For all other files: use the Read tool directly
 - If a file cannot be read or parsed, return the JSON with key_info explaining the issue`;
 
+// Elder Care fallback extraction prompt (agent reads file with tools)
+const EC_EXTRACTION_PROMPT_WITH_TOOLS = `You are a document extraction agent for an elder care coordination workspace.
+
+YOUR TASK: Read ONE document and extract key information.
+
+DOCUMENT TYPES:
+- intake_form: Client profile and onboarding info
+- care_plan: Care or support plans
+- medical_record: Clinical notes and treatment records
+- medication_list: Medication list, refill data, MAR details
+- appointment_note: Appointment or follow-up notes
+- benefits_notice: Medicare/Medicaid/VA/Social Security notices
+- billing_statement: Charges, balances, due dates
+- correspondence: Messages with family, providers, or facilities
+- authorization: Consents, HIPAA forms, POA paperwork
+- identification: Identity or eligibility documents
+- facility_document: Facility admission/discharge/care paperwork
+- incident_report: Falls, safety issues, urgent events
+- other: Anything that doesn't fit above
+
+EXTRACTION FOCUS:
+- Client identity and contact information
+- Key document dates (document date + follow-up/review dates when present)
+- Care needs, risk flags, and next-step recommendations
+- Provider/facility names and roles
+- Coverage/benefit details and renewal markers
+- Charges, balances, and payment responsibility signals
+- Handwriting detection:
+  * has_handwritten_data: true when substantive extracted values appear handwritten (exclude signature/initial-only markings), else false
+  * handwritten_fields: array of non-signature extracted field names that appear handwritten (use [] when none)
+
+OUTPUT FORMAT - Return ONLY valid JSON:
+{
+  "filename": "<exact filename>",
+  "folder": "<folder name>",
+  "type": "<document_type from list above>",
+  "key_info": "<2-3 sentence summary of most important information>",
+  "has_handwritten_data": false,
+  "handwritten_fields": [],
+  "extracted_data": {
+    // Include any specific data points found
+  }
+}
+
+IMPORTANT:
+- Return ONLY the JSON object, no markdown, no explanation
+- For PDFs: prefer the Read tool directly (cross-platform). If needed, run: pdftotext "filename" -
+- For all other files: use the Read tool directly
+- If a file cannot be read or parsed, return the JSON with key_info explaining the issue`;
+
 // Function to get the appropriate fallback extraction prompt
 // Loads from practice-areas module (markdown files) with fallback to hardcoded prompts
 function getFileExtractionSystemPromptWithTools(practiceArea?: string): string {
   const config = practiceArea === PRACTICE_AREAS.WC
     ? practiceAreaRegistry.get("WC")
-    : practiceAreaRegistry.getDefault();
+    : practiceArea === PRACTICE_AREAS.PI
+      ? practiceAreaRegistry.get("PI")
+      : practiceArea === PRACTICE_AREAS.EC
+        ? practiceAreaRegistry.get("EC")
+        : practiceAreaRegistry.getDefault();
 
   // Use loaded prompt from markdown file if available, otherwise fall back to hardcoded
   if (config?.extractionPromptWithTools) {
@@ -1334,7 +1626,9 @@ function getFileExtractionSystemPromptWithTools(practiceArea?: string): string {
 
   // Fallback to hardcoded prompts during migration
   if (practiceArea === PRACTICE_AREAS.WC) return WC_EXTRACTION_PROMPT_WITH_TOOLS;
-  return PI_EXTRACTION_PROMPT_WITH_TOOLS;
+  if (practiceArea === PRACTICE_AREAS.PI) return PI_EXTRACTION_PROMPT_WITH_TOOLS;
+  if (practiceArea === PRACTICE_AREAS.EC) return EC_EXTRACTION_PROMPT_WITH_TOOLS;
+  return EC_EXTRACTION_PROMPT_WITH_TOOLS;
 }
 
 // Build synthesis system prompt for JSON output (used with direct API call)
@@ -1342,7 +1636,90 @@ async function buildSynthesisSystemPrompt(firmRoot?: string, practiceArea?: stri
   const practiceKnowledge = await loadSectionsByIds(firmRoot, SYNTHESIS_SECTION_IDS);
   const indexSchema = await loadIndexSchema();
   const phaseRules = getPhaseRules(practiceArea);
+  const isEC = !practiceArea || practiceArea === PRACTICE_AREAS.EC;
   const isWC = practiceArea === PRACTICE_AREAS.WC;
+
+  if (isEC) {
+    return `You are a case analyst and summarizer for an elder care coordination workspace.
+
+You will receive:
+1. document_index.json - Data extracted from all client documents
+2. hypergraph_analysis.json - Cross-document analysis showing consensus values and conflicts
+
+YOUR JOB: Analyze the client record substantively and return a JSON synthesis. Do NOT make any tool calls.
+
+## PRACTICE KNOWLEDGE
+
+${practiceKnowledge}
+
+## CANONICAL INDEX SCHEMA
+
+${indexSchema}
+
+## ANALYSIS WORKFLOW:
+
+1. **Care Coordination Analysis** — assess:
+   - Current care/support needs and urgency
+   - Health/safety risk indicators
+   - Coverage/benefits or financial risks
+   - Missing or stale documentation that blocks coordination
+
+2. Use hypergraph consensus values where available.
+
+3. Build a concise summary with:
+   - Contact and coverage details (when available)
+   - Provider/facility list
+   - Key needs and next steps for coordination
+
+4. Document ALL judgment calls in "errata".
+
+5. Put unresolved conflicts in "needs_review" (especially any field marked UNCERTAIN by hypergraph).
+
+## CRITICAL: HANDLING HYPERGRAPH CONFLICTS
+
+When hypergraph shows consensus: "UNCERTAIN", you MUST:
+1. Add the conflict to needs_review with values and sources
+2. Not silently pick one value as final truth
+3. Use best-effort placeholders in summary when needed
+
+## ERRATA - Document ALL decisions
+
+Every resolved field should have an errata entry:
+{
+  "field": "<what field>",
+  "decision": "<value you used>",
+  "evidence": "<what the extractions showed>",
+  "confidence": "high|medium|low"
+}
+
+## PHASE RULES:
+${Object.entries(phaseRules).map(([phase, desc]) => `- ${phase}: ${desc}`).join('\n')}
+
+## OUTPUT FORMAT
+
+Return a JSON object with these fields:
+- needs_review: Array of conflicts requiring human review
+- errata: Array of documented decisions
+- case_analysis: String with substantive care coordination analysis
+- care_risk_level: "low" | "moderate" | "high"
+- care_coordination_priority: "routine" | "soon" | "urgent"
+- summary: Object with:
+  - client: Client name
+  - incident_date: Best anchor date (appointment/review/incident) when available
+  - dob: Date of birth
+  - providers: Array of provider/facility names
+  - total_charges: Total tracked charges
+  - contact: { phone, email, address }
+  - health_insurance: { carrier, group_no, member_no }
+  - case_summary: Brief narrative summary
+  - care_goals: Array of key goals
+  - key_needs: Array of top needs
+  - next_steps: Array of recommended actions
+- case_name: e.g. "LASTNAME, Firstname"
+- case_phase: Choose from the allowed phase list
+
+**IMPORTANT**: You MUST include needs_review and errata arrays. Empty arrays only if truly zero conflicts.`;
+  }
 
   if (isWC) {
     return `You are a case analyst and summarizer for a Workers' Compensation law firm in Nevada.
@@ -1785,6 +2162,8 @@ interface ClassifiedFile {
   filename: string;
   folder: string;
   fullPath: string;
+  mimeType?: string;
+  isGoogleWorkspace: boolean;
   useText: boolean;       // true = text extraction (GPT-OSS), false = vision (Scout/Maverick)
   isPdf: boolean;
   isImage: boolean;       // true for standalone image files (jpg, png, tiff, etc.)
@@ -1798,8 +2177,9 @@ async function classifyFile(
   yearModeInfo?: { firmRoot: string; registry: ClientRegistry; slug: string },
 ): Promise<ClassifiedFile> {
   const filename = filePath.split('/').pop() || filePath;
-  const isPdf = filename.toLowerCase().endsWith(".pdf");
-  const isImage = isImageFile(filename);
+  const lowerName = filename.toLowerCase();
+  const isPdfByName = lowerName.endsWith(".pdf");
+  const isImageByName = isImageFile(filename);
   const rawFolder = dirname(filePath).replace(/\\/g, '/');
   const folder = rawFolder === '.' ? '.' : rawFolder;
 
@@ -1813,10 +2193,24 @@ async function classifyFile(
   }
 
   let fileSizeMB = 0;
+  let mimeType: string | undefined;
+  let isGoogleWorkspace = false;
+  let isPdf = isPdfByName;
+  let isImage = isImageByName;
   try {
     const vfs = getVfs();
     const fileStats = await vfs.stat(fullPath);
     fileSizeMB = (fileStats.size || 0) / (1024 * 1024);
+    mimeType = typeof (fileStats as FileStats).mimeType === "string"
+      ? (fileStats as FileStats).mimeType.toLowerCase()
+      : undefined;
+
+    isPdf = isPdfByName || mimeType === "application/pdf";
+    isImage = isImageByName || (!!mimeType && mimeType.startsWith("image/"));
+    isGoogleWorkspace = !!mimeType
+      && mimeType.startsWith("application/vnd.google-apps.")
+      && mimeType !== "application/vnd.google-apps.folder"
+      && mimeType !== "application/vnd.google-apps.shortcut";
   } catch {
     // File not found — will be caught during extraction
     return {
@@ -1824,6 +2218,8 @@ async function classifyFile(
       filename,
       folder,
       fullPath,
+      mimeType: undefined,
+      isGoogleWorkspace: false,
       useText: false,
       isPdf,
       isImage,
@@ -1836,12 +2232,22 @@ async function classifyFile(
   let extractedText = '';
   let useText = false;
   try {
-    extractedText = await extractTextFromFile(fullPath);
+    extractedText = await extractTextFromFile(fullPath, { mimeType });
     useText = extractedText.length > 50 &&
       !extractedText.startsWith('[Could not') &&
       !extractedText.startsWith('[Binary file');
   } catch {
     // Text extraction failed — will use vision
+  }
+
+  // Vision only supports PDFs/images. Route every non-visual file through text extraction.
+  if (!isPdf && !isImage) {
+    useText = true;
+  }
+
+  // Google Workspace files may have very short text but should never be sent to vision skip path.
+  if (isGoogleWorkspace) {
+    useText = true;
   }
 
   // Truncate if too long to avoid token limits
@@ -1850,7 +2256,19 @@ async function classifyFile(
     extractedText = extractedText.slice(0, MAX_CHARS) + '\n\n[... truncated ...]';
   }
 
-  return { filePath, filename, folder, fullPath, useText, isPdf, isImage, extractedText, fileSizeMB };
+  return {
+    filePath,
+    filename,
+    folder,
+    fullPath,
+    mimeType,
+    isGoogleWorkspace,
+    useText,
+    isPdf,
+    isImage,
+    extractedText,
+    fileSizeMB
+  };
 }
 
 // ============================================================================
@@ -2253,6 +2671,7 @@ Analyze the case and use the case_synthesis tool to return your synthesis.`
 
     // Step 6: Merge synthesis into existing index and write back
     const existingIndex = JSON.parse(documentIndexContent);
+    const isEC = practiceArea === PRACTICE_AREAS.EC;
     const isWC = practiceArea === PRACTICE_AREAS.WC;
 
     // Build merged index with practice-area-aware field extraction
@@ -2310,6 +2729,33 @@ Analyze the case and use the case_synthesis tool to return your synthesis.`
       if (Array.isArray(synthesis.open_hearings) && synthesis.open_hearings.length > 0) {
         merged.open_hearings = synthesis.open_hearings;
       }
+    } else if (isEC) {
+      // Elder care coordination fields
+      merged.care_risk_level = synthesis.care_risk_level || null;
+      merged.care_coordination_priority = synthesis.care_coordination_priority || null;
+      if (Array.isArray(synthesis.summary?.care_goals)) {
+        merged.summary.care_goals = synthesis.summary.care_goals;
+      }
+      if (Array.isArray(synthesis.summary?.key_needs)) {
+        merged.summary.key_needs = synthesis.summary.key_needs;
+      }
+      if (Array.isArray(synthesis.summary?.next_steps)) {
+        merged.summary.next_steps = synthesis.summary.next_steps;
+      }
+      if (synthesis.summary?.incident_date) {
+        merged.summary.incident_date = synthesis.summary.incident_date;
+      }
+      // Remove legal-specific summary judgments for elder care workspaces.
+      merged.liability_assessment = null;
+      merged.injury_tier = null;
+      merged.estimated_value_range = null;
+      merged.policy_limits_demand_appropriate = null;
+      merged.compensability = null;
+      merged.claim_type = null;
+      merged.estimated_ttd_weeks = null;
+      merged.estimated_ppd_rating = null;
+      merged.third_party_potential = null;
+      merged.open_hearings = [];
     } else {
       // PI fields
       merged.liability_assessment = synthesis.liability_assessment || null;
@@ -2365,7 +2811,7 @@ async function listCaseFiles(
           return;
         }
         for (const entry of entries) {
-          if (entry.name === '.ai_tool' || entry.name.startsWith('.')) continue;
+          if (entry.name === '.ai_tool' || entry.name.startsWith('.') || shouldIgnoreFile(entry.name)) continue;
           const fullPath = join(dir, entry.name);
           const relativePath = base ? `${base}/${entry.name}` : entry.name;
           if (entry.isDirectory()) {
@@ -2393,7 +2839,7 @@ async function listCaseFiles(
     const entries = await vfs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       // Skip .ai_tool entirely
-      if (entry.name === '.ai_tool') continue;
+      if (entry.name === '.ai_tool' || shouldIgnoreFile(entry.name)) continue;
 
       const fullPath = join(dir, entry.name);
       const relativePath = base ? `${base}/${entry.name}` : entry.name;
@@ -3642,7 +4088,7 @@ async function checkNeedsReindex(casePath: string, indexedAt: number): Promise<b
       const entries = await localVfsCheckDir.readdir(dir, { withFileTypes: true });
       const results = await Promise.all(
         entries
-          .filter((entry: any) => entry.name !== ".ai_tool")
+          .filter((entry: any) => entry.name !== ".ai_tool" && !shouldIgnoreFile(entry.name))
           .map(async (entry: any) => {
             const fullPath = join(dir, entry.name);
             const isDir = typeof entry.isDirectory === 'function' ? entry.isDirectory() : entry.isDirectory;

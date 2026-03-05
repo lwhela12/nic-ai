@@ -1,12 +1,14 @@
 export interface FileStats {
     mtimeMs: number;
     size: number;
+    mimeType?: string;
     isDirectory(): boolean;
     isFile(): boolean;
 }
 
 export interface VfsDirent {
     name: string;
+    mimeType?: string;
     isDirectory(): boolean;
     isFile(): boolean;
 }

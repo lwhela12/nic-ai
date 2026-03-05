@@ -75,12 +75,11 @@ export default function FolderPicker({ apiUrl, apiPath = '/api/files/browse', on
       const nextCurrent = typeof payload?.current === 'string' ? payload.current : ''
       const nextParent = typeof payload?.parent === 'string' ? payload.parent : nextCurrent
       const nextFolders = Array.isArray(payload?.folders)
-        ? payload.folders.filter((folder: unknown): folder is Folder => (
-          folder
-          && typeof folder === 'object'
-          && typeof folder.name === 'string'
-          && typeof folder.path === 'string'
-        ))
+        ? payload.folders.filter((folder: unknown): folder is Folder => {
+          if (!folder || typeof folder !== 'object') return false
+          const candidate = folder as Record<string, unknown>
+          return typeof candidate.name === 'string' && typeof candidate.path === 'string'
+        })
         : []
 
       setCurrentPath(nextCurrent)
