@@ -130,6 +130,9 @@ export class ServerManager {
       PORT: String(this.port),
       // Subscription server for auth and API key
       CLAUDE_PI_SERVER: "https://claude-pi-five.vercel.app",
+      // Google Drive OAuth credentials
+      GOOGLE_CLIENT_ID: "597542602498-iukka093j9r21olue2gtcpa1l0akngd1.apps.googleusercontent.com",
+      GOOGLE_CLIENT_SECRET: "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",
     };
 
     // Pass the working CLI command to the server

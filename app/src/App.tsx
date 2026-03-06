@@ -811,8 +811,7 @@ function App() {
   const [, setPacketPiiTabActive] = useState(false)
   const [packetState, setPacketState] = useState<PacketState | null>(null)
   const [packetMigrationNotice, setPacketMigrationNotice] = useState<string | null>(null)
-  // Suppress unused-local warnings for deprecated packet state
-  void _evidencePacketTakeover; void _packetPiiTabActive
+
 
   // Sync packet mode to sessionStorage so it survives page reloads (Vite HMR)
   useEffect(() => {
@@ -1292,11 +1291,6 @@ function App() {
     []
   )
 
-  // Packet workflows are currently disabled; keep these handlers compiled for quick re-enable.
-  void handleEnterPacketModeFromAgent
-  void handleEnterPacketModeFromDraft
-  void activePacketPiiResult
-  void handleUpdatePacketPiiResult
 
   // Contact card state
   const [isContactCardOpen, setIsContactCardOpen] = useState(false)
@@ -2449,6 +2443,7 @@ function App() {
         )}
 
         {showKnowledgeInit && <KnowledgeInitModal />}
+        {gdrivePickerOverlay}
       </div>
     )
   }

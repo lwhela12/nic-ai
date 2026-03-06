@@ -4830,12 +4830,89 @@ IMPORTANT:
 - AMW and compensation_rate are CRITICAL for WC - always extract if present
 - If a field appears in only one document, confidence is lower but no conflict`;
 
+// System prompt for hypergraph generation (Haiku) - Elder Care
+const hypergraphSystemPromptEC = `You are a data consistency analyzer for an elder care coordination workspace.
+
+YOUR TASK: Read a document index JSON and build a hypergraph that groups related data points across documents to identify inconsistencies.
+
+HYPERGRAPH STRUCTURE:
+- Each "hyperedge" groups all mentions of a semantic field (e.g., all DOBs, all provider names, all charges for a provider)
+- Nodes within a hyperedge should have the same value if extracted correctly
+- Inconsistencies = nodes in same hyperedge with different values
+
+FIELDS TO TRACK:
+1. client_name - Client's full name
+2. date_of_birth / dob - Client DOB
+3. client_phone / phone - Client phone number
+4. client_email / email - Client email address
+5. client_address / address - Client mailing address
+6. primary_caregiver - Primary caregiver name and contact
+7. emergency_contact - Emergency contact name, relationship, phone
+8. health_insurance - Look for health_insurance object with carrier, group_no, member_no
+   - Output as JSON object: {"carrier": "X", "group_no": "Y", "member_no": "Z"}
+9. providers - Care providers and facilities (doctors, home health, memory care, etc.)
+10. charges - Care charges by provider. Use field name format "charges:Provider Name"
+11. total_charges - Total tracked care charges
+12. medications - Current medications and dosages
+13. diagnoses - Medical diagnoses and conditions
+14. care_needs - Identified care needs (ADLs, IADLs, supervision, etc.)
+15. key_dates - Upcoming appointments, reviews, follow-ups
+16. benefits - Medicare, Medicaid, VA, long-term care insurance details
+
+ANALYSIS RULES:
+1. Normalize values for comparison:
+   - Dates: treat "6/25/2023", "06/25/2023", "6/25/23" as equivalent
+   - Money: treat "$6,558", "6558", "6,558.00" as equivalent
+   - Names: ignore minor variations (case, spacing)
+2. Count how many documents support each value
+3. Majority value = consensus (higher confidence)
+4. Flag outliers with their source documents
+
+HANDLING UNCERTAINTY:
+- If document counts are EQUAL (e.g., 1:1 or 2:2), do NOT declare a consensus. Set consensus to "UNCERTAIN" and confidence to 0.
+- Do NOT guess which document is "more authoritative" or "more recent" - that's not your job.
+- Resolve conflicts where there is clear majority evidence. Identifying uncertainty where it exists is a success condition.
+
+OUTPUT FORMAT - Return ONLY valid JSON:
+{
+  "hypergraph": {
+    "<field_name>": {
+      "values": [
+        { "value": "<normalized_value>", "sources": ["file1.pdf", "file2.pdf"], "count": 2 }
+      ],
+      "consensus": "<majority_value>",
+      "confidence": 0.95,
+      "has_conflict": true|false
+    }
+  },
+  "conflicts": [
+    {
+      "field": "<field_name>",
+      "consensus_value": "<majority_value>",
+      "consensus_sources": ["file1.pdf", "file2.pdf"],
+      "outlier_value": "<different_value>",
+      "outlier_sources": ["file3.pdf"],
+      "likely_reason": "<optional explanation>"
+    }
+  ],
+  "summary": {
+    "total_fields_analyzed": 8,
+    "fields_with_conflicts": 2,
+    "confidence_score": 0.85
+  }
+}
+
+IMPORTANT:
+- Return ONLY the JSON object, no markdown, no explanation
+- Only include fields that have actual data in the index
+- For provider-specific fields, use format "charges:<provider_name>"
+- If a field appears in only one document, confidence is lower but no conflict`;
+
 // Helper to get the right hypergraph prompt based on practice area
 function getHypergraphPrompt(practiceArea?: string): string {
-  if (practiceArea === PRACTICE_AREAS.WC) {
-    return hypergraphSystemPromptWC;
-  }
-  return hypergraphSystemPromptPI;
+  if (practiceArea === PRACTICE_AREAS.WC) return hypergraphSystemPromptWC;
+  if (practiceArea === PRACTICE_AREAS.PI) return hypergraphSystemPromptPI;
+  return hypergraphSystemPromptEC;
 }
 
 // Generate hypergraph from document index
