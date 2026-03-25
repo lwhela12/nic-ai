@@ -162,9 +162,10 @@ Return JSON:
 
 ## Rules
 - Each file listing includes a summary (after the dash). Use these summaries to judge whether a document is relevant.
-- Select only documents likely to contain the answer — typically 2-8 documents.
+- Select all documents that are likely relevant — there is no hard cap. For narrow factual lookups, 2-4 documents may suffice. For comprehensive overviews, history, or multi-topic analysis, select as many as needed (10-20+ is fine).
 - If the folder summaries already contain enough information to answer the question, set "requires_targeted_extraction" to false and return an empty documents_to_read list. The answer stage can use the summaries directly.
 - Prioritize documents whose summaries indicate relevance to the question.
+- For historical questions (timeline, sequence of events, decision history), include ALL relevant documents — missing even one can cause incorrect sequencing.
 - For questions about "most recent", "latest", or "newest" documents, prioritize the files with the most recent dates.`;
 }
 
@@ -196,10 +197,11 @@ Respond ONLY with the highly condensed text summary — no JSON wrapper, no prea
 ## Rules
 - MERGE new findings into existing memory — never discard previous findings.
 - Condense naturally: combine related facts, remove redundancy, keep specific numbers/dates/names.
-- Always cite the source document for each fact: [filename.pdf].
+- Only cite documents you are reading in this batch as [filename.pdf]. If a document references another document that isn't being read (e.g., "requested forms," "see attached report"), note the reference but mark it as [referenced, not in file] — do not cite it as if it exists in the case.
 - If contradictory facts appear, include both with their sources.
-- Organize by topic (injuries, treatment, charges, dates, parties, etc.) not by document.
-- The output replaces the previous memory entirely — include everything important.`;
+- Organize by topic (health, finances, legal, dates, parties, etc.) not by document.
+- The output replaces the previous memory entirely — include everything important.
+- Prioritize facts related to contested or uncertain issues when they are apparent from the question.`;
 }
 
 export function buildExtractorUserPrompt(
